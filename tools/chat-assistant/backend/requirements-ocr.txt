@@ -1,0 +1,7 @@
+# Optional local OCR stack for scanned PDF import.
+# Install only on machines that run OCR_ENABLED=true.
+pymupdf>=1.24.0
+Pillow>=10.0.0
+numpy>=1.24,<2.0
+paddlepaddle>=2.6,<3.0
+paddleocr>=2.7,<3.0

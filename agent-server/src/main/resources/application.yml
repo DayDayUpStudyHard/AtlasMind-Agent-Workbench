@@ -1,0 +1,69 @@
+# ============================================
+# AtlasMind Agent Workbench common config
+# Environment-specific config lives in application-dev.yml / application-prod.yml.
+# ============================================
+
+server:
+  port: 18080
+
+spring:
+  profiles:
+    active: dev
+
+  servlet:
+    multipart:
+      max-file-size: ${KB_MAX_FILE_SIZE:300MB}
+      max-request-size: ${KB_MAX_REQUEST_SIZE:320MB}
+
+mybatis-plus:
+  mapper-locations: classpath*:mapper/*.xml
+  type-aliases-package: com.atlasmind.entity
+  configuration:
+    map-underscore-to-camel-case: true
+    log-impl: org.apache.ibatis.logging.stdout.StdOutImpl
+  global-config:
+    db-config:
+      id-type: auto
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+sa-token:
+  token-name: atlasmind-token
+  timeout: 604800
+  active-timeout: -1
+  is-concurrent: true
+  is-share: true
+  token-style: tik
+  is-log: false
+
+knife4j:
+  enable: true
+  setting:
+    language: zh_cn
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+  endpoint:
+    health:
+      show-details: always
+
+atlasmind:
+  search:
+    type: ${SEARCH_TYPE:mysql}
+  chat-assistant:
+    url: ${CHAT_ASSISTANT_URL:http://localhost:18088}
+    token: ${CHAT_ASSISTANT_TOKEN:}
+    timeout-seconds: ${CHAT_ASSISTANT_TIMEOUT_SECONDS:12}
+  embedding:
+    api-key: ${EMBEDDING_API_KEY:}
+    base-url: ${EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}
+    model: ${EMBEDDING_MODEL:Qwen/Qwen3-Embedding-4B}
+    dim: ${EMBEDDING_DIM:2560}

@@ -1,0 +1,13 @@
+**/target/
+**/.git/
+**/.gitignore
+**/.idea/
+**/*.iml
+**/.vscode/
+**/node_modules/
+**/dist/
+**/.mvn/wrapper/maven-wrapper.jar
+**/*.md
+**/.env
+**/docker-compose*.yml
+**/Dockerfile*

@@ -1,0 +1,39 @@
+# ============================================
+# Production config. Sensitive values should be injected by environment variables.
+# ============================================
+
+spring:
+  datasource:
+    url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DB:atlasmind_agent}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: ${MYSQL_USER:root}
+    password: ${MYSQL_PASSWORD:123456}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      database: 0
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+
+  elasticsearch:
+    uris: ${ES_URIS:http://elasticsearch:9200}
+
+atlasmind:
+  upload-path: ${UPLOAD_PATH:upload/}
+  search:
+    type: ${SEARCH_TYPE:elasticsearch}
+  storage:
+    type: ${STORAGE_TYPE:local}
+    s3:
+      endpoint: ${S3_ENDPOINT:}
+      region: ${S3_REGION:auto}
+      access-key: ${S3_ACCESS_KEY:}
+      secret-key: ${S3_SECRET_KEY:}
+      bucket: ${S3_BUCKET:}
+      public-url: ${S3_PUBLIC_URL:}

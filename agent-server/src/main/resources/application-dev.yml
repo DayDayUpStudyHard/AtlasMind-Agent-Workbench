@@ -1,0 +1,41 @@
+# ============================================
+# 开发环境配置
+# 使用方式: mvn spring-boot:run -Dspring.profiles.active=dev
+# ============================================
+spring:
+  datasource:
+    url: jdbc:mysql://localhost:3306/atlasmind_agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
+    username: root
+    password: 123456
+    driver-class-name: com.mysql.cj.jdbc.Driver
+
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchRestClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.elasticsearch.ElasticsearchClientAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.elasticsearch.ElasticsearchDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.elasticsearch.ElasticsearchRepositoriesAutoConfiguration
+
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      password:
+      database: 0
+      lettuce:
+        pool:
+          max-active: 8
+          max-idle: 8
+          min-idle: 0
+
+atlasmind:
+  upload-path: upload/
+  storage:
+    type: local
+    s3:
+      endpoint: https://your-account.r2.cloudflarestorage.com
+      region: auto
+      access-key: your-access-key
+      secret-key: your-secret-key
+      bucket: atlasmind-agent-assets
+      public-url:

@@ -1,0 +1,23 @@
+# Build knowledge portal
+FROM node:20-alpine AS front-build
+WORKDIR /app
+COPY agent-front/package*.json ./
+RUN npm ci --registry=https://registry.npmmirror.com
+COPY agent-front/ ./
+RUN npm run build
+
+# Build admin console
+FROM node:20-alpine AS admin-build
+WORKDIR /app
+COPY agent-admin/package*.json ./
+RUN npm ci --registry=https://registry.npmmirror.com
+COPY agent-admin/ ./
+RUN npm run build
+
+# Runtime nginx
+FROM nginx:alpine
+COPY --from=front-build /app/dist /usr/share/nginx/html/portal
+COPY --from=admin-build /app/dist /usr/share/nginx/html/admin
+COPY nginx/nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
+HEALTHCHECK --interval=30s --timeout=3s CMD wget -q --spider http://localhost/ || exit 1

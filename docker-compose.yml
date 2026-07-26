@@ -1,0 +1,187 @@
+version: "3.9"
+
+# ============================================
+# AtlasMind Agent Workbench 容器化部署
+# 启动: docker-compose up -d
+# 构建: docker-compose up -d --build
+# ============================================
+
+services:
+  # ==================== MySQL ====================
+  mysql:
+    image: mysql:8.0
+    container_name: atlasmind-agent-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      MYSQL_DATABASE: atlasmind_agent
+      MYSQL_CHARSET: utf8mb4
+      MYSQL_COLLATION: utf8mb4_unicode_ci
+      TZ: Asia/Shanghai
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./agent-server/sql/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-123456}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== Redis ====================
+  redis:
+    image: redis:7-alpine
+    container_name: atlasmind-agent-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 128mb
+      --maxmemory-policy allkeys-lru
+      ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== 后端服务 ====================
+  agent-server:
+    build:
+      context: ./agent-server
+      dockerfile: Dockerfile
+    container_name: atlasmind-agent-server
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      MYSQL_HOST: mysql
+      MYSQL_PORT: 3306
+      MYSQL_DB: atlasmind_agent
+      MYSQL_USER: root
+      MYSQL_PASSWORD: ${MYSQL_ROOT_PASSWORD:-123456}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      ES_URIS: http://elasticsearch:9200
+      SEARCH_TYPE: elasticsearch
+      UPLOAD_PATH: /app/upload/
+      STORAGE_TYPE: local
+      TZ: Asia/Shanghai
+    ports:
+      - "${SERVER_PORT:-18080}:18080"
+    volumes:
+      - upload_data:/app/upload
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== Elasticsearch ====================
+  elasticsearch:
+    image: elasticsearch:8.11.0
+    container_name: atlasmind-agent-es
+    restart: unless-stopped
+    environment:
+      discovery.type: single-node
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+      xpack.security.enabled: "false"
+      xpack.security.enrollment.enabled: "false"
+    ports:
+      - "${ES_PORT:-9200}:9200"
+      - "${ES_TRANSPORT_PORT:-9300}:9300"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== Prometheus ====================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: atlasmind-agent-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=15d'
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== Grafana ====================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: atlasmind-agent-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./prometheus/grafana-datasource.yml:/etc/grafana/provisioning/datasources/datasource.yml:ro
+      - ./prometheus/grafana-dashboard.yml:/etc/grafana/provisioning/dashboards/dashboard.yml:ro
+      - ./prometheus/grafana-dashboard.json:/etc/grafana/dashboards/atlasmind-agent-workbench.json:ro
+    depends_on:
+      - prometheus
+    networks:
+      - atlasmind-agent-net
+
+  # ==================== Nginx（前端 + 反向代理）====================
+  nginx:
+    build:
+      context: .
+      dockerfile: Dockerfile.nginx
+    container_name: atlasmind-agent-nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    depends_on:
+      - agent-server
+    networks:
+      - atlasmind-agent-net
+
+# ==================== 持久化卷 ====================
+volumes:
+  mysql_data:
+    name: atlasmind_agent_mysql_data
+  redis_data:
+    name: atlasmind_agent_redis_data
+  upload_data:
+    name: atlasmind_agent_upload_data
+  es_data:
+    name: atlasmind_agent_es_data
+  prometheus_data:
+    name: atlasmind_agent_prometheus_data
+  grafana_data:
+    name: atlasmind_agent_grafana_data
+
+# ==================== 网络 ====================
+networks:
+  atlasmind-agent-net:
+    name: atlasmind-agent-net
+    driver: bridge

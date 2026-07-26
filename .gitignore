@@ -1,0 +1,56 @@
+# Maven
+target/
+*.jar
+*.war
+!agent-server/.mvn/wrapper/maven-wrapper.jar
+
+# Node
+node_modules/
+dist/
+.pnpm-store/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+.env.local
+
+# Logs
+*.log
+
+# Python virtual environments
+.venv/
+.venv-*/
+venv/
+.mineru-output/
+
+# Files kept only in the local fork source; do not publish in Agent Workbench
+agent-server/sql/blog2026.sql
+tools/travel-assistant/
+tools/crypto-toolbox/
+docs/knowledge-base-rag-plan.md
+agent-front/.mvn/
+
+# Upload
+agent-server/upload/
+
+# Docker
+agent-server/target/
+
+# Environment (keep examples)
+.env
+.env.local
+.env.*.local
+
+# Claude
+.claude/
