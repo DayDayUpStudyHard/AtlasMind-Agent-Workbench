@@ -33,26 +33,7 @@ export function updatePassword(data) { return api.put('/api/auth/password', data
 export function getRuntimeSettings() { return api.get('/api/admin/settings/runtime') }
 export function updateRuntimeSettings(data) { return api.put('/api/admin/settings/runtime', data) }
 
-export function getAdminArticles(params) { return api.get('/api/admin/articles', { params }) }
 export function getDashboardOverview() { return api.get('/api/admin/dashboard/overview') }
-export function createArticle(data) { return api.post('/api/admin/articles', data) }
-export function updateArticle(id, data) { return api.put(`/api/admin/articles/${id}`, data) }
-export function getAdminArticleDetail(id) { return api.get(`/api/admin/articles/${id}`) }
-export function deleteArticle(id) { return api.delete(`/api/admin/articles/${id}`) }
-
-export function getCategories() { return api.get('/api/categories') }
-export function createCategory(data) { return api.post('/api/admin/categories', data) }
-export function updateCategory(id, data) { return api.put(`/api/admin/categories/${id}`, data) }
-export function deleteCategory(id) { return api.delete(`/api/admin/categories/${id}`) }
-
-export function getTags() { return api.get('/api/tags') }
-export function createTag(data) { return api.post('/api/admin/tags', data) }
-export function updateTag(id, data) { return api.put(`/api/admin/tags/${id}`, data) }
-export function deleteTag(id) { return api.delete(`/api/admin/tags/${id}`) }
-
-export function getAdminComments(params) { return api.get('/api/admin/comments', { params }) }
-export function updateCommentStatus(id, data) { return api.put(`/api/admin/comments/${id}/status`, data) }
-export function deleteComment(id) { return api.delete(`/api/admin/comments/${id}`) }
 
 export function uploadFile(file) {
   const formData = new FormData()
@@ -60,15 +41,24 @@ export function uploadFile(file) {
   return api.post('/api/upload', formData, { headers: { 'Content-Type': 'multipart/form-data' } })
 }
 
-export function getAdminMoments(params) { return api.get('/api/admin/moments', { params }) }
-export function createMoment(data) { return api.post('/api/admin/moments', data) }
-export function updateMoment(id, data) { return api.put(`/api/admin/moments/${id}`, data) }
-export function deleteMoment(id) { return api.delete(`/api/admin/moments/${id}`) }
-
-export function getAbout() { return api.get('/api/admin/about') }
-export function updateAbout(data) { return api.put('/api/admin/about', data) }
-
 export function getOperationLogs(params) { return api.get('/api/admin/logs', { params }) }
+
+export function getProjects() { return api.get('/api/projects') }
+export function getProject(id) { return api.get(`/api/projects/${id}`) }
+export function createProject(data) { return api.post('/api/projects', data) }
+export function syncProjectEvidence(projectId) { return api.post(`/api/projects/${projectId}/sync`) }
+export function getProjectEvidence(projectId, params = {}) {
+  return api.get(`/api/projects/${projectId}/evidence`, { params })
+}
+export function getProjectSyncJobs(projectId) { return api.get(`/api/projects/${projectId}/sync-jobs`) }
+export function startProjectRun(projectId, data = {}) { return api.post(`/api/projects/${projectId}/runs`, data) }
+export function getProjectRun(runId) { return api.get(`/api/projects/runs/${runId}`) }
+export function approveProjectAction(runId, actionId, data = {}) {
+  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/approval`, data)
+}
+export function executeProjectAction(runId, actionId) {
+  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/execute`)
+}
 
 export function getKbSpaces() { return api.get('/api/admin/kb/spaces') }
 export function createKbSpace(data) { return api.post('/api/admin/kb/spaces', data) }

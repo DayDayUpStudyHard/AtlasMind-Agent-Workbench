@@ -8,16 +8,13 @@ const routes = [
     component: AdminLayout,
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
-      { path: 'articles', name: 'ArticleList', component: () => import('../views/ArticleList.vue') },
-      { path: 'articles/create', name: 'ArticleCreate', component: () => import('../views/ArticleEdit.vue') },
-      { path: 'articles/:id/edit', name: 'ArticleEdit', component: () => import('../views/ArticleEdit.vue') },
-      { path: 'categories', name: 'Categories', component: () => import('../views/CategoryManage.vue') },
-      { path: 'comments', name: 'Comments', component: () => import('../views/CommentManage.vue') },
-      { path: 'tags', name: 'Tags', component: () => import('../views/TagManage.vue') },
-      { path: 'moments', name: 'Moments', component: () => import('../views/MomentManage.vue') },
+      { path: 'projects', name: 'Projects', component: () => import('../views/ProjectManage.vue') },
       { path: 'knowledge', name: 'KnowledgeBase', component: () => import('../views/KnowledgeBase.vue') },
+      { path: 'evidence-sync', name: 'EvidenceSync', component: () => import('../views/EvidenceSync.vue') },
+      { path: 'agent-runs', name: 'AgentRuns', component: () => import('../views/AgentRuns.vue') },
+      { path: 'reports', name: 'ReportsApproval', component: () => import('../views/ReportsApproval.vue') },
       { path: 'ai-observability', name: 'AiObservability', component: () => import('../views/AiObservability.vue') },
-      { path: 'about-page', name: 'AboutEdit', component: () => import('../views/AboutEdit.vue') },
+      { path: 'connectors', name: 'ConnectorSettings', component: () => import('../views/ConnectorSettings.vue') },
       { path: 'logs', name: 'Logs', component: () => import('../views/LogView.vue') },
       { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue') }
     ]
@@ -25,7 +22,6 @@ const routes = [
 ]
 
 const router = createRouter({
-  // 使用 Vite 的 BASE_URL，开发时为 /，生产构建时为 /admin/
   history: createWebHistory(import.meta.env.BASE_URL),
   routes
 })

@@ -461,8 +461,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         try {
             Map<String, Object> result = aiGateway.testRetrieval(Map.of(
                     "message", "project health analysis " + text(project, "name") + " " + text(project, "description"),
-                    "topK", 5,
-                    "includeArticles", true
+                    "topK", 5
             ));
             Object hits = result.get("hits");
             if (hits instanceof List<?> list) {

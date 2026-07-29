@@ -1,69 +1,79 @@
 package com.atlasmind.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.atlasmind.entity.Article;
-import com.atlasmind.entity.Comment;
 import com.atlasmind.entity.KbDocument;
 import com.atlasmind.entity.KbIngestJob;
-import com.atlasmind.entity.Moment;
-import com.atlasmind.mapper.ArticleMapper;
-import com.atlasmind.mapper.CategoryMapper;
-import com.atlasmind.mapper.CommentMapper;
 import com.atlasmind.mapper.KbDocumentMapper;
 import com.atlasmind.mapper.KbIngestJobMapper;
-import com.atlasmind.mapper.MomentMapper;
 import com.atlasmind.service.DashboardService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * 统一计算管理端概览数据，避免前端并行拼装多个统计接口。
+ * Aggregates the management-console overview around Agent operations.
  */
 @Service
 @RequiredArgsConstructor
 public class DashboardServiceImpl implements DashboardService {
 
-    private final ArticleMapper articleMapper;
-    private final CategoryMapper categoryMapper;
-    private final CommentMapper commentMapper;
-    private final MomentMapper momentMapper;
     private final KbDocumentMapper documentMapper;
     private final KbIngestJobMapper jobMapper;
+    private final JdbcTemplate jdbcTemplate;
 
     @Override
     public Map<String, Object> overview() {
         Map<String, Object> result = new LinkedHashMap<>();
-        result.put("articleCount", articleMapper.selectCount(null));
-        result.put("categoryCount", categoryMapper.selectCount(null));
-        result.put("commentCount", commentMapper.selectCount(null));
-        result.put("momentCount", momentMapper.selectCount(null));
+        result.put("projectCount", count("SELECT COUNT(*) FROM agent_project WHERE deleted=0"));
         result.put("knowledgeDocumentCount", documentMapper.selectCount(
                 new LambdaQueryWrapper<KbDocument>().eq(KbDocument::getDeleted, 0)
         ));
-        result.put("failedJobCount", jobMapper.selectCount(
+        result.put("evidenceCount", count("SELECT COUNT(*) FROM project_evidence"));
+        result.put("activeRuns", count("""
+                SELECT COUNT(*) FROM agent_run
+                WHERE status IN ('CREATED','CONTEXT_BUILDING','ANALYZING','VERIFYING','PLANNING')
+                """));
+        result.put("pendingApprovals", count("SELECT COUNT(*) FROM agent_action WHERE status='PENDING_APPROVAL'"));
+        result.put("failedIngestJobCount", jobMapper.selectCount(
                 new LambdaQueryWrapper<KbIngestJob>().eq(KbIngestJob::getStatus, "FAILED")
         ));
-
-        Page<Article> articles = articleMapper.selectPage(
-                new Page<>(1, 5),
-                new LambdaQueryWrapper<Article>().orderByDesc(Article::getCreateTime)
-        );
-        Page<Comment> comments = commentMapper.selectPage(
-                new Page<>(1, 5),
-                new LambdaQueryWrapper<Comment>().orderByDesc(Comment::getCreateTime)
-        );
-        result.put("recentArticles", articles.getRecords());
-        result.put("recentComments", comments.getRecords());
-
-        Page<Moment> moments = momentMapper.selectPage(
-                new Page<>(1, 3),
-                new LambdaQueryWrapper<Moment>().orderByDesc(Moment::getCreateTime)
-        );
-        result.put("recentMoments", moments.getRecords());
+        result.put("failedSyncJobCount", count("SELECT COUNT(*) FROM project_sync_job WHERE status='FAILED'"));
+        result.put("recentRuns", jdbcTemplate.queryForList("""
+                SELECT r.id, r.project_id AS projectId, p.name AS projectName, r.status, r.progress,
+                       r.current_step AS currentStep, r.question, r.create_time AS createTime
+                FROM agent_run r
+                JOIN agent_project p ON p.id = r.project_id
+                WHERE p.deleted=0
+                ORDER BY r.id DESC
+                LIMIT 6
+                """));
+        result.put("recentSyncJobs", jdbcTemplate.queryForList("""
+                SELECT j.id, j.project_id AS projectId, p.name AS projectName, j.status, j.progress,
+                       j.message, j.error_message AS errorMessage, j.create_time AS createTime
+                FROM project_sync_job j
+                JOIN agent_project p ON p.id = j.project_id
+                WHERE p.deleted=0
+                ORDER BY j.id DESC
+                LIMIT 6
+                """));
+        result.put("recentReports", jdbcTemplate.queryForList("""
+                SELECT rp.id, rp.project_id AS projectId, p.name AS projectName, rp.title,
+                       rp.health_status AS healthStatus, rp.health_score AS healthScore,
+                       rp.status, rp.create_time AS createTime
+                FROM agent_report rp
+                JOIN agent_project p ON p.id = rp.project_id
+                WHERE p.deleted=0
+                ORDER BY rp.id DESC
+                LIMIT 6
+                """));
         return result;
+    }
+
+    private int count(String sql) {
+        Number value = jdbcTemplate.queryForObject(sql, Integer.class);
+        return value == null ? 0 : value.intValue();
     }
 }

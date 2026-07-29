@@ -292,11 +292,7 @@ body {
   background: var(--atlas-surface-soft) !important;
 }
 
-/* Article detail */
-[data-theme="dark"] .article-title { color: #e2e8f0 !important; }
 [data-theme="dark"] .meta-sep { color: #475569 !important; }
-[data-theme="dark"] .article-footer { border-top-color: rgba(255,255,255,0.06) !important; }
-[data-theme="dark"] .tag-item { background: rgba(64,158,255,0.1) !important; border-color: rgba(64,158,255,0.15) !important; }
 [data-theme="dark"] .nav-link {
   background: rgba(30, 41, 59, 0.6) !important;
   border-color: rgba(255,255,255,0.06) !important;

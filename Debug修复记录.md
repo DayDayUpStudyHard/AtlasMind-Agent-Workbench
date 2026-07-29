@@ -4,6 +4,30 @@
 
 ---
 
+## 企业 Agent Workbench 去博客化清理
+
+**日期**：2026-07-30
+
+### 实现内容
+
+- 删除后端博客/CMS 领域：文章、分类、标签、评论/留言、说说、关于页面的 Controller、Service、Mapper、Entity、DTO 和文章 ES Repository。
+- 管理端从 Content Studio 调整为 Agent Operations，菜单改为 Agent 控制台、项目管理、知识来源、证据同步、Agent 运行记录、报告与审批、可观测性、连接器配置、系统日志和系统设置。
+- 新增管理端项目管理、证据同步、Agent Runs、报告与审批、连接器配置页面；GitHub 已接入，本地项目、Jira/禅道、CI/CD 保留连接器接口位。
+- 前台删除文章详情、分类、归档、说说、留言、关于等博客路由与页面，仅保留项目总览、项目工作台和知识来源。
+- `agent-server/sql/init.sql` 重写为企业 Agent 初始化脚本，仅保留用户、设置、操作日志、知识库、RAG Trace、项目、证据、Run、报告和审批表。
+- 新增 `agent-server/sql/drop_legacy_blog_tables.sql`，并已在本地 `atlasmind_agent` 执行，旧博客表已删除。
+- Agent Run 知识库 fallback 不再传 `includeArticles`，避免继续把文章作为上下文来源。
+
+### 验证
+
+- `agent-server .\mvnw.cmd -q -DskipTests compile`：通过。
+- `agent-admin npm run build`：通过，仅保留 Vite 大 chunk 警告。
+- `agent-front npm run build`：通过，仅保留 Vite 大 chunk 警告。
+- 管理端 `http://localhost:15173/` 浏览器检查通过：新 Agent 菜单可见，旧博客菜单未出现。
+- MySQL 查询确认 `t_article`、`t_category`、`t_tag`、`t_comment`、`t_moment`、`t_about` 等旧表已不存在。
+
+---
+
 ## GitHub 只读证据同步与报告 Citation 落地
 
 **日期**：2026-07-29

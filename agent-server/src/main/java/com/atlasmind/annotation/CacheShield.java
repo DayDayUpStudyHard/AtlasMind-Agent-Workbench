@@ -14,8 +14,8 @@ import java.util.concurrent.TimeUnit;
  * 用法：标注在 Service 的读方法上（替代 {@code @Cacheable}），配合 {@link CacheShieldEvict} 做缓存清除。
  *
  * <pre>{@code
- * @CacheShield(value = "about", key = "'about'", ttl = 30)
- * public About get() { ... }
+ * @CacheShield(value = "settings", key = "'runtime'", ttl = 30)
+ * public Map<String, Object> runtimeConfig() { ... }
  * }</pre>
  */
 @Target(ElementType.METHOD)

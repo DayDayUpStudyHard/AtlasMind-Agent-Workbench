@@ -1,16 +1,16 @@
 <template>
   <div class="dashboard">
-    <div class="page-hero">
+    <section class="page-hero">
       <div>
-        <span class="eyebrow">Overview</span>
-        <h2>内容工作台</h2>
-        <p>查看发布状态、评论反馈和近期内容，让知识运营有一个清晰入口。</p>
+        <span class="eyebrow">Agent Operations</span>
+        <h2>研发项目 Agent 控制台</h2>
+        <p>集中查看项目、证据、Agent Run、同步任务和审批状态，让后台从内容管理变成可追踪的企业 Agent 运维面板。</p>
       </div>
       <div class="hero-actions">
-        <el-button @click="$router.push('/articles')">管理文章</el-button>
-        <el-button type="primary" @click="$router.push('/articles/create')">新建文章</el-button>
+        <el-button @click="$router.push('/projects')">项目管理</el-button>
+        <el-button type="primary" @click="$router.push('/agent-runs')">查看 Run</el-button>
       </div>
-    </div>
+    </section>
 
     <el-row :gutter="16" class="stat-row">
       <el-col :xs="24" :sm="12" :lg="6" v-for="item in statItems" :key="item.label">
@@ -31,25 +31,25 @@
           </div>
         </div>
         <div class="todo-list">
-          <router-link to="/comments" class="todo-item">
+          <router-link to="/reports" class="todo-item">
             <span class="todo-dot warning"></span>
             <div>
-              <strong>{{ stats.commentCount }}</strong>
-              <p>条评论需要持续关注审核与回复。</p>
+              <strong>{{ stats.pendingApprovals }}</strong>
+              <p>个 Agent 动作等待审批，避免自动化越过人工确认边界。</p>
             </div>
           </router-link>
-          <router-link to="/articles" class="todo-item">
+          <router-link to="/evidence-sync" class="todo-item">
+            <span class="todo-dot danger"></span>
+            <div>
+              <strong>{{ totalFailedJobs }}</strong>
+              <p>个导入或同步任务失败，需要补证据来源或重试。</p>
+            </div>
+          </router-link>
+          <router-link to="/agent-runs" class="todo-item">
             <span class="todo-dot primary"></span>
             <div>
-              <strong>{{ stats.articleCount }}</strong>
-              <p>篇文章构成当前公开内容池。</p>
-            </div>
-          </router-link>
-          <router-link to="/moments" class="todo-item">
-            <span class="todo-dot success"></span>
-            <div>
-              <strong>{{ stats.momentCount }}</strong>
-              <p>条说说可用于补充日常动态。</p>
+              <strong>{{ stats.activeRuns }}</strong>
+              <p>个 Agent Run 正在构建上下文、检索证据或生成计划。</p>
             </div>
           </router-link>
         </div>
@@ -58,47 +58,45 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <span class="eyebrow">Recent</span>
-            <h3>最近文章</h3>
+            <span class="eyebrow">Run Trace</span>
+            <h3>最近 Agent Run</h3>
           </div>
-          <router-link to="/articles">全部</router-link>
+          <router-link to="/agent-runs">全部</router-link>
         </div>
-        <div class="article-list" v-loading="loading">
+        <div class="record-list" v-loading="loading">
           <router-link
-            v-for="article in recentArticles"
-            :key="article.id"
-            :to="`/articles/${article.id}/edit`"
-            class="article-row"
+            v-for="run in recentRuns"
+            :key="run.id"
+            to="/agent-runs"
+            class="record-row"
           >
             <div>
-              <strong>{{ article.title }}</strong>
-              <span>{{ article.createTime ? article.createTime.substring(0, 16) : '-' }}</span>
+              <strong>{{ run.projectName || `Project #${run.projectId}` }}</strong>
+              <span>{{ run.currentStep || run.question || 'Agent Run' }}</span>
             </div>
-            <em :class="article.status === 1 ? 'published' : 'draft'">
-              {{ article.status === 1 ? '已发布' : '草稿' }}
-            </em>
+            <em>{{ run.status }}</em>
           </router-link>
-          <el-empty v-if="!loading && recentArticles.length === 0" description="暂无文章" :image-size="72" />
+          <el-empty v-if="!loading && recentRuns.length === 0" description="暂无 Agent Run" :image-size="72" />
         </div>
       </section>
 
-      <section class="panel comments-panel">
+      <section class="panel">
         <div class="panel-head">
           <div>
-            <span class="eyebrow">Feedback</span>
-            <h3>最新评论</h3>
+            <span class="eyebrow">Evidence</span>
+            <h3>最近同步任务</h3>
           </div>
-          <router-link to="/comments">处理</router-link>
+          <router-link to="/evidence-sync">处理</router-link>
         </div>
-        <div class="comment-list" v-loading="loading">
-          <div v-for="comment in recentComments" :key="comment.id" class="comment-row">
-            <div class="comment-avatar">{{ (comment.nickname || '访').charAt(0) }}</div>
-            <div class="comment-body">
-              <strong>{{ comment.nickname || '访客' }}</strong>
-              <p>{{ comment.content || '暂无内容' }}</p>
+        <div class="record-list" v-loading="loading">
+          <div v-for="job in recentSyncJobs" :key="job.id" class="record-row">
+            <div>
+              <strong>{{ job.projectName || `Project #${job.projectId}` }}</strong>
+              <span>{{ job.message || job.errorMessage || 'Evidence sync job' }}</span>
             </div>
+            <em>{{ job.status }}</em>
           </div>
-          <el-empty v-if="!loading && recentComments.length === 0" description="暂无评论" :image-size="72" />
+          <el-empty v-if="!loading && recentSyncJobs.length === 0" description="暂无同步任务" :image-size="72" />
         </div>
       </section>
     </div>
@@ -111,29 +109,26 @@ import { getDashboardOverview } from '../api/index.js'
 
 const loading = ref(false)
 const stats = ref({
-  articleCount: 0,
-  categoryCount: 0,
-  commentCount: 0,
-  momentCount: 0,
+  projectCount: 0,
   knowledgeDocumentCount: 0,
-  failedJobCount: 0
+  evidenceCount: 0,
+  activeRuns: 0,
+  pendingApprovals: 0,
+  failedIngestJobCount: 0,
+  failedSyncJobCount: 0
 })
-const recentArticles = ref([])
-const recentComments = ref([])
+const recentRuns = ref([])
+const recentSyncJobs = ref([])
 
-const statItems = computed(() => {
-  const items = [
-  { label: '文章', value: stats.value.articleCount, hint: '公开内容资产' },
-  { label: '分类', value: stats.value.categoryCount, hint: '知识结构入口' },
-  { label: '评论', value: stats.value.commentCount, hint: '读者互动反馈' },
-  { label: '说说', value: stats.value.momentCount, hint: '轻量动态记录' }
-  ]
-  return [
-    ...items,
-    { label: '知识文档', value: stats.value.knowledgeDocumentCount, hint: '可用于 RAG 的资料' },
-    { label: '失败任务', value: stats.value.failedJobCount, hint: '需要重试的导入任务' }
-  ]
-})
+const totalFailedJobs = computed(() => stats.value.failedIngestJobCount + stats.value.failedSyncJobCount)
+const statItems = computed(() => [
+  { label: '项目', value: stats.value.projectCount, hint: '纳入 Agent 管理的研发项目' },
+  { label: '知识文档', value: stats.value.knowledgeDocumentCount, hint: '可被 RAG 检索的企业资料' },
+  { label: '证据', value: stats.value.evidenceCount, hint: '来自仓库、文档和连接器的事实' },
+  { label: '运行中 Run', value: stats.value.activeRuns, hint: '正在执行的 Agent 分析流程' },
+  { label: '待审批', value: stats.value.pendingApprovals, hint: '需要人工确认的自动化动作' },
+  { label: '失败任务', value: totalFailedJobs.value, hint: '导入或同步失败待处理' }
+])
 
 onMounted(fetchDashboard)
 
@@ -142,22 +137,21 @@ async function fetchDashboard() {
   try {
     const response = await getDashboardOverview()
     const data = response.data.data || {}
-
-    recentArticles.value = data.recentArticles || []
-    recentComments.value = data.recentComments || []
     stats.value = {
-      articleCount: Number(data.articleCount) || 0,
-      categoryCount: Number(data.categoryCount) || 0,
-      commentCount: Number(data.commentCount) || 0,
-      momentCount: Number(data.momentCount) || 0,
+      projectCount: Number(data.projectCount) || 0,
       knowledgeDocumentCount: Number(data.knowledgeDocumentCount) || 0,
-      failedJobCount: Number(data.failedJobCount) || 0
+      evidenceCount: Number(data.evidenceCount) || 0,
+      activeRuns: Number(data.activeRuns) || 0,
+      pendingApprovals: Number(data.pendingApprovals) || 0,
+      failedIngestJobCount: Number(data.failedIngestJobCount) || 0,
+      failedSyncJobCount: Number(data.failedSyncJobCount) || 0
     }
+    recentRuns.value = data.recentRuns || []
+    recentSyncJobs.value = data.recentSyncJobs || []
   } finally {
     loading.value = false
   }
 }
-
 </script>
 
 <style scoped>
@@ -171,9 +165,8 @@ async function fetchDashboard() {
 .panel,
 .stat-card {
   background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+  border: 1px solid #dce4ee;
+  border-radius: 4px;
 }
 
 .page-hero {
@@ -193,15 +186,17 @@ async function fetchDashboard() {
 }
 
 .page-hero h2 {
-  color: #111827;
+  color: #1f2d3d;
   font-size: 26px;
   line-height: 1.2;
   margin: 6px 0 8px;
 }
 
 .page-hero p {
-  color: #64748b;
+  max-width: 720px;
+  color: #607184;
   margin: 0;
+  line-height: 1.7;
 }
 
 .hero-actions {
@@ -216,28 +211,29 @@ async function fetchDashboard() {
 
 .stat-card {
   padding: 18px;
-  min-height: 132px;
+  min-height: 124px;
   display: flex;
   flex-direction: column;
   justify-content: space-between;
 }
 
 .stat-label {
-  color: #64748b;
+  color: #607184;
   font-size: 13px;
   font-weight: 700;
 }
 
 .stat-card strong {
-  color: #111827;
-  font-size: 34px;
+  color: #1f2d3d;
+  font-size: 32px;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
 
 .stat-hint {
-  color: #94a3b8;
+  color: #8b9aaa;
   font-size: 12px;
+  line-height: 1.5;
 }
 
 .dashboard-grid {
@@ -254,10 +250,6 @@ async function fetchDashboard() {
   grid-row: span 2;
 }
 
-.comments-panel {
-  grid-column: 2;
-}
-
 .panel-head {
   display: flex;
   justify-content: space-between;
@@ -267,13 +259,13 @@ async function fetchDashboard() {
 }
 
 .panel-head h3 {
-  color: #111827;
+  color: #1f2d3d;
   font-size: 18px;
   margin: 3px 0 0;
 }
 
 .panel-head a {
-  color: #64748b;
+  color: #607184;
   font-size: 13px;
   text-decoration: none;
 }
@@ -283,26 +275,28 @@ async function fetchDashboard() {
 }
 
 .todo-list,
-.article-list,
-.comment-list {
+.record-list {
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 
-.todo-item {
+.todo-item,
+.record-row {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
   gap: 12px;
   padding: 14px;
-  border: 1px solid #e5e7eb;
-  border-radius: 8px;
+  border: 1px solid #dce4ee;
+  border-radius: 4px;
   color: inherit;
   text-decoration: none;
-  transition: border-color 0.18s, background 0.18s;
 }
 
-.todo-item:hover {
-  border-color: #bfdbfe;
+.todo-item:hover,
+.record-row:hover {
+  border-color: #426fa6;
   background: #f8fafc;
 }
 
@@ -310,125 +304,47 @@ async function fetchDashboard() {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  margin-top: 7px;
+  margin-top: 8px;
   flex-shrink: 0;
 }
 
-.todo-dot.warning { background: #f59e0b; }
+.todo-dot.warning { background: #e6a23c; }
 .todo-dot.primary { background: #426fa6; }
-.todo-dot.success { background: #10b981; }
+.todo-dot.danger { background: #f56c6c; }
 
-.todo-item strong {
-  color: #111827;
-  font-size: 18px;
+.todo-item div,
+.record-row div {
+  min-width: 0;
 }
 
-.todo-item p {
-  color: #64748b;
+.todo-item strong,
+.record-row strong {
+  color: #1f2d3d;
+  display: block;
+  font-size: 16px;
+}
+
+.todo-item p,
+.record-row span {
+  color: #607184;
   font-size: 13px;
-  margin: 3px 0 0;
+  margin: 4px 0 0;
   line-height: 1.55;
 }
 
-.article-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  padding: 12px 0;
-  color: inherit;
-  text-decoration: none;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.article-row:last-child {
-  border-bottom: none;
-}
-
-.article-row strong {
-  color: #111827;
-  display: block;
-  font-size: 14px;
-  line-height: 1.45;
-}
-
-.article-row span {
-  color: #94a3b8;
-  display: block;
-  font-size: 12px;
-  margin-top: 4px;
-}
-
-.article-row em {
+.record-row em {
   flex-shrink: 0;
-  border-radius: 999px;
+  border-radius: 3px;
+  color: #426fa6;
+  background: #eef3f8;
   font-style: normal;
   font-size: 12px;
   padding: 3px 8px;
 }
 
-.article-row em.published {
-  color: #047857;
-  background: #ecfdf5;
-}
-
-.article-row em.draft {
-  color: #64748b;
-  background: #f1f5f9;
-}
-
-.comment-row {
-  display: flex;
-  gap: 10px;
-  padding: 12px 0;
-  border-bottom: 1px solid #f1f5f9;
-}
-
-.comment-row:last-child {
-  border-bottom: none;
-}
-
-.comment-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: #eef2ff;
-  color: #426fa6;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-
-.comment-body {
-  min-width: 0;
-}
-
-.comment-body strong {
-  display: block;
-  color: #111827;
-  font-size: 13px;
-}
-
-.comment-body p {
-  color: #64748b;
-  font-size: 13px;
-  line-height: 1.55;
-  margin: 3px 0 0;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
 @media (max-width: 1100px) {
   .dashboard-grid {
     grid-template-columns: 1fr;
-  }
-
-  .comments-panel {
-    grid-column: auto;
   }
 }
 

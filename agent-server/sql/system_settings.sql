@@ -1,5 +1,5 @@
--- AtlasMind runtime settings
--- Execute with: mysql -u root -p AtlasMind Agent Workbench < agent-server/sql/system_settings.sql
+-- AtlasMind runtime settings.
+-- Execute with: mysql -u root -p atlasmind_agent < agent-server/sql/system_settings.sql
 
 SET NAMES utf8mb4;
 
@@ -17,10 +17,11 @@ CREATE TABLE IF NOT EXISTS sys_setting (
 
 INSERT INTO sys_setting (setting_key, setting_value, value_type, description, editable)
 VALUES
-    ('ai.retrieval.top-k', '5', 'INTEGER', 'AI 默认检索数量', 1),
-    ('ai.retrieval.max-top-k', '10', 'INTEGER', 'AI 最大检索数量', 1),
-    ('ai.enabled', 'true', 'BOOLEAN', '是否启用用户端 AI', 1)
+    ('ai.retrieval.top-k', '5', 'INTEGER', 'Default AI retrieval topK', 1),
+    ('ai.retrieval.max-top-k', '10', 'INTEGER', 'Maximum AI retrieval topK', 1),
+    ('ai.enabled', 'true', 'BOOLEAN', 'Enable front-end AI assistant', 1)
 ON DUPLICATE KEY UPDATE
+    setting_value = VALUES(setting_value),
     description = VALUES(description),
     value_type = VALUES(value_type),
     editable = VALUES(editable);

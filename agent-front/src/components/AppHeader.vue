@@ -15,9 +15,6 @@
         <router-link to="/knowledge" class="nav-link">
           <span class="nav-label">知识来源</span>
         </router-link>
-        <router-link to="/archive" class="nav-link">
-          <span class="nav-label">历史资料</span>
-        </router-link>
       </nav>
       <div class="search-box" @submit.prevent="doSearch">
         <svg class="search-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>

@@ -1,5 +1,18 @@
 # AtlasMind Agent Workbench
 
+## 2026-07-30 update: blog domain removed
+
+AtlasMind has been cleaned up as an enterprise R&D Agent Workbench. The legacy blog/CMS domain is no longer part of the active product surface:
+
+- Removed article/category/tag/comment/moment/about backend APIs and their service/mapper/entity code.
+- Removed blog routes and pages from both `agent-admin` and `agent-front`.
+- Reframed the admin app as an Agent operations console: projects, knowledge sources, evidence sync, Agent runs, reports/approvals, observability, connectors, logs, and settings.
+- Rewrote `agent-server/sql/init.sql` so a fresh database initializes Agent, RAG, trace, project, evidence, report, approval, user, setting, and operation-log tables only.
+- Added `agent-server/sql/drop_legacy_blog_tables.sql` for existing local databases; it drops `t_article`, `t_category`, `t_tag`, `t_comment`, `t_moment`, `t_about`, and article relation tables.
+- Existing local legacy blog tables were dropped after confirmation that local data can be discarded.
+
+The product boundary is now: **single enterprise/R&D team internal deployment, first user = tech lead or engineering manager, first scenario = project health analysis and delivery planning Agent**.
+
 面向软件研发团队的项目理解、风险分析、交付规划与自动化执行 Agent 平台。
 
 > 当前产品方向：**研发项目智能交付 Agent**

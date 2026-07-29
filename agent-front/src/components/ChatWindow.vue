@@ -47,8 +47,8 @@
                   <div class="sources-label">📄 参考来源</div>
                   <div v-for="s in msg.sources" :key="sourceKey(s)" class="source-item">
                     <a
-                      v-if="s.sourceType === 'ARTICLE'"
-                      :href="`/article/${s.sourceId || s.id}`"
+                      v-if="s.sourceUrl"
+                      :href="s.sourceUrl"
                       target="_blank"
                       class="source-link"
                     >
@@ -57,7 +57,7 @@
                     <span v-else class="source-link">
                       #{{ s.rank || '-' }} {{ s.title }}
                     </span>
-                    <span class="source-meta">{{ s.sourceType || 'ARTICLE' }} · score {{ formatScore(s.score) }}</span>
+                    <span class="source-meta">{{ s.sourceType || 'KNOWLEDGE' }} · score {{ formatScore(s.score) }}</span>
                     <span class="source-snippet">{{ s.snippet }}</span>
                   </div>
                 </div>
@@ -180,7 +180,7 @@ function formatScore(value) {
 }
 
 function sourceKey(source) {
-  return `${source.sourceType || 'ARTICLE'}-${source.sourceId || source.id || 'x'}-${source.chunkId || 'root'}-${source.rank || 0}`
+  return `${source.sourceType || 'KNOWLEDGE'}-${source.sourceId || source.id || 'x'}-${source.chunkId || 'root'}-${source.rank || 0}`
 }
 
 function scrollBottom() {
