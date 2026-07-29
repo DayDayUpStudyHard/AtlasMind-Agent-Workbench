@@ -11,6 +11,10 @@ class ChatRequest(BaseModel):
     message: str
     history: List[ChatMessage] = Field(default_factory=list)
     topK: int = Field(default=5, ge=1, le=20)
+    sessionId: Optional[int] = None
+    ownerToken: Optional[str] = None
+    spaceId: Optional[int] = None
+    documentId: Optional[int] = None
 
 
 class SourceCitation(BaseModel):

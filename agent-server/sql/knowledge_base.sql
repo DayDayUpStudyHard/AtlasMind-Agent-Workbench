@@ -136,6 +136,19 @@ CREATE TABLE IF NOT EXISTS kb_retrieval_hit (
     INDEX idx_trace (trace_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS kb_tool_call (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    trace_id BIGINT NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    status VARCHAR(30) NOT NULL,
+    latency_ms BIGINT DEFAULT 0,
+    input_summary VARCHAR(1000),
+    output_summary VARCHAR(1000),
+    error_message TEXT,
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_trace (trace_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS kb_eval_case (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     question VARCHAR(1000) NOT NULL,

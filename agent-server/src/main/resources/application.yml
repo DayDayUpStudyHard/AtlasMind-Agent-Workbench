@@ -67,3 +67,5 @@ atlasmind:
     base-url: ${EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}
     model: ${EMBEDDING_MODEL:Qwen/Qwen3-Embedding-4B}
     dim: ${EMBEDDING_DIM:2560}
+  github:
+    token: ${GITHUB_APP_TOKEN:}

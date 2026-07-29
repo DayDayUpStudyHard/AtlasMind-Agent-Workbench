@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <article class="article-card">
     <router-link :to="`/article/${article.id}`" class="card-link">
       <div class="cover" v-if="article.cover">

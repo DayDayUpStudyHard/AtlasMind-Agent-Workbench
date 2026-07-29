@@ -73,6 +73,14 @@
                 <span class="menu-label">知识库</span>
               </template>
             </el-menu-item>
+            <el-menu-item index="/ai-observability">
+              <template #title>
+                <span class="menu-icon">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 3v18h18"/><path d="M7 15l3-3 3 2 5-7"/><path d="M18 7h-4"/><path d="M18 7v4"/></svg>
+                </span>
+                <span class="menu-label">AI Observability</span>
+              </template>
+            </el-menu-item>
             <el-menu-item index="/about-page">
               <template #title>
                 <span class="menu-icon">
@@ -198,6 +206,7 @@ const pageTitle = computed(() => {
     '/settings': '个人设置',
   }
   if (route.path.startsWith('/articles/') && route.path.endsWith('/edit')) return '编辑文章'
+  if (route.path === '/ai-observability') return 'AI Observability'
   return map[route.path] || ''
 })
 

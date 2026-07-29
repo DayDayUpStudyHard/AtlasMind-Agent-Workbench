@@ -4,6 +4,140 @@
 
 ---
 
+## GitHub 只读证据同步与报告 Citation 落地
+
+**日期**：2026-07-29
+
+### 实现内容
+
+- 新增 `project_source`、`project_sync_job`、`project_evidence` 三张表，形成项目外部证据的统一沉淀层。
+- 新增 GitHub 只读 connector，支持公开仓库无 Token 读取，私有仓库可通过 `GITHUB_APP_TOKEN` 配置访问。
+- GitHub 同步范围包括仓库元数据、README、根目录文件树、关键配置文件、最近 Commit、Open Issue 和 Open PR。
+- 新增项目同步 API：
+  - `POST /api/projects/{projectId}/sync`
+  - `GET /api/projects/{projectId}/evidence`
+  - `GET /api/projects/{projectId}/sync-jobs`
+- Agent Run 的 Evidence Retriever 改为优先读取 `project_evidence`，没有真实证据时才回退知识库检索和项目录入事实。
+- 报告生成根据证据类型调整结论强度：有 README/文件树/配置文件时增强架构判断，有 Commit/PR 时增强协作判断，没有 Issue/PR/CI 时保守标记待确认。
+- 项目工作台新增 GitHub 证据同步面板、同步状态、证据库存、报告引用来源列表和审批后执行按钮。
+- 项目总览卡片新增 evidence 数量和同步状态，方便技术负责人快速判断报告是否有真实项目证据支撑。
+- 修正工作台详情页乱码文案，统一为研发项目 Agent 工作台语义。
+
+### 验证
+
+- `agent-server .\mvnw.cmd -q -DskipTests compile`：通过。
+- `agent-front npm run build`：通过。
+- 重启后端和用户端后，`GET /api/projects/overview` 已返回 `evidenceCount`、`syncStatus`、`lastSyncAt`。
+- `POST /api/projects/1/sync` 同步成功，生成 6 条 GitHub 证据，计数为 `REPO=1`、`README=1`、`FILE_TREE=1`、`FILE=2`、`COMMIT=1`。
+- 启动新的 Agent Run 后，报告摘要显示 Evidence Reviewer 检查了 6 条 citable facts，`citationsJson` 引用真实 GitHub 文件、README、Commit、目录和仓库来源。
+
+### 说明
+
+- 当前同步仍是手动触发的同步请求，后续可改为异步 Job、定时健康检查或 Webhook 增量同步。
+- 当前证据检索先用 MySQL 关键词/时间/置信分排序，Embedding 入库和向量召回可作为下一阶段增强。
+- 本地项目、Jira/禅道、CI/CD 沿用 `project_source` / `project_evidence` 模型扩展，不在本阶段直接实现。
+
+---
+
+## 首条研发交付 Agent 垂直闭环落地
+
+**日期**：2026-07-28
+
+### 实现内容
+
+- 新增项目上下文、Agent Run、Run Step、报告和审批动作数据模型。
+- 新增项目总览首页与项目工作台详情页，首页从知识库/博客入口调整为研发项目组合视图。
+- 新增五维项目健康分析：交付进度、质量稳定性、架构与技术债、项目风险、工程协作。
+- 新增主控 Agent 调度的受控专家角色步骤：Context Builder、Evidence Retriever、Project Analyst、Evidence Reviewer、Delivery Planner、Report Composer。
+- 新增异步 Agent Run 状态机，记录步骤、进度、证据摘要、失败状态和报告快照。
+- 新增人工审批门，GitHub Issue 外部写操作必须在审批后执行。
+- 新增 GitHub Issue connector；未配置 `GITHUB_APP_TOKEN` 时明确返回阻塞状态，不将草稿误报为执行成功。
+- 新增 `agent-server/sql/agent_workbench.sql` 和启动期增量建表初始化，兼容已有本地数据库。
+- 前端使用项目总览、健康信号、风险引用、交付计划和审批动作替代知识库问答作为首屏主任务。
+
+### 验证
+
+- Java 后端使用低内存 Maven 配置通过编译。
+- `agent-front npm run build` 通过。
+- 保留知识库、Citation、Session、Trace、Tool Call 和后台可观测性页面作为项目证据基础设施。
+
+---
+
+## 产品方向收敛：研发项目智能交付 Agent
+
+**日期**：2026-07-28
+
+### 背景
+
+- 当前项目已经具备知识库导入、RAG 检索、Citation、问答 Trace、Tool Call 记录和可观测性基础。
+- 但产品表层仍然保留博客、文章、动态和普通知识问答的痕迹，企业用户难以感知研发流程价值。
+- 仅增加更多聊天功能，容易把项目做成“套了模型的问答 Demo”，无法体现 Agent 和工程系统结合的深度。
+
+### 决策
+
+- 产品总方向收敛为：**面向软件研发团队的项目理解、风险分析、交付规划与自动化执行 Agent 平台**。
+- 第一阶段 MVP 定义为：**项目健康分析与交付计划 Agent**。
+- 研发项目智能交付 Agent 是长期产品方向，项目健康分析与交付计划是第一个可落地模块，而不是两个互相竞争的产品。
+
+### 目标闭环
+
+```text
+GitHub / GitLab / 本地项目 / 技术文档 / Issue / PR / CI
+                              ↓
+                       项目上下文构建
+                              ↓
+                    RAG 检索 + Tool Calling
+                              ↓
+                    多 Agent 分析和规划
+                              ↓
+              项目健康报告 / 风险清单 / 交付计划
+                              ↓
+                    人工审批后执行工具
+                              ↓
+                    任务跟踪 / 结果校验 / 审计
+```
+
+### Agent 能力设计
+
+- **RAG**：统一检索代码、README、ADR、技术方案、Commit、Issue、PR、构建日志和项目复盘。
+- **Tool Calling**：连接仓库查询、Git 历史、依赖分析、测试、静态检查、报告生成和任务创建工具。
+- **多 Agent**：按职责拆分项目分析、文档分析、交付风险分析、计划生成和结果审查角色。
+- **上下文组织**：将用户目标、项目版本、检索证据、工具输出、历史结论、偏好和执行限制结构化组装。
+- **状态管理**：将一次工作保存为可恢复的 Agent Run，包括 Plan、Step、Tool Call、Approval、Artifact 和错误状态。
+- **长期记忆**：保存项目事实、架构决策、事故记录、团队偏好和未完成任务，并要求重要记忆人工确认。
+- **多轮上下文**：支持围绕健康报告继续追问、修正判断、调整计划和重新执行步骤。
+- **模型适配**：暂不从零预训练基础模型，后续优先对 Issue 分类、风险识别、工具路由和结构化报告进行轻量微调。
+
+### 第一阶段范围
+
+1. 导入 GitHub / GitLab 或本地项目。
+2. 建立代码、文档、提交记录和项目任务的统一检索上下文。
+3. 生成带引用的项目健康度、架构风险和技术债报告。
+4. 支持围绕报告进行多轮问答。
+5. 根据风险和目标生成交付计划、任务依赖和验收标准。
+6. 经人工审批后创建 GitHub Issue 或项目任务。
+
+### 后续阶段
+
+- 接入 Jira、禅道、TAPD 等任务系统。
+- 增加 CI/CD 结果分析和发布风险预警。
+- 支持测试、静态分析、依赖扫描等工程工具。
+- 支持创建分支、PR 草稿和受审批保护的自动修复。
+- 增加定时项目健康检查、报告推送和自动化流程。
+- 将项目 Agent 能力抽象为企业研发流程 Agent 平台。
+
+### 产品界面调整
+
+- 核心导航逐步从“文章、动态、留言、归档”迁移为“工作台、项目、知识源、Agent、运行记录、报表、自动化、审批与审计”。
+- 知识库不再只是文档浏览页，而是项目上下文和 Agent 证据来源。
+- 文章等历史内容保留为迁移期兼容入口，不再作为企业产品主流程。
+
+### 结论
+
+本次不直接追求全自动写代码或自动部署，先以只读分析、计划生成和审批式任务创建形成可信闭环。在保证引用、状态、权限、审计和失败恢复的前提下，再逐步扩大 Agent 的执行范围。
+
+---
+
 ## 项目分仓与企业 Agent Workbench 场景改造
 
 **日期**：2026-07-27

@@ -1,4 +1,4 @@
-
+﻿
 /*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
 /*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
 /*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
@@ -182,6 +182,23 @@ CREATE TABLE `kb_retrieval_trace` (
   KEY `idx_message` (`message_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
+DROP TABLE IF EXISTS `kb_tool_call`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `kb_tool_call` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `trace_id` bigint NOT NULL,
+  `name` varchar(100) NOT NULL,
+  `status` varchar(30) NOT NULL,
+  `latency_ms` bigint DEFAULT '0',
+  `input_summary` varchar(1000) DEFAULT NULL,
+  `output_summary` varchar(1000) DEFAULT NULL,
+  `error_message` text,
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  KEY `idx_trace` (`trace_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `kb_space`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
 /*!50503 SET character_set_client = utf8mb4 */;
@@ -221,8 +238,8 @@ DROP TABLE IF EXISTS `t_about`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `t_about` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `content` longtext COMMENT '关于页 Markdown 内容',
-  `timeline` text COMMENT '个人时间线 JSON',
+  `content` longtext COMMENT '鍏充簬椤?Markdown 鍐呭',
+  `timeline` text COMMENT '涓汉鏃堕棿绾?JSON',
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -253,7 +270,7 @@ DROP TABLE IF EXISTS `t_article_like`;
 CREATE TABLE `t_article_like` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `article_id` bigint NOT NULL,
-  `user_ip` varchar(45) NOT NULL COMMENT '用户 IP（支持IPv6）',
+  `user_ip` varchar(45) NOT NULL,
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_article_ip` (`article_id`,`user_ip`),
@@ -288,8 +305,8 @@ DROP TABLE IF EXISTS `t_comment`;
 CREATE TABLE `t_comment` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `article_id` bigint DEFAULT NULL,
-  `parent_id` bigint DEFAULT NULL COMMENT '父评论ID，NULL表示根评论',
-  `reply_to` varchar(50) DEFAULT NULL COMMENT '回复目标用户昵称',
+  `parent_id` bigint DEFAULT NULL,
+  `reply_to` varchar(50) DEFAULT NULL COMMENT '鍥炲鐩爣鐢ㄦ埛鏄电О',
   `author` varchar(50) NOT NULL,
   `email` varchar(100) DEFAULT NULL,
   `content` text NOT NULL,
@@ -303,8 +320,8 @@ DROP TABLE IF EXISTS `t_moment`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `t_moment` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `content` text NOT NULL COMMENT '动态公告内容',
-  `image` varchar(255) DEFAULT NULL COMMENT '可选配图',
+  `content` text NOT NULL,
+  `image` varchar(255) DEFAULT NULL,
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=25 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -314,13 +331,13 @@ DROP TABLE IF EXISTS `t_operation_log`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `t_operation_log` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `username` varchar(50) DEFAULT NULL COMMENT '操作人',
-  `ip` varchar(45) DEFAULT NULL COMMENT '操作IP',
-  `operation` varchar(100) DEFAULT NULL COMMENT '操作描述',
-  `type` varchar(20) DEFAULT NULL COMMENT '操作类型: CREATE/UPDATE/DELETE/OTHER',
-  `method_name` varchar(200) DEFAULT NULL COMMENT '方法名',
-  `args` text COMMENT '请求参数(截断)',
-  `execution_time` bigint DEFAULT NULL COMMENT '执行耗时(ms)',
+  `username` varchar(50) DEFAULT NULL,
+  `ip` varchar(45) DEFAULT NULL COMMENT '鎿嶄綔IP',
+  `operation` varchar(100) DEFAULT NULL COMMENT '鎿嶄綔鎻忚堪',
+  `type` varchar(20) DEFAULT NULL COMMENT '鎿嶄綔绫诲瀷: CREATE/UPDATE/DELETE/OTHER',
+  `method_name` varchar(200) DEFAULT NULL,
+  `args` text COMMENT '璇锋眰鍙傛暟(鎴柇)',
+  `execution_time` bigint DEFAULT NULL COMMENT '鎵ц鑰楁椂(ms)',
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=40 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
@@ -345,8 +362,8 @@ CREATE TABLE `t_user` (
   `nickname` varchar(50) DEFAULT NULL,
   `avatar` varchar(255) DEFAULT NULL,
   `email` varchar(100) DEFAULT NULL,
-  `bio` varchar(255) DEFAULT NULL COMMENT '一句话简介',
-  `social_links` text COMMENT '社交链接 JSON',
+  `bio` varchar(255) DEFAULT NULL,
+  `social_links` text COMMENT '绀句氦閾炬帴 JSON',
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `username` (`username`)
@@ -369,22 +386,22 @@ CREATE TABLE `t_user` (
 -- ============================================
 
 INSERT INTO `t_user` (`id`, `username`, `password`, `nickname`, `avatar`, `email`, `bio`, `social_links`, `create_time`) VALUES
-(1, 'admin', '$2a$10$nDKVFOBuRX8T5a6nKXRtXusB67trjNEZO0sJoWoEq1M8lGV0BD3r.', 'AtlasMind Admin', NULL, 'admin@atlasmind.local', '企业知识工作台管理员', NULL, NOW());
+(1, 'admin', '$2a$10$nDKVFOBuRX8T5a6nKXRtXusB67trjNEZO0sJoWoEq1M8lGV0BD3r.', 'AtlasMind Admin', NULL, 'admin@atlasmind.local', 'AtlasMind workspace administrator', NULL, NOW());
 
 INSERT INTO `sys_setting` (`id`, `setting_key`, `setting_value`, `value_type`, `description`, `editable`, `create_time`, `update_time`) VALUES
-(1, 'ai.retrieval.top-k', '5', 'INTEGER', 'AI 默认检索数量', 1, NOW(), NOW()),
-(2, 'ai.retrieval.max-top-k', '10', 'INTEGER', 'AI 最大检索数量', 1, NOW(), NOW()),
-(3, 'ai.enabled', 'true', 'BOOLEAN', '是否启用用户端 AI', 1, NOW(), NOW());
+(1, 'ai.retrieval.top-k', '5', 'INTEGER', 'Default AI retrieval topK', 1, NOW(), NOW()),
+(2, 'ai.retrieval.max-top-k', '10', 'INTEGER', 'Maximum AI retrieval topK', 1, NOW(), NOW()),
+(3, 'ai.enabled', 'true', 'BOOLEAN', 'Enable front-end AI assistant', 1, NOW(), NOW());
 
-INSERT INTO `kb_space` (`id`, `name`, `description`, `status`, `sort`, `create_time`, `update_time`) VALUES
-(1, '研发知识库', '沉淀接口文档、部署手册、技术方案和故障复盘', 'ENABLED', 1, NOW(), NOW()),
-(2, '业务制度库', '沉淀流程制度、SOP、FAQ 和培训材料', 'ENABLED', 2, NOW(), NOW()),
-(3, '项目交付库', '沉淀需求说明、项目周报、会议纪要和验收材料', 'ENABLED', 3, NOW(), NOW());
+INSERT INTO `kb_space` (`id`, `name`, `description`, `icon`, `color`, `sort`, `enabled`, `create_time`, `update_time`, `deleted`) VALUES
+(1, 'Engineering Knowledge', 'API docs, deployment guides, technical designs, and incident reviews', 'code', '#2563eb', 1, 1, NOW(), NOW(), 0),
+(2, 'Business Process', 'Process documents, SOPs, FAQs, and training materials', 'book-open', '#10b981', 2, 1, NOW(), NOW(), 0),
+(3, 'Project Delivery', 'Requirements, weekly reports, meeting notes, and acceptance materials', 'briefcase', '#f59e0b', 3, 1, NOW(), NOW(), 0);
 
 INSERT INTO `t_category` (`id`, `name`, `description`, `sort`, `create_time`) VALUES
-(1, '技术方案', '企业内部架构设计、接口设计和工程实践', 1, NOW()),
-(2, '项目复盘', '项目交付过程中的问题、决策和经验沉淀', 2, NOW()),
-(3, '流程制度', '团队协作、权限申请、发布上线等制度规范', 3, NOW());
+(1, 'Technical Design', 'Architecture, API design, and engineering practices', 1, NOW()),
+(2, 'Project Review', 'Delivery decisions, risks, and lessons learned', 2, NOW()),
+(3, 'Process Policy', 'Team collaboration, permission, release, and workflow policies', 3, NOW());
 
 INSERT INTO `t_tag` (`id`, `name`, `create_time`) VALUES
 (1, 'RAG', NOW()),
@@ -394,11 +411,11 @@ INSERT INTO `t_tag` (`id`, `name`, `create_time`) VALUES
 (5, 'Elasticsearch', NOW());
 
 INSERT INTO `t_article` (`id`, `title`, `content`, `summary`, `category_id`, `cover`, `is_top`, `status`, `visibility`, `view_count`, `create_time`, `update_time`, `deleted`) VALUES
-(1, '企业知识库本地启动流程', '# 企业知识库本地启动流程\n\n## 依赖服务\n\n本地开发需要启动 MySQL、Redis、Elasticsearch、Java 后端和 Python AI 服务。\n\n## 端口约定\n\n- Java 后端：18080\n- 管理端：15173\n- 知识门户：15174\n- Python AI 服务：18088\n\n## 启动顺序\n\n先启动基础设施，再启动后端服务，最后启动两个前端。', '企业知识库本地开发环境、端口和启动顺序说明。', 1, NULL, 1, 1, 'PUBLIC', 0, NOW(), NOW(), 0),
-(2, 'RAG 问答权限规则', '# RAG 问答权限规则\n\nAtlasMind Agent Workbench 对知识源进行权限隔离。PUBLIC 内容可被普通用户检索；PRIVATE 和 DISABLED 内容不可进入 RAG 召回。\n\n管理员可以在后台查看召回记录、检索方式、TopK、耗时和引用来源。', '说明企业知识问答中的 PUBLIC/PRIVATE/DISABLED 权限边界。', 1, NULL, 0, 1, 'PUBLIC', 0, NOW(), NOW(), 0);
+(1, 'Local Startup Guide', '# Local Startup Guide\n\n## Dependencies\n\nStart MySQL, Redis, Elasticsearch, the Java backend, both Vite apps, and the Python AI service.\n\n## Ports\n\n- Java backend: 18080\n- Admin app: 15173\n- Knowledge portal: 15174\n- Python AI service: 18088\n\n## Order\n\nStart infrastructure first, then backend services, then the two frontend apps.', 'Local development ports and startup order for AtlasMind Agent Workbench.', 1, NULL, 1, 1, 'PUBLIC', 0, NOW(), NOW(), 0),
+(2, 'RAG Access Rules', '# RAG Access Rules\n\nAtlasMind keeps knowledge access explicit. PUBLIC content can be retrieved by the front assistant. PRIVATE or DISABLED content should not enter the public RAG context.\n\nAdmins can inspect sessions, retrieval traces, hit sources, tool calls, latency, and citations in the observability panel.', 'Explains public RAG boundaries and observability expectations.', 1, NULL, 0, 1, 'PUBLIC', 0, NOW(), NOW(), 0);
 
 INSERT INTO `t_article_tag` (`article_id`, `tag_id`) VALUES
 (1, 3), (1, 4), (2, 1), (2, 2);
 
 INSERT INTO `t_about` (`id`, `content`, `timeline`, `update_time`) VALUES
-(1, '# AtlasMind Agent Workbench\n\n面向企业内部知识资产管理、RAG 检索和 Agent 问答的智能工作台。\n\n## 核心能力\n\n- 文档上传与异步解析\n- 向量检索 + 关键词 fallback\n- Java AI Gateway\n- 权限隔离与问答日志\n- RAG 调试和导入任务可观测', '[]', NOW());
+(1, '# AtlasMind Agent Workbench\n\nAn internal knowledge asset, RAG retrieval, and agent Q&A workspace.\n\n## Core Capabilities\n\n- Document upload and async parsing\n- Vector retrieval with keyword fallback\n- Java AI gateway\n- Permission-aware retrieval and answer tracing\n- RAG debugging and observability', '[]', NOW());

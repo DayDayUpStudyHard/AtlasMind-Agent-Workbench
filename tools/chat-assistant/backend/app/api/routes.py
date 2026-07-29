@@ -1,16 +1,27 @@
-"""Chat API — SSE 流式对话 + RAG 检索（语义搜索优先，文本搜索降级）。"""
+"""Chat, knowledge-base ingest, and retrieval debug routes."""
+from __future__ import annotations
+
 import json
 import logging
 import secrets
+import time
+
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import StreamingResponse
-from openai import APIError, APIConnectionError, AuthenticationError
-from app.models.schemas import ChatRequest, KbIngestRequest, KbQaRequest, KbReindexRequest, SuggestionResponse
+from openai import APIConnectionError, APIError, AuthenticationError
+
+from app.config import settings
+from app.models.schemas import (
+    ChatRequest,
+    KbIngestRequest,
+    KbQaRequest,
+    KbReindexRequest,
+    SuggestionResponse,
+)
+from app.services.embedding_service import EmbeddingService
 from app.services.es_service import ESService
 from app.services.kb_service import KbService
 from app.services.llm_service import LLMService
-from app.services.embedding_service import EmbeddingService
-from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -18,17 +29,16 @@ router = APIRouter()
 internal_router = APIRouter()
 kb_router = APIRouter()
 
+_es_service: ESService | None = None
+_llm_service: LLMService | None = None
+_embedding_service: EmbeddingService | None = None
+_kb_service: KbService | None = None
+
 
 def _check_internal_token(token: str | None) -> None:
     expected = settings.internal_token
     if expected and (not token or not secrets.compare_digest(token, expected)):
         raise HTTPException(status_code=401, detail="Invalid internal token")
-
-# 模块级延迟初始化（避免 import 时就连接外部服务导致启动失败）
-_es_service: ESService | None = None
-_llm_service: LLMService | None = None
-_embedding_service: EmbeddingService | None = None
-_kb_service: KbService | None = None
 
 
 def get_es() -> ESService:
@@ -60,117 +70,250 @@ def get_kb() -> KbService:
 
 
 DEFAULT_SUGGESTIONS = [
-    "企业知识库里有哪些核心资料？",
-    "Spring Boot怎么部署？",
-    "MySQL索引如何优化？",
-    "Vue 3有什么新特性？",
+    "What does this knowledge base contain?",
+    "How do I deploy the Spring Boot backend?",
+    "How should I optimize MySQL indexes?",
+    "Explain the AtlasMind RAG architecture.",
 ]
 
 
 def _sse(event_type: str, data: dict) -> str:
-    """格式化为 SSE 事件。"""
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+def _citation_payload(hit: dict, retrieval_type: str) -> dict:
+    source_id = hit.get("sourceId") or hit.get("id")
+    return {
+        "sourceType": hit.get("sourceType", "ARTICLE"),
+        "id": source_id,
+        "sourceId": source_id,
+        "chunkId": hit.get("chunkId"),
+        "title": hit.get("title", ""),
+        "snippet": hit.get("snippet", ""),
+        "page": hit.get("page"),
+        "score": hit.get("score", 0),
+        "rank": hit.get("rank"),
+        "retrievalType": hit.get("retrievalType", retrieval_type),
+    }
+
+
 @router.post("/send")
 async def chat_send(request: ChatRequest):
-    """发送消息，返回 SSE 流。
-
-    检索策略（自动选择）：
-    1. Embedding 已配置 → kNN 语义搜索（dense_vector + cosine 相似度）
-    2. Embedding 未配置 → ES multi_match 文本搜索
-    3. ES 不可用 → 降级为纯 LLM 对话
-    """
+    """Stream a RAG answer and persist session messages, trace, hits, and tool steps."""
 
     async def generate():
+        store = None
+        session = None
+        user_message_id = None
+        trace_id = None
+        tool_calls: list[dict] = []
+        llm_started_at = None
+
+        def remember_tool(
+            name: str,
+            started_at: float,
+            status: str,
+            input_summary: str = "",
+            output_summary: str = "",
+            error_message: str = "",
+        ) -> None:
+            tool_calls.append(
+                {
+                    "name": name,
+                    "status": status,
+                    "latency_ms": int((time.perf_counter() - started_at) * 1000),
+                    "input_summary": input_summary[:1000],
+                    "output_summary": output_summary[:1000],
+                    "error_message": error_message,
+                }
+            )
+
         try:
-            # 0. 验证配置
             config_errors = settings.validate()
             if config_errors:
-                yield _sse("error", {"error": "服务配置错误: " + "; ".join(config_errors)})
+                yield _sse("error", {"error": "Service configuration error: " + "; ".join(config_errors)})
                 return
 
-            # 1. 初始化服务
             try:
                 llm = get_llm()
-            except ValueError as e:
-                yield _sse("error", {"error": f"LLM 配置错误: {e}"})
+            except ValueError as exc:
+                yield _sse("error", {"error": f"LLM configuration error: {exc}"})
                 return
 
-            # 2. 检索相关文章（语义搜索优先 → 文本搜索降级 → 空列表兜底）
+            top_k = max(1, min(request.topK, 20))
+            store = get_kb().store
+            if request.sessionId:
+                session = store.get_session(request.sessionId, request.ownerToken)
+                if not session:
+                    yield _sse("error", {"error": "AI session is invalid or expired"})
+                    return
+                history_dicts = store.list_session_messages(request.sessionId, 10)
+                user_message_id = store.append_qa_message(request.sessionId, "user", request.message)
+            else:
+                history_dicts = [{"role": m.role, "content": m.content} for m in request.history]
+
             yield _sse("status", {"status": "searching"})
-            sources = []
+            sources: list[dict] = []
             emb = get_embedding()
+            retrieval_started_at = time.perf_counter()
+            retrieval_type = "NONE"
+            fallback_reason = ""
 
             if emb.configured:
-                # --- 语义搜索：embedding → kNN ---
-                query_vec = emb.embed(request.message)
-                if query_vec:
-                    try:
-                        sources.extend(get_es().search_by_embedding(query_vec))
-                        sources.extend(get_es().search_kb_by_embedding(query_vec))
-                    except Exception:
-                        pass
-                # embedding 失败 → 降级到文本搜索
-                if not sources:
-                    try:
-                        sources.extend(get_es().search_articles(request.message))
-                        sources.extend(get_es().search_kb_by_keyword(request.message))
-                    except Exception:
-                        pass
-            else:
-                # --- 文本搜索（embedding 未配置）---
+                query_vec = None
+                step_started = time.perf_counter()
                 try:
-                    sources.extend(get_es().search_articles(request.message))
-                    sources.extend(get_es().search_kb_by_keyword(request.message))
-                except Exception:
-                    pass
-            top_k = max(1, min(request.topK, 20))
-            sources = sorted(sources, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+                    query_vec = emb.embed(request.message)
+                    remember_tool(
+                        "embedQuery",
+                        step_started,
+                        "DONE" if query_vec else "EMPTY",
+                        request.message,
+                        f"dims={len(query_vec) if query_vec else 0}",
+                    )
+                except Exception as exc:
+                    fallback_reason = f"embedding_failed: {exc}"
+                    remember_tool("embedQuery", step_started, "FAILED", request.message, error_message=str(exc))
 
-            # 3. 构建上下文 + 流式生成
+                if query_vec:
+                    vector_hits: list[dict] = []
+                    step_started = time.perf_counter()
+                    try:
+                        article_hits = get_es().search_by_embedding(query_vec, top_k)
+                        vector_hits.extend(article_hits)
+                        remember_tool("searchArticlesByVector", step_started, "DONE", f"topK={top_k}", f"hits={len(article_hits)}")
+                    except Exception as exc:
+                        remember_tool("searchArticlesByVector", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+
+                    step_started = time.perf_counter()
+                    try:
+                        kb_hits = get_es().search_kb_by_embedding(query_vec, top_k, request.spaceId, request.documentId)
+                        vector_hits.extend(kb_hits)
+                        remember_tool(
+                            "searchKbByVector",
+                            step_started,
+                            "DONE",
+                            f"topK={top_k}, spaceId={request.spaceId}, documentId={request.documentId}",
+                            f"hits={len(kb_hits)}",
+                        )
+                    except Exception as exc:
+                        remember_tool("searchKbByVector", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+
+                    sources.extend(vector_hits)
+                    if vector_hits:
+                        retrieval_type = "VECTOR"
+
+                if not sources:
+                    if not fallback_reason:
+                        fallback_reason = "vector_no_hits" if query_vec else "embedding_empty"
+                    retrieval_type = "KEYWORD_FALLBACK"
+                    step_started = time.perf_counter()
+                    try:
+                        article_hits = get_es().search_articles(request.message, top_k)
+                        sources.extend(article_hits)
+                        remember_tool("searchArticlesByKeyword", step_started, "DONE", f"topK={top_k}", f"hits={len(article_hits)}")
+                    except Exception as exc:
+                        remember_tool("searchArticlesByKeyword", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+
+                    step_started = time.perf_counter()
+                    try:
+                        kb_hits = get_es().search_kb_by_keyword(request.message, top_k, request.spaceId, request.documentId)
+                        sources.extend(kb_hits)
+                        remember_tool(
+                            "searchKbByKeyword",
+                            step_started,
+                            "DONE",
+                            f"topK={top_k}, spaceId={request.spaceId}, documentId={request.documentId}",
+                            f"hits={len(kb_hits)}",
+                        )
+                    except Exception as exc:
+                        remember_tool("searchKbByKeyword", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+            else:
+                retrieval_type = "KEYWORD"
+                fallback_reason = "embedding_not_configured"
+                step_started = time.perf_counter()
+                try:
+                    article_hits = get_es().search_articles(request.message, top_k)
+                    sources.extend(article_hits)
+                    remember_tool("searchArticlesByKeyword", step_started, "DONE", f"topK={top_k}", f"hits={len(article_hits)}")
+                except Exception as exc:
+                    remember_tool("searchArticlesByKeyword", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+
+                step_started = time.perf_counter()
+                try:
+                    kb_hits = get_es().search_kb_by_keyword(request.message, top_k, request.spaceId, request.documentId)
+                    sources.extend(kb_hits)
+                    remember_tool(
+                        "searchKbByKeyword",
+                        step_started,
+                        "DONE",
+                        f"topK={top_k}, spaceId={request.spaceId}, documentId={request.documentId}",
+                        f"hits={len(kb_hits)}",
+                    )
+                except Exception as exc:
+                    remember_tool("searchKbByKeyword", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
+
+            sources = sorted(sources, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            normalized_sources = []
+            for rank, item in enumerate(sources, 1):
+                normalized_sources.append(
+                    {
+                        **item,
+                        "sourceType": item.get("sourceType", "ARTICLE"),
+                        "sourceId": item.get("sourceId") or item.get("id"),
+                        "rank": rank,
+                        "retrievalType": retrieval_type,
+                    }
+                )
+            sources = normalized_sources
+
+            if user_message_id:
+                trace_id = store.create_retrieval_trace(
+                    user_message_id,
+                    request.message,
+                    retrieval_type,
+                    top_k,
+                    int((time.perf_counter() - retrieval_started_at) * 1000),
+                    fallback_reason,
+                    len(sources),
+                )
+                store.create_retrieval_hits(trace_id, sources)
+                for call in tool_calls:
+                    store.create_tool_call(trace_id, **call)
+
             contexts = llm.build_context(sources)
-            sources = [
-                {
-                    "sourceType": a.get("sourceType", "ARTICLE"),
-                    "id": a.get("id") or a.get("sourceId"),
-                    "chunkId": a.get("chunkId"),
-                    "title": a["title"],
-                    "snippet": a["snippet"],
-                    "page": a.get("page"),
-                }
-                for a in sources
-            ]
-            history_dicts = [
-                {"role": m.role, "content": m.content} for m in request.history
-            ]
+            citations = [_citation_payload(hit, retrieval_type) for hit in sources]
 
             yield _sse("status", {"status": "thinking"})
             full = ""
             try:
+                llm_started_at = time.perf_counter()
                 for token in llm.chat_stream(request.message, contexts, history_dicts):
                     full += token
                     yield _sse("chunk", {"content": token})
-                yield _sse("sources", {"sources": sources})
-                yield _sse("done", {"content": full})
+                llm_latency_ms = int((time.perf_counter() - llm_started_at) * 1000)
+                if trace_id:
+                    store.create_tool_call(trace_id, "llm.chat_stream", "DONE", llm_latency_ms, f"model={llm.model}", f"chars={len(full)}")
+                if session:
+                    store.append_qa_message(request.sessionId, "assistant", full, model=llm.model, latency_ms=llm_latency_ms)
+                yield _sse("sources", {"sources": citations, "traceId": trace_id})
+                yield _sse("done", {"content": full, "traceId": trace_id})
             except AuthenticationError:
-                yield _sse(
-                    "error",
-                    {"error": "LLM API Key 无效，请检查 .env 中的 LLM_API_KEY"},
-                )
-            except APIConnectionError as e:
-                yield _sse(
-                    "error",
-                    {"error": f"无法连接 LLM 服务 ({settings.llm_base_url}): {e}"},
-                )
-            except APIError as e:
-                yield _sse(
-                    "error",
-                    {"error": f"LLM API 返回错误 (model={settings.llm_model}): {e}"},
-                )
-        except Exception as e:
-            yield _sse("error", {"error": f"服务内部错误: {e}"})
+                if trace_id and llm_started_at:
+                    store.create_tool_call(trace_id, "llm.chat_stream", "FAILED", int((time.perf_counter() - llm_started_at) * 1000), f"model={llm.model}", error_message="authentication_failed")
+                yield _sse("error", {"error": "LLM API key is invalid"})
+            except APIConnectionError as exc:
+                if trace_id and llm_started_at:
+                    store.create_tool_call(trace_id, "llm.chat_stream", "FAILED", int((time.perf_counter() - llm_started_at) * 1000), f"model={llm.model}", error_message=str(exc))
+                yield _sse("error", {"error": f"Cannot connect to LLM service ({settings.llm_base_url}): {exc}"})
+            except APIError as exc:
+                if trace_id and llm_started_at:
+                    store.create_tool_call(trace_id, "llm.chat_stream", "FAILED", int((time.perf_counter() - llm_started_at) * 1000), f"model={llm.model}", error_message=str(exc))
+                yield _sse("error", {"error": f"LLM API error (model={settings.llm_model}): {exc}"})
+        except Exception as exc:
+            logger.exception("chat_send failed")
+            yield _sse("error", {"error": f"Internal service error: {exc}"})
 
     return StreamingResponse(
         generate(),
@@ -185,21 +328,15 @@ async def chat_send(request: ChatRequest):
 
 @router.get("/suggestions")
 async def get_suggestions():
-    """推荐问题。"""
     return SuggestionResponse(suggestions=DEFAULT_SUGGESTIONS)
 
 
 @router.get("/health")
 async def health():
-    """健康检查 — 返回各组件连接状态（不发起外部 API 调用）。"""
     result = {"status": "ok", "components": {}}
 
-    # LLM 配置检查
     if not settings.llm_api_key:
-        result["components"]["llm"] = {
-            "status": "error",
-            "message": "LLM_API_KEY 未设置",
-        }
+        result["components"]["llm"] = {"status": "error", "message": "LLM_API_KEY is not set"}
         result["status"] = "degraded"
     else:
         result["components"]["llm"] = {
@@ -208,7 +345,6 @@ async def health():
             "base_url": settings.llm_base_url,
         }
 
-    # Embedding 配置检查
     emb = get_embedding()
     if emb.configured:
         result["components"]["embedding"] = {
@@ -218,12 +354,8 @@ async def health():
             "dim": settings.embedding_dim,
         }
     else:
-        result["components"]["embedding"] = {
-            "status": "info",
-            "message": "embedding 未配置，使用文本搜索",
-        }
+        result["components"]["embedding"] = {"status": "info", "message": "Embedding is not configured; keyword search is used"}
 
-    # ES 连接检查
     try:
         es = get_es()
         if es.health():
@@ -236,16 +368,10 @@ async def health():
             if not ping_ok:
                 result["status"] = "degraded"
         else:
-            result["components"]["elasticsearch"] = {
-                "status": "error",
-                "message": "TCP 端口不可达",
-            }
+            result["components"]["elasticsearch"] = {"status": "error", "message": "TCP port is unreachable"}
             result["status"] = "degraded"
-    except Exception as e:
-        result["components"]["elasticsearch"] = {
-            "status": "error",
-            "message": str(e),
-        }
+    except Exception as exc:
+        result["components"]["elasticsearch"] = {"status": "error", "message": str(exc)}
         result["status"] = "degraded"
 
     return result
@@ -257,7 +383,6 @@ async def ingest_job(
     background_tasks: BackgroundTasks,
     x_internal_token: str | None = Header(default=None),
 ):
-    """Java 后台触发文档导入。"""
     _check_internal_token(x_internal_token)
     background_tasks.add_task(get_kb().ingest_document, request)
     return {"ok": True, "jobId": request.jobId}
@@ -270,7 +395,6 @@ async def reindex_document(
     background_tasks: BackgroundTasks,
     x_internal_token: str | None = Header(default=None),
 ):
-    """使用 MySQL chunk 重建 ES 索引。"""
     _check_internal_token(x_internal_token)
     background_tasks.add_task(get_kb().reindex_document, document_id, request.jobId)
     return {"ok": True, "jobId": request.jobId}
@@ -281,7 +405,6 @@ async def delete_document_index(
     document_id: int,
     x_internal_token: str | None = Header(default=None),
 ):
-    """从 ES 移除某文档索引。"""
     _check_internal_token(x_internal_token)
     ok = get_es().delete_kb_document(document_id)
     return {"ok": ok}
@@ -289,7 +412,6 @@ async def delete_document_index(
 
 @kb_router.post("/qa/test")
 async def kb_qa_test(request: KbQaRequest):
-    """后台知识库问答测试台的检索调试接口。"""
     return get_kb().qa_test(
         request.message,
         space_id=request.spaceId,

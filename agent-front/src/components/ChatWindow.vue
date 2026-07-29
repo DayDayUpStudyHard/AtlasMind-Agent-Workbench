@@ -45,8 +45,19 @@
                 <!-- 来源引用 -->
                 <div v-if="msg.sources && msg.sources.length" class="msg-sources">
                   <div class="sources-label">📄 参考来源</div>
-                  <div v-for="s in msg.sources" :key="s.id" class="source-item">
-                    <a :href="`/article/${s.id}`" target="_blank" class="source-link">{{ s.title }}</a>
+                  <div v-for="s in msg.sources" :key="sourceKey(s)" class="source-item">
+                    <a
+                      v-if="s.sourceType === 'ARTICLE'"
+                      :href="`/article/${s.sourceId || s.id}`"
+                      target="_blank"
+                      class="source-link"
+                    >
+                      #{{ s.rank || '-' }} {{ s.title }}
+                    </a>
+                    <span v-else class="source-link">
+                      #{{ s.rank || '-' }} {{ s.title }}
+                    </span>
+                    <span class="source-meta">{{ s.sourceType || 'ARTICLE' }} · score {{ formatScore(s.score) }}</span>
                     <span class="source-snippet">{{ s.snippet }}</span>
                   </div>
                 </div>
@@ -87,6 +98,7 @@
 <script setup>
 import { ref, nextTick, onMounted } from 'vue'
 import { marked } from 'marked'
+import { createAiSession, getAiSessionMessages } from '../api/index.js'
 
 const panelOpen = ref(false)
 const inputText = ref('')
@@ -100,6 +112,10 @@ const suggestions = ref([
   'Vue 3有什么新特性？',
 ])
 const msgList = ref(null)
+const sessionId = ref(null)
+const sessionToken = ref('')
+
+onMounted(restoreSession)
 
 function togglePanel() {
   panelOpen.value = !panelOpen.value
@@ -118,9 +134,53 @@ async function loadSuggestions() {
   } catch {}
 }
 
+async function restoreSession() {
+  const storedId = Number(localStorage.getItem('atlasmind-chat-session') || 0)
+  const storedToken = localStorage.getItem('atlasmind-chat-session-token') || ''
+  if (!storedId || !storedToken) return
+  try {
+    const response = await getAiSessionMessages(storedId, storedToken)
+    sessionId.value = storedId
+    sessionToken.value = storedToken
+    messages.value = (response.data.data || []).map((message) => ({
+      role: message.role,
+      content: message.content,
+      sources: []
+    }))
+  } catch {
+    localStorage.removeItem('atlasmind-chat-session')
+    localStorage.removeItem('atlasmind-chat-session-token')
+  }
+}
+
+async function ensureSession() {
+  if (sessionId.value) return sessionId.value
+  try {
+    const response = await createAiSession({ source: 'FLOATING_WIDGET', scope: 'GLOBAL' })
+    sessionId.value = response.data.data?.id || null
+    sessionToken.value = response.data.data?.ownerToken || ''
+    if (sessionId.value) {
+      localStorage.setItem('atlasmind-chat-session', String(sessionId.value))
+      localStorage.setItem('atlasmind-chat-session-token', sessionToken.value)
+    }
+    return sessionId.value
+  } catch {
+    return null
+  }
+}
+
 function renderMd(text) {
   if (!text) return ''
   return marked.parse(text, { breaks: true })
+}
+
+function formatScore(value) {
+  const score = Number(value || 0)
+  return score ? score.toFixed(3) : '0'
+}
+
+function sourceKey(source) {
+  return `${source.sourceType || 'ARTICLE'}-${source.sourceId || source.id || 'x'}-${source.chunkId || 'root'}-${source.rank || 0}`
 }
 
 function scrollBottom() {
@@ -132,6 +192,7 @@ function scrollBottom() {
 async function send(msg) {
   const content = typeof msg === 'string' ? msg : inputText.value.trim()
   if (!content || streaming.value) return
+  const activeSessionId = await ensureSession()
 
   if (typeof msg !== 'string') inputText.value = ''
 
@@ -148,7 +209,12 @@ async function send(msg) {
     const response = await fetch('/api/chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: content, history }),
+      body: JSON.stringify({
+        message: content,
+        history,
+        sessionId: activeSessionId,
+        ownerToken: sessionToken.value
+      }),
     })
 
     const reader = response.body.getReader()
@@ -178,6 +244,7 @@ async function send(msg) {
               scrollBottom()
             } else if (eventType === 'sources') {
               assistantMsg.sources = data.sources
+              assistantMsg.traceId = data.traceId
             } else if (eventType === 'done') {
               // noop
             } else if (eventType === 'error') {
@@ -318,10 +385,11 @@ async function send(msg) {
   border-top: 1px solid rgba(0,0,0,0.06);
 }
 .sources-label { font-size: 11px; color: #94a3b8; margin-bottom: 4px; }
-.source-item { margin-bottom: 3px; }
+.source-item { display: flex; flex-direction: column; gap: 2px; margin-bottom: 7px; }
 .source-link { font-size: 12px; color: #426fa6; text-decoration: none; }
 .source-link:hover { text-decoration: underline; }
-.source-snippet { font-size: 11px; color: #94a3b8; margin-left: 6px; }
+.source-meta { font-size: 10px; color: #94a3b8; }
+.source-snippet { font-size: 11px; color: #94a3b8; line-height: 1.45; }
 
 /* Streaming 动画 */
 .streaming-text {

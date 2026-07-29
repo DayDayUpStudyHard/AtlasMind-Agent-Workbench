@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <header class="header" :class="{ scrolled }">
     <div class="header-inner">
       <router-link to="/" class="logo">
@@ -10,22 +10,13 @@
       </router-link>
       <nav class="nav">
         <router-link to="/" class="nav-link">
-          <span class="nav-label">首页</span>
+          <span class="nav-label">工作台</span>
         </router-link>
-        <router-link to="/moments" class="nav-link">
-          <span class="nav-label">说说</span>
-        </router-link>
-        <router-link to="/categories" class="nav-link">
-          <span class="nav-label">分类</span>
+        <router-link to="/knowledge" class="nav-link">
+          <span class="nav-label">知识来源</span>
         </router-link>
         <router-link to="/archive" class="nav-link">
-          <span class="nav-label">时间线</span>
-        </router-link>
-        <router-link to="/guestbook" class="nav-link">
-          <span class="nav-label">留言板</span>
-        </router-link>
-        <router-link to="/about" class="nav-link">
-          <span class="nav-label">关于</span>
+          <span class="nav-label">历史资料</span>
         </router-link>
       </nav>
       <div class="search-box" @submit.prevent="doSearch">
@@ -34,7 +25,7 @@
           v-model="keyword"
           type="text"
           class="search-input"
-          placeholder="搜索文章..."
+          placeholder="搜索项目或证据..."
           @keyup.enter="doSearch"
         />
       </div>
@@ -81,6 +72,7 @@ function doSearch() {
   max-width: 1120px; margin: 0 auto; padding: 0 24px;
   display: flex; justify-content: space-between; align-items: center; height: 60px;
   gap: 24px;
+  box-sizing: border-box;
 }
 
 /* Logo */
@@ -101,7 +93,7 @@ function doSearch() {
 }
 
 /* Nav */
-.nav { display: flex; gap: 2px; flex: 1; justify-content: center; }
+.nav { display: flex; gap: 2px; flex: 1; min-width: 0; justify-content: center; }
 .nav-link {
   padding: 7px 12px; border-radius: 6px; text-decoration: none;
   font-size: 14px; color: var(--atlas-muted); transition: all 0.15s;
@@ -122,6 +114,7 @@ function doSearch() {
   background: var(--atlas-surface);
   border: 1px solid var(--atlas-border);
   transition: border-color 0.2s, box-shadow 0.2s;
+  min-width: 0;
 }
 .search-box:focus-within {
   border-color: var(--atlas-primary);
@@ -149,7 +142,9 @@ function doSearch() {
   }
   .nav {
     order: 3;
+    flex: 0 0 100%;
     width: 100%;
+    min-width: 0;
     overflow-x: auto;
     justify-content: flex-start;
     padding-bottom: 2px;
@@ -159,6 +154,34 @@ function doSearch() {
   }
   .search-box {
     margin-left: auto;
+    max-width: min(172px, calc(100vw - 190px));
+  }
+
+  .search-input {
+    width: 100%;
+    min-width: 0;
+  }
+}
+
+@media (max-width: 420px) {
+  .header-inner {
+    align-items: flex-start;
+  }
+
+  .logo {
+    min-height: 34px;
+  }
+
+  .search-box {
+    order: 2;
+    flex: 0 0 100%;
+    width: 100%;
+    max-width: none;
+    margin-left: 0;
+  }
+
+  .nav {
+    order: 3;
   }
 }
 

@@ -124,6 +124,14 @@ export function reparseKbDocument(id) { return api.post(`/api/admin/kb/documents
 export function reindexKbDocument(id) { return api.post(`/api/admin/kb/documents/${id}/reindex`) }
 export function testKbQa(data) { return api.post('/api/admin/kb/qa/test', data) }
 
+export function getAiObservabilityTraces(params) {
+  return api.get('/api/admin/ai-observability/traces', { params })
+}
+
+export function getAiObservabilityTrace(id) {
+  return api.get(`/api/admin/ai-observability/traces/${id}`)
+}
+
 export function getKbNotifications(params) { return api.get('/api/admin/kb/notifications', { params }) }
 export function getKbUnreadCount() { return api.get('/api/admin/kb/notifications/unread-count') }
 export function readKbNotification(id) { return api.put(`/api/admin/kb/notifications/${id}/read`) }

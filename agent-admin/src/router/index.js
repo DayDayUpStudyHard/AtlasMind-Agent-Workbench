@@ -16,6 +16,7 @@ const routes = [
       { path: 'tags', name: 'Tags', component: () => import('../views/TagManage.vue') },
       { path: 'moments', name: 'Moments', component: () => import('../views/MomentManage.vue') },
       { path: 'knowledge', name: 'KnowledgeBase', component: () => import('../views/KnowledgeBase.vue') },
+      { path: 'ai-observability', name: 'AiObservability', component: () => import('../views/AiObservability.vue') },
       { path: 'about-page', name: 'AboutEdit', component: () => import('../views/AboutEdit.vue') },
       { path: 'logs', name: 'Logs', component: () => import('../views/LogView.vue') },
       { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue') }

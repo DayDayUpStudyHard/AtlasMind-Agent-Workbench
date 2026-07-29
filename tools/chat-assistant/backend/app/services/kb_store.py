@@ -1,6 +1,7 @@
 """知识库 MySQL 写入/更新。"""
 from __future__ import annotations
 
+import hmac
 import pymysql
 from pymysql.cursors import DictCursor
 
@@ -9,6 +10,8 @@ from app.services.document_parser import Chunk
 
 
 class KbStore:
+    _observability_ready = False
+
     def _conn(self):
         return pymysql.connect(
             host=settings.mysql_host,
@@ -20,6 +23,192 @@ class KbStore:
             cursorclass=DictCursor,
             autocommit=False,
         )
+
+    def ensure_observability_tables(self) -> None:
+        if self.__class__._observability_ready:
+            return
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS kb_retrieval_trace (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        message_id BIGINT NOT NULL,
+                        query TEXT NOT NULL,
+                        retrieval_type VARCHAR(50),
+                        top_k INT DEFAULT 5,
+                        latency_ms BIGINT,
+                        fallback_reason VARCHAR(500),
+                        hit_count INT DEFAULT 0,
+                        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_message (message_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS kb_retrieval_hit (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        trace_id BIGINT NOT NULL,
+                        source_type VARCHAR(30) NOT NULL,
+                        source_id BIGINT NOT NULL,
+                        chunk_id BIGINT NULL,
+                        title VARCHAR(255),
+                        score DOUBLE DEFAULT 0,
+                        snippet TEXT,
+                        rank_no INT DEFAULT 0,
+                        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_trace (trace_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS kb_tool_call (
+                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                        trace_id BIGINT NOT NULL,
+                        name VARCHAR(100) NOT NULL,
+                        status VARCHAR(30) NOT NULL,
+                        latency_ms BIGINT DEFAULT 0,
+                        input_summary VARCHAR(1000),
+                        output_summary VARCHAR(1000),
+                        error_message TEXT,
+                        create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                        INDEX idx_trace (trace_id)
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                    """
+                )
+            conn.commit()
+        self.__class__._observability_ready = True
+
+    def get_session(self, session_id: int | None, owner_token: str | None) -> dict | None:
+        if not session_id or not owner_token:
+            return None
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM kb_qa_session WHERE id=%s LIMIT 1",
+                    (session_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            return None
+        stored = str(row.get("owner_token") or "")
+        if not hmac.compare_digest(stored, str(owner_token)):
+            return None
+        return row
+
+    def list_session_messages(self, session_id: int, limit: int = 10) -> list[dict]:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT role, content
+                    FROM kb_qa_message
+                    WHERE session_id=%s AND role IN ('user','assistant','system')
+                    ORDER BY id DESC
+                    LIMIT %s
+                    """,
+                    (session_id, limit),
+                )
+                rows = list(cur.fetchall())
+        rows.reverse()
+        return rows
+
+    def append_qa_message(
+        self,
+        session_id: int,
+        role: str,
+        content: str,
+        model: str | None = None,
+        latency_ms: int | None = None,
+    ) -> int:
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO kb_qa_message (session_id, role, content, model, latency_ms)
+                    VALUES (%s,%s,%s,%s,%s)
+                    """,
+                    (session_id, role, content, model, latency_ms),
+                )
+                message_id = int(cur.lastrowid)
+            conn.commit()
+        return message_id
+
+    def create_retrieval_trace(
+        self,
+        message_id: int,
+        query: str,
+        retrieval_type: str,
+        top_k: int,
+        latency_ms: int,
+        fallback_reason: str,
+        hit_count: int,
+    ) -> int:
+        self.ensure_observability_tables()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO kb_retrieval_trace
+                    (message_id, query, retrieval_type, top_k, latency_ms, fallback_reason, hit_count)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (message_id, query, retrieval_type, top_k, latency_ms, fallback_reason, hit_count),
+                )
+                trace_id = int(cur.lastrowid)
+            conn.commit()
+        return trace_id
+
+    def create_retrieval_hits(self, trace_id: int, hits: list[dict]) -> None:
+        self.ensure_observability_tables()
+        if not hits:
+            return
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                for rank, hit in enumerate(hits, 1):
+                    cur.execute(
+                        """
+                        INSERT INTO kb_retrieval_hit
+                        (trace_id, source_type, source_id, chunk_id, title, score, snippet, rank_no)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+                        """,
+                        (
+                            trace_id,
+                            hit.get("sourceType", "ARTICLE"),
+                            hit.get("sourceId") or hit.get("id") or 0,
+                            hit.get("chunkId"),
+                            hit.get("title", ""),
+                            float(hit.get("score") or 0),
+                            hit.get("snippet", ""),
+                            rank,
+                        ),
+                    )
+            conn.commit()
+
+    def create_tool_call(
+        self,
+        trace_id: int,
+        name: str,
+        status: str,
+        latency_ms: int,
+        input_summary: str = "",
+        output_summary: str = "",
+        error_message: str = "",
+    ) -> None:
+        self.ensure_observability_tables()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO kb_tool_call
+                    (trace_id, name, status, latency_ms, input_summary, output_summary, error_message)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s)
+                    """,
+                    (trace_id, name, status, latency_ms, input_summary, output_summary, error_message),
+                )
+            conn.commit()
 
     def update_job(self, job_id: int, status: str, progress: int, message: str = "", error: str = "") -> None:
         with self._conn() as conn:

@@ -6,7 +6,6 @@ import com.atlasmind.entity.User;
 import com.atlasmind.mapper.UserMapper;
 import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
-import com.atlasmind.annotation.CacheShield;
 import com.atlasmind.annotation.CacheShieldEvict;
 import org.springframework.stereotype.Service;
 
@@ -38,7 +37,6 @@ public class UserServiceImpl implements UserService {
         return user;
     }
 
-    @CacheShield(value = "siteInfo", key = "'site'", ttl = 30, ttlVariance = 10)
     @Override
     public User getSiteInfo() {
         User user = userMapper.selectById(1L);
