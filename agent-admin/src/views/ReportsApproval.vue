@@ -2,9 +2,9 @@
   <div class="page">
     <section class="page-head">
       <div>
-        <span class="eyebrow">Reports & Approval</span>
-        <h2>报告与审批</h2>
-        <p>集中查看 Agent 生成的健康报告和待审批自动化动作，保留人工确认门禁。</p>
+        <span class="eyebrow">Reports & Action State</span>
+        <h2>报告与动作状态</h2>
+        <p>后台查看 Agent 报告、业务审批队列和外部动作执行结果。审批决定由项目前台的负责人完成，后台只处理阻塞与审计。</p>
       </div>
       <el-button @click="fetchData">刷新</el-button>
     </section>
@@ -19,7 +19,7 @@
           <article v-for="report in reports" :key="report.id" class="record-row">
             <div>
               <strong>{{ report.title }}</strong>
-              <p>{{ report.projectName }} · {{ report.healthStatus }} · {{ report.healthScore }}/100</p>
+              <p>{{ report.projectName }} / {{ report.healthStatus }} / {{ report.healthScore }}/100</p>
             </div>
             <el-tag effect="plain">{{ report.status }}</el-tag>
           </article>
@@ -29,21 +29,19 @@
 
       <section class="panel">
         <div class="panel-head">
-          <h3>待审批动作</h3>
+          <h3>动作队列</h3>
           <span>{{ actions.length }} 条</span>
         </div>
         <div class="record-list" v-loading="loading">
           <article v-for="action in actions" :key="action.id" class="record-row">
             <div>
               <strong>{{ action.title }}</strong>
-              <p>{{ action.projectName }} · {{ action.actionType }}</p>
+              <p>{{ action.projectName }} / {{ action.actionType }}</p>
+              <small v-if="action.errorMessage">{{ action.errorMessage }}</small>
             </div>
-            <div class="action-buttons">
-              <el-button size="small" @click="reject(action)">驳回</el-button>
-              <el-button size="small" type="primary" @click="approve(action)">通过</el-button>
-            </div>
+            <el-tag :type="tagType(action.status)" effect="plain">{{ action.status }}</el-tag>
           </article>
-          <el-empty v-if="!loading && actions.length === 0" description="暂无待审批动作" :image-size="72" />
+          <el-empty v-if="!loading && actions.length === 0" description="暂无动作" :image-size="72" />
         </div>
       </section>
     </div>
@@ -52,8 +50,7 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { approveProjectAction, getProject, getProjectRun, getProjects } from '../api/index.js'
+import { getAgentActions, getAgentReports } from '../api/index.js'
 
 const loading = ref(false)
 const reports = ref([])
@@ -64,48 +61,30 @@ onMounted(fetchData)
 async function fetchData() {
   loading.value = true
   try {
-    const projectRows = (await getProjects()).data.data || []
-    const details = await Promise.all(projectRows.map(project => getProject(project.id)))
-    const reportRows = []
-    const actionRows = []
-    for (const response of details) {
-      const project = response.data.data || {}
-      for (const report of project.reports || []) reportRows.push({ ...report, projectName: project.name })
-      for (const run of (project.runs || []).slice(0, 5)) {
-        const runResponse = await getProjectRun(run.id)
-        const runData = runResponse.data.data || {}
-        for (const action of runData.actions || []) {
-          if (action.status === 'PENDING_APPROVAL') actionRows.push({ ...action, projectName: project.name })
-        }
-      }
-    }
-    reports.value = reportRows.sort((a, b) => Number(b.id) - Number(a.id))
-    actions.value = actionRows.sort((a, b) => Number(b.id) - Number(a.id))
+    const [reportResponse, actionResponse] = await Promise.all([
+      getAgentReports(),
+      getAgentActions()
+    ])
+    reports.value = reportResponse.data.data || []
+    actions.value = actionResponse.data.data || []
   } finally {
     loading.value = false
   }
 }
 
-async function approve(action) {
-  await approveProjectAction(action.runId, action.id, { approved: true, approvedBy: 'admin' })
-  ElMessage.success('审批已通过')
-  await fetchData()
-}
-
-async function reject(action) {
-  await approveProjectAction(action.runId, action.id, { approved: false, approvedBy: 'admin' })
-  ElMessage.success('审批已驳回')
-  await fetchData()
+function tagType(status) {
+  return { EXECUTED: 'success', BLOCKED: 'danger', REJECTED: 'info', PENDING_APPROVAL: 'warning' }[status] || 'info'
 }
 </script>
 
 <style scoped>
+/* Hallmark | macrostructure: Admin Review Queue | tone: auditable operations | anchor hue: ink blue */
 .page { display: flex; flex-direction: column; gap: 18px; }
 .page-head, .panel { background: #fff; border: 1px solid #dce4ee; border-radius: 4px; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 22px; }
 .eyebrow { color: #426fa6; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .page-head h2 { margin: 6px 0 8px; color: #1f2d3d; font-size: 24px; }
-.page-head p { margin: 0; color: #607184; line-height: 1.7; }
+.page-head p { max-width: 780px; margin: 0; color: #607184; line-height: 1.7; }
 .split-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .panel { min-width: 0; padding: 18px; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
@@ -113,9 +92,10 @@ async function reject(action) {
 .panel-head span { color: #8b9aaa; font-size: 12px; }
 .record-list { display: flex; flex-direction: column; gap: 10px; }
 .record-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 14px; border: 1px solid #dce4ee; border-radius: 4px; }
-.record-row strong { color: #1f2d3d; }
-.record-row p { margin: 5px 0 0; color: #607184; font-size: 13px; }
-.action-buttons { display: flex; gap: 8px; flex-shrink: 0; }
+.record-row div { min-width: 0; }
+.record-row strong { color: #1f2d3d; overflow-wrap: anywhere; }
+.record-row p { margin: 5px 0 0; color: #607184; font-size: 13px; line-height: 1.55; }
+.record-row small { display: block; margin-top: 6px; color: #b35c56; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
 @media (max-width: 980px) { .split-grid { grid-template-columns: 1fr; } }
 @media (max-width: 720px) { .page-head, .record-row { align-items: flex-start; flex-direction: column; } }
 </style>

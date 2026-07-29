@@ -3,6 +3,7 @@ package com.atlasmind.service.impl;
 import com.atlasmind.gateway.AiGateway;
 import com.atlasmind.gateway.GitHubIssueGateway;
 import com.atlasmind.gateway.GitHubRepositoryGateway;
+import com.atlasmind.service.AgentActionExecutor;
 import com.atlasmind.service.AgentProjectService;
 import com.atlasmind.service.AgentRunExecutor;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -42,6 +43,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     private final GitHubIssueGateway gitHubIssueGateway;
     private final GitHubRepositoryGateway gitHubRepositoryGateway;
     private final AgentRunExecutor agentRunExecutor;
+    private final AgentActionExecutor agentActionExecutor;
 
     @Override
     public Map<String, Object> overview() {
@@ -339,20 +341,23 @@ public class AgentProjectServiceImpl implements AgentProjectService {
 
     @Override
     @Transactional
-    public Map<String, Object> approveAction(Long runId, Long actionId, Map<String, Object> request) {
+    public Map<String, Object> approveAction(Long runId, Long actionId, Map<String, Object> request, String approvedBy) {
         Map<String, Object> action = firstOrNull(jdbcTemplate.queryForList(
                 "SELECT id FROM agent_action WHERE id=? AND run_id=?", actionId, runId));
         if (action == null) {
             throw new IllegalArgumentException("Action not found");
         }
         boolean approved = booleanValue(request.get("approved"), true);
-        String approver = value(request, "approvedBy", "workspace-user");
+        String approver = approvedBy == null || approvedBy.isBlank() ? "authenticated-user" : approvedBy;
         jdbcTemplate.update("""
                 UPDATE agent_action SET status=?, approved_by=?, approved_at=NOW(), error_message=NULL
                 WHERE id=? AND run_id=?
                 """, approved ? "APPROVED" : "REJECTED", approver, actionId, runId);
         if (!approved) {
             jdbcTemplate.update("UPDATE agent_run SET status='COMPLETED', progress=100, current_step='审批结束', finished_at=NOW() WHERE id=?", runId);
+        } else {
+            jdbcTemplate.update("UPDATE agent_run SET current_step='Action approved; queued for execution' WHERE id=?", runId);
+            dispatchActionAfterCommit(runId, actionId);
         }
         return getRun(runId);
     }
@@ -388,6 +393,66 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                     """, e.getMessage(), actionId, runId);
         }
         return getRun(runId);
+    }
+
+    @Override
+    public List<Map<String, Object>> listAllRuns() {
+        return jdbcTemplate.queryForList("""
+                SELECT r.id, r.project_id AS projectId, p.name AS projectName,
+                       r.run_type AS runType, r.trigger_type AS triggerType,
+                       r.question, r.status, r.progress, r.current_step AS currentStep,
+                       r.error_message AS errorMessage, r.started_at AS startedAt,
+                       r.finished_at AS finishedAt, r.create_time AS createTime
+                FROM agent_run r
+                JOIN agent_project p ON p.id=r.project_id
+                WHERE p.deleted=0
+                ORDER BY r.id DESC
+                LIMIT 100
+                """);
+    }
+
+    @Override
+    public List<Map<String, Object>> listReports() {
+        return jdbcTemplate.queryForList("""
+                SELECT ar.id, ar.project_id AS projectId, p.name AS projectName,
+                       ar.run_id AS runId, ar.title, ar.summary, ar.health_status AS healthStatus,
+                       ar.health_score AS healthScore, ar.status, ar.create_time AS createTime
+                FROM agent_report ar
+                JOIN agent_project p ON p.id=ar.project_id
+                WHERE p.deleted=0
+                ORDER BY ar.id DESC
+                LIMIT 100
+                """);
+    }
+
+    @Override
+    public List<Map<String, Object>> listActions(String status) {
+        if (status == null || status.isBlank()) {
+            return jdbcTemplate.queryForList("""
+                    SELECT aa.id, aa.project_id AS projectId, p.name AS projectName,
+                           aa.run_id AS runId, aa.action_type AS actionType, aa.status,
+                           aa.title, aa.external_id AS externalId, aa.approved_by AS approvedBy,
+                           aa.approved_at AS approvedAt, aa.executed_at AS executedAt,
+                           aa.error_message AS errorMessage, aa.create_time AS createTime
+                    FROM agent_action aa
+                    JOIN agent_project p ON p.id=aa.project_id
+                    WHERE p.deleted=0
+                    ORDER BY aa.id DESC
+                    LIMIT 100
+                    """);
+        }
+        return jdbcTemplate.queryForList("""
+                SELECT aa.id, aa.project_id AS projectId, p.name AS projectName,
+                       aa.run_id AS runId, aa.action_type AS actionType, aa.status,
+                       aa.title, aa.external_id AS externalId, aa.approved_by AS approvedBy,
+                       aa.approved_at AS approvedAt, aa.executed_at AS executedAt,
+                       aa.error_message AS errorMessage, aa.create_time AS createTime
+                FROM agent_action aa
+                JOIN agent_project p ON p.id=aa.project_id
+                WHERE p.deleted=0 AND aa.status=?
+                ORDER BY aa.id DESC
+                LIMIT 100
+                """, status);
     }
 
     @Override
@@ -626,6 +691,19 @@ public class AgentProjectServiceImpl implements AgentProjectService {
             @Override
             public void afterCommit() {
                 agentRunExecutor.execute(runId);
+            }
+        });
+    }
+
+    private void dispatchActionAfterCommit(Long runId, Long actionId) {
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            agentActionExecutor.execute(runId, actionId);
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                agentActionExecutor.execute(runId, actionId);
             }
         });
     }

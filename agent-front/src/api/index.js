@@ -5,6 +5,31 @@ const api = axios.create({
   timeout: 10000
 })
 
+api.interceptors.request.use(config => {
+  const token = localStorage.getItem('atlasmind-token')
+  if (token) config.headers['atlasmind-token'] = token
+  return config
+})
+
+api.interceptors.response.use(
+  response => response,
+  error => {
+    if (error.response?.status === 401 && window.location.pathname !== `${import.meta.env.BASE_URL}login`) {
+      localStorage.removeItem('atlasmind-token')
+      window.location.href = `${import.meta.env.BASE_URL}login`
+    }
+    return Promise.reject(error)
+  }
+)
+
+export function login(data) {
+  return api.post('/api/auth/login', data)
+}
+
+export function getUserInfo() {
+  return api.get('/api/auth/info')
+}
+
 export function getSiteInfo() {
   return api.get('/api/site/info')
 }
@@ -30,43 +55,39 @@ export function getKbDocumentChunks(id) {
 }
 
 export function getProjectOverview() {
-  return api.get('/api/projects/overview')
+  return api.get('/api/workspace/projects/overview')
 }
 
 export function getProject(id) {
-  return api.get(`/api/projects/${id}`)
+  return api.get(`/api/workspace/projects/${id}`)
 }
 
 export function createProject(data) {
-  return api.post('/api/projects', data)
+  return api.post('/api/workspace/projects', data)
 }
 
 export function syncProjectEvidence(projectId) {
-  return api.post(`/api/projects/${projectId}/sync`)
+  return api.post(`/api/workspace/projects/${projectId}/sync`)
 }
 
 export function getProjectEvidence(projectId, params = {}) {
-  return api.get(`/api/projects/${projectId}/evidence`, { params })
+  return api.get(`/api/workspace/projects/${projectId}/evidence`, { params })
 }
 
 export function getProjectSyncJobs(projectId) {
-  return api.get(`/api/projects/${projectId}/sync-jobs`)
+  return api.get(`/api/workspace/projects/${projectId}/sync-jobs`)
 }
 
 export function startProjectRun(projectId, data = {}) {
-  return api.post(`/api/projects/${projectId}/runs`, data)
+  return api.post(`/api/workspace/projects/${projectId}/runs`, data)
 }
 
 export function getProjectRun(runId) {
-  return api.get(`/api/projects/runs/${runId}`)
+  return api.get(`/api/workspace/projects/runs/${runId}`)
 }
 
 export function approveProjectAction(runId, actionId, data = {}) {
-  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/approval`, data)
-}
-
-export function executeProjectAction(runId, actionId) {
-  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/execute`)
+  return api.post(`/api/workspace/projects/runs/${runId}/actions/${actionId}/approval`, data)
 }
 
 export function createAiSession(data = {}) {

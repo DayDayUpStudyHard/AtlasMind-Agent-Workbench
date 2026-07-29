@@ -4,6 +4,30 @@
 
 ---
 
+## 前后台职责拆分与受保护 Workspace API
+
+**日期**：2026-07-30
+
+### 实现内容
+
+- 将项目工作台接口从共享 `/api/projects/**` 拆到 `/api/workspace/projects/**`，作为前台业务工作台入口。
+- 新增 `/api/admin/projects/**` 后台运营接口，提供项目目录、全局 Agent Run、报告和动作状态聚合查询。
+- Sa-Token 权限拦截扩展到 `/api/workspace/**`、`/api/admin/**`、`/api/kb/**`、`/api/upload/**` 和旧 `/api/projects/**`。
+- 审批人不再信任前端传入的 `approvedBy`，改为从当前登录态读取。
+- 新增 `AgentActionExecutor`，审批通过后异步执行外部动作；前台移除二次“执行”按钮。
+- 前台新增轻量登录页、token 请求拦截和 401 回登录逻辑；顶部搜索接入项目列表过滤，移除博客遗留的空工具浮层。
+- 管理端“项目管理”调整为只读项目目录；“报告与审批”调整为报告与动作状态观察；移除单独 Connectors 菜单，将连接器预留位并入证据同步页。
+
+### 验证
+
+- `agent-server .\mvnw.cmd -q -DskipTests compile`：通过。
+- `agent-admin npm run build`：通过，仅保留 Vite 大 chunk 警告。
+- `agent-front npm run build`：通过，仅保留 Vite 大 chunk 警告。
+- 重启后端后验证：未登录访问 `/api/workspace/projects/overview` 返回 401；登录后 `/api/workspace/projects/overview` 和 `/api/admin/projects/runs` 均可访问。
+- Chrome smoke test：前台登录后进入项目工作台首页；管理端 `/projects` 和 `/reports` 页面可打开，截图保存在 `logs/`（不提交）。
+
+---
+
 ## 企业 Agent Workbench 去博客化清理
 
 **日期**：2026-07-30

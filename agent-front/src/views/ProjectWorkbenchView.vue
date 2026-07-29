@@ -167,7 +167,6 @@
                 <div class="action-buttons">
                   <button v-if="action.status === 'PENDING_APPROVAL'" type="button" class="primary-button small" @click="approveAction(action)">批准</button>
                   <button v-if="action.status === 'PENDING_APPROVAL'" type="button" class="quiet-button small" @click="rejectAction(action)">驳回</button>
-                  <button v-if="action.status === 'APPROVED'" type="button" class="primary-button small" @click="executeActionNow(action)">执行</button>
                 </div>
                 <small v-if="action.errorMessage" class="action-error">{{ action.errorMessage }}</small>
               </div>
@@ -216,7 +215,6 @@ import { useMessage } from 'naive-ui'
 import { useRoute } from 'vue-router'
 import {
   approveProjectAction,
-  executeProjectAction,
   getProject,
   getProjectEvidence,
   getProjectRun,
@@ -314,9 +312,9 @@ async function selectRun(id) {
 
 async function approveAction(action) {
   try {
-    const response = await approveProjectAction(selectedRun.value.id, action.id, { approved: true, approvedBy: 'workspace-user' })
+    const response = await approveProjectAction(selectedRun.value.id, action.id, { approved: true })
     selectedRun.value = response.data.data
-    message.success('动作已批准，可继续执行 GitHub connector')
+    message.success('动作已批准，系统将异步执行外部连接器')
   } catch (error) {
     message.error(error.response?.data?.message || '审批失败')
   }
@@ -324,25 +322,11 @@ async function approveAction(action) {
 
 async function rejectAction(action) {
   try {
-    const response = await approveProjectAction(selectedRun.value.id, action.id, { approved: false, approvedBy: 'workspace-user' })
+    const response = await approveProjectAction(selectedRun.value.id, action.id, { approved: false })
     selectedRun.value = response.data.data
     message.info('动作已驳回')
   } catch (error) {
     message.error(error.response?.data?.message || '审批失败')
-  }
-}
-
-async function executeActionNow(action) {
-  try {
-    const response = await executeProjectAction(selectedRun.value.id, action.id)
-    selectedRun.value = response.data.data
-    if (selectedRun.value.actions?.find(item => item.id === action.id)?.status === 'BLOCKED') {
-      message.warning('GitHub 写入被阻塞，请检查 Token 或仓库权限')
-    } else {
-      message.success('已提交 GitHub connector')
-    }
-  } catch (error) {
-    message.error(error.response?.data?.message || '执行失败')
   }
 }
 

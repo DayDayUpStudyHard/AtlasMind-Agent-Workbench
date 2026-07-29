@@ -29,7 +29,7 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getProject, getProjects } from '../api/index.js'
+import { getAgentRuns } from '../api/index.js'
 
 const loading = ref(false)
 const runs = ref([])
@@ -39,12 +39,7 @@ onMounted(fetchRuns)
 async function fetchRuns() {
   loading.value = true
   try {
-    const projectRows = (await getProjects()).data.data || []
-    const details = await Promise.all(projectRows.map(project => getProject(project.id)))
-    runs.value = details.flatMap(response => {
-      const project = response.data.data || {}
-      return (project.runs || []).map(run => ({ ...run, projectName: project.name }))
-    }).sort((a, b) => Number(b.id) - Number(a.id))
+    runs.value = (await getAgentRuns()).data.data || []
   } finally {
     loading.value = false
   }

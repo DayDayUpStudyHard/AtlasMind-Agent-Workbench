@@ -1,12 +1,24 @@
 # AtlasMind Agent Workbench
 
+## 2026-07-30 update: workspace/admin responsibility split
+
+This iteration separates the product surface into two clear work modes:
+
+- **Front workspace (`agent-front`, http://localhost:15174)**: for tech leads, engineering managers and project owners. It owns project onboarding, project health analysis, report consumption, project-scoped Agent Runs, and business approval gates.
+- **Admin operations (`agent-admin`, http://localhost:15173)**: for workspace admins, AI engineers, DevOps and knowledge administrators. It owns knowledge governance, data/source health, Agent Run observability, reports/action audit state, logs and runtime settings.
+- Workspace APIs now live under `/api/workspace/**`; admin operations APIs live under `/api/admin/**`.
+- Sa-Token now protects `/api/workspace/**`, `/api/admin/**`, `/api/kb/**`, `/api/upload/**` and the deprecated `/api/projects/**` namespace.
+- Approval identity is taken from the authenticated session. The client can no longer decide `approvedBy`.
+- Approved external actions are queued for asynchronous execution after approval; the front no longer exposes a second manual "execute" command.
+- Admin project pages are read-only operational views. Project creation, analysis start and business approvals are handled in the workspace.
+
 ## 2026-07-30 update: blog domain removed
 
 AtlasMind has been cleaned up as an enterprise R&D Agent Workbench. The legacy blog/CMS domain is no longer part of the active product surface:
 
 - Removed article/category/tag/comment/moment/about backend APIs and their service/mapper/entity code.
 - Removed blog routes and pages from both `agent-admin` and `agent-front`.
-- Reframed the admin app as an Agent operations console: projects, knowledge sources, evidence sync, Agent runs, reports/approvals, observability, connectors, logs, and settings.
+- Reframed the admin app as an Agent operations console: project directory, knowledge sources, evidence/data-source health, Agent runs, reports/action audit state, observability, logs, and settings.
 - Rewrote `agent-server/sql/init.sql` so a fresh database initializes Agent, RAG, trace, project, evidence, report, approval, user, setting, and operation-log tables only.
 - Added `agent-server/sql/drop_legacy_blog_tables.sql` for existing local databases; it drops `t_article`, `t_category`, `t_tag`, `t_comment`, `t_moment`, `t_about`, and article relation tables.
 - Existing local legacy blog tables were dropped after confirmation that local data can be discarded.
@@ -189,7 +201,7 @@ Tool Calling：连接真实工程系统
 | GitHub 只读证据同步 | 已支持仓库元数据、README、根目录关键文件、Commit、Issue、PR 同步到 `project_evidence` |
 | 本地项目 / Jira / 禅道 / CI/CD | 已预留 connector 边界，后续建设 |
 | 报告 Artifact | 已支持 Web 报告、Citation 展示和 Markdown 导出 |
-| 审批式执行 | 已支持 GitHub Issue 草稿审批与受控执行 |
+| 审批式执行 | 已支持 GitHub Issue 草稿审批、登录态审批人记录与异步受控执行 |
 
 ## 目标导航
 
@@ -205,7 +217,7 @@ Tool Calling：连接真实工程系统
 8. 审批与审计
 9. 系统设置
 
-当前前台仍保留知识浏览和历史内容页面，作为迁移期兼容入口；后续将逐步移除文章、动态、留言等博客式主流程。
+当前前台保留项目组合、项目工作台、知识来源浏览和项目级 Agent 对话；历史博客式页面、文章动态和留言主流程已移除。
 
 ## 技术架构
 
@@ -224,16 +236,16 @@ Tool Calling：连接真实工程系统
 
 ```text
 agent-server/
-  业务 API、权限、会话、任务、审批、Agent Gateway、审计
+  Workspace API、Admin API、权限、会话、任务、审批、Agent Gateway、审计
 
 tools/chat-assistant/backend/
   文档解析、切片、Embedding、向量检索、RAG 回答、评估
 
 agent-admin/
-  项目、知识源、Agent Run、报表、评估和可观测性管理
+  平台运维、知识治理、数据源健康、Agent Run、报表状态和可观测性管理
 
 agent-front/
-  研发工作台、项目问答、报告查看和审批入口
+  项目组合、研发工作台、项目问答、报告查看和业务审批入口
 ```
 
 ## 项目结构
@@ -370,15 +382,21 @@ MINERU_ENABLED=false
 
 本阶段仍然只接入 GitHub 方向的最小闭环。本地项目、Jira/禅道、CI/CD 已预留 connector 边界，后续按真实用户验证结果扩展。
 
-### GitHub 证据同步接口
+### Workspace / Admin API 边界
 
 当前 GitHub connector 是只读能力，公开仓库无需 Token，私有仓库可通过 `GITHUB_APP_TOKEN` 配置访问：
 
 | API | 作用 |
 | --- | --- |
-| `POST /api/projects/{projectId}/sync` | 手动同步 GitHub 证据 |
-| `GET /api/projects/{projectId}/evidence` | 查看项目证据列表，可按 `objectType` 过滤 |
-| `GET /api/projects/{projectId}/sync-jobs` | 查看同步任务状态、失败原因和计数 |
+| `GET /api/workspace/projects/overview` | 前台项目组合总览 |
+| `POST /api/workspace/projects` | 前台接入一个研发项目 |
+| `POST /api/workspace/projects/{projectId}/sync` | 前台为项目手动同步 GitHub 证据 |
+| `POST /api/workspace/projects/{projectId}/runs` | 前台启动项目健康分析 Agent Run |
+| `POST /api/workspace/projects/runs/{runId}/actions/{actionId}/approval` | 项目负责人审批或驳回外部动作 |
+| `GET /api/admin/projects` | 后台项目目录，只读运营视图 |
+| `GET /api/admin/projects/runs` | 后台全局 Agent Run 轨迹 |
+| `GET /api/admin/projects/reports` | 后台全局报告列表 |
+| `GET /api/admin/projects/actions` | 后台全局动作状态与失败审计 |
 
 证据类型包括 `REPO`、`README`、`FILE_TREE`、`FILE`、`COMMIT`、`ISSUE` 和 `PR`。报告中的 citation 会保留类型、标题、来源路径或链接、命中片段和置信分。
 

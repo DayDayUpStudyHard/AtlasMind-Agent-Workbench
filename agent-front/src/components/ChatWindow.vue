@@ -1,6 +1,6 @@
 <template>
   <div class="chat-widget">
-    <!-- 浮动触发按钮 — 位于 ToolsWidget 上方 -->
+    <!-- 浮动触发按钮 -->
     <button class="chat-trigger" :class="{ active: panelOpen }" @click="togglePanel" title="AI智能问答">
       <svg class="trigger-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
         <path d="M4 5h16v12H7l-3 3z" />

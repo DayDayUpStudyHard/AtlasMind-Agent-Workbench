@@ -28,9 +28,15 @@ public interface AgentProjectService {
 
     Map<String, Object> getRun(Long runId);
 
-    Map<String, Object> approveAction(Long runId, Long actionId, Map<String, Object> request);
+    Map<String, Object> approveAction(Long runId, Long actionId, Map<String, Object> request, String approvedBy);
 
     Map<String, Object> executeAction(Long runId, Long actionId);
+
+    List<Map<String, Object>> listAllRuns();
+
+    List<Map<String, Object>> listReports();
+
+    List<Map<String, Object>> listActions(String status);
 
     void executeRun(Long runId);
 }

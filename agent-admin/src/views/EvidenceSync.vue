@@ -23,9 +23,6 @@
           <span>证据 {{ project.evidenceCount || 0 }}</span>
           <span>最近同步 {{ formatDate(project.lastSyncAt) }}</span>
         </div>
-        <div class="card-actions">
-          <el-button size="small" type="primary" @click="sync(project)">同步 GitHub</el-button>
-        </div>
       </section>
     </div>
 
@@ -41,8 +38,7 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { getProjects, syncProjectEvidence } from '../api/index.js'
+import { getProjects } from '../api/index.js'
 
 const loading = ref(false)
 const projects = ref([])
@@ -62,12 +58,6 @@ async function fetchProjects() {
   } finally {
     loading.value = false
   }
-}
-
-async function sync(project) {
-  await syncProjectEvidence(project.id)
-  ElMessage.success('同步任务已触发')
-  await fetchProjects()
 }
 
 function formatDate(value) {

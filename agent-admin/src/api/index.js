@@ -43,22 +43,16 @@ export function uploadFile(file) {
 
 export function getOperationLogs(params) { return api.get('/api/admin/logs', { params }) }
 
-export function getProjects() { return api.get('/api/projects') }
-export function getProject(id) { return api.get(`/api/projects/${id}`) }
-export function createProject(data) { return api.post('/api/projects', data) }
-export function syncProjectEvidence(projectId) { return api.post(`/api/projects/${projectId}/sync`) }
+export function getProjects() { return api.get('/api/admin/projects') }
+export function getProject(id) { return api.get(`/api/admin/projects/${id}`) }
 export function getProjectEvidence(projectId, params = {}) {
-  return api.get(`/api/projects/${projectId}/evidence`, { params })
+  return api.get(`/api/admin/projects/${projectId}/evidence`, { params })
 }
-export function getProjectSyncJobs(projectId) { return api.get(`/api/projects/${projectId}/sync-jobs`) }
-export function startProjectRun(projectId, data = {}) { return api.post(`/api/projects/${projectId}/runs`, data) }
-export function getProjectRun(runId) { return api.get(`/api/projects/runs/${runId}`) }
-export function approveProjectAction(runId, actionId, data = {}) {
-  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/approval`, data)
-}
-export function executeProjectAction(runId, actionId) {
-  return api.post(`/api/projects/runs/${runId}/actions/${actionId}/execute`)
-}
+export function getProjectSyncJobs(projectId) { return api.get(`/api/admin/projects/${projectId}/sync-jobs`) }
+export function getProjectRun(runId) { return api.get(`/api/admin/projects/runs/${runId}`) }
+export function getAgentRuns() { return api.get('/api/admin/projects/runs') }
+export function getAgentReports() { return api.get('/api/admin/projects/reports') }
+export function getAgentActions(params = {}) { return api.get('/api/admin/projects/actions', { params }) }
 
 export function getKbSpaces() { return api.get('/api/admin/kb/spaces') }
 export function createKbSpace(data) { return api.post('/api/admin/kb/spaces', data) }

@@ -30,7 +30,7 @@
 
     <section v-if="loading && !projects.length" class="empty-panel"><span class="loader"></span><strong>正在装载项目上下文</strong><p>读取项目事实、历史 Agent Run 和审批状态。</p></section>
     <section v-else class="project-grid">
-      <router-link v-for="project in projects" :key="project.id" :to="`/projects/${project.id}`" class="project-card">
+      <router-link v-for="project in visibleProjects" :key="project.id" :to="`/projects/${project.id}`" class="project-card">
         <div class="project-card-top"><span class="project-key">{{ project.projectKey }}</span><span class="health-chip" :class="healthClass(project.healthStatus)">{{ healthLabel(project.healthStatus) }}</span></div>
         <h3>{{ project.name }}</h3>
         <p class="project-description">{{ project.description || '尚未补充项目描述。' }}</p>
@@ -78,17 +78,31 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import { createProject, getProjectOverview } from '../api/index.js'
 
 const message = useMessage()
+const route = useRoute()
 const loading = ref(false)
 const creating = ref(false)
 const showCreate = ref(false)
 const projects = ref([])
 const overview = ref({})
 const form = ref({ name: '', repositoryUrl: '', currentMilestone: '', businessScope: '' })
+const visibleProjects = computed(() => {
+  const keyword = String(route.query.keyword || '').trim().toLowerCase()
+  if (!keyword) return projects.value
+  return projects.value.filter(project => [
+    project.name,
+    project.projectKey,
+    project.description,
+    project.repositoryUrl,
+    project.currentMilestone,
+    project.techStack
+  ].filter(Boolean).some(value => String(value).toLowerCase().includes(keyword)))
+})
 const workflow = [
   { title: '装载上下文', description: '项目事实、知识源、历史记忆' },
   { title: '检索证据', description: 'RAG + GitHub connector' },

@@ -47,7 +47,7 @@
         <el-header class="topbar">
           <div class="topbar-left">
             <span class="topbar-path">{{ pageTitle }}</span>
-            <span class="topbar-subtitle">Projects, evidence, Agent runs, and approvals</span>
+            <span class="topbar-subtitle">Platform operations, evidence, Agent runs, and audit state</span>
           </div>
           <div class="topbar-actions">
             <el-popover placement="bottom-end" width="320" trigger="click" @show="fetchNotifications">
@@ -137,20 +137,18 @@ const icons = {
   run: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 4v16"/><path d="M19 12 8 5v14z"/></svg>',
   report: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg>',
   observe: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M3 3v18h18"/><path d="M7 15l3-3 3 2 5-7"/></svg>',
-  connector: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M10 13a5 5 0 0 0 7.5.5l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7.5-.5l-2 2a5 5 0 0 0 7 7l1-1"/></svg>',
   log: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
   settings: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4z"/></svg>'
 }
 
 const menuItems = [
   { path: '/', label: 'Agent 控制台', icon: icons.console },
-  { path: '/projects', label: '项目管理', icon: icons.project },
+  { path: '/projects', label: '项目目录', icon: icons.project },
   { path: '/knowledge', label: '知识来源', icon: icons.knowledge },
   { path: '/evidence-sync', label: '证据同步', icon: icons.sync },
   { path: '/agent-runs', label: 'Agent 运行记录', icon: icons.run },
-  { path: '/reports', label: '报告与审批', icon: icons.report },
+  { path: '/reports', label: '报告与动作', icon: icons.report },
   { path: '/ai-observability', label: '可观测性', icon: icons.observe },
-  { path: '/connectors', label: '连接器配置', icon: icons.connector },
   { path: '/logs', label: '系统日志', icon: icons.log },
   { path: '/settings', label: '系统设置', icon: icons.settings }
 ]

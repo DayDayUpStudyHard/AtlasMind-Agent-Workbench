@@ -26,6 +26,10 @@
           @keyup.enter="doSearch"
         />
       </div>
+      <div class="header-actions">
+        <a class="admin-link" :href="adminUrl" target="_blank" rel="noreferrer">管理端</a>
+        <button type="button" class="logout-button" @click="logout">退出</button>
+      </div>
     </div>
   </header>
 </template>
@@ -37,6 +41,7 @@ import { useRouter } from 'vue-router'
 const router = useRouter()
 const keyword = ref('')
 const scrolled = ref(false)
+const adminUrl = import.meta.env.VITE_ADMIN_URL || 'http://localhost:15173/'
 
 if (typeof window !== 'undefined') {
   window.addEventListener('scroll', () => { scrolled.value = window.scrollY > 10 })
@@ -49,6 +54,11 @@ function doSearch() {
   } else {
     router.push({ path: '/' })
   }
+}
+
+function logout() {
+  localStorage.removeItem('atlasmind-token')
+  router.push('/login')
 }
 </script>
 
@@ -129,6 +139,37 @@ function doSearch() {
 }
 .search-input::placeholder { color: #c0c4cc; }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.admin-link,
+.logout-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 10px;
+  color: var(--atlas-muted);
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-border);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.admin-link:hover,
+.logout-button:hover {
+  color: var(--atlas-primary);
+  border-color: var(--atlas-primary);
+}
+
 @media (max-width: 860px) {
   .header-inner {
     height: auto;
@@ -171,10 +212,15 @@ function doSearch() {
 
   .search-box {
     order: 2;
-    flex: 0 0 100%;
-    width: 100%;
+    flex: 1 1 calc(100% - 96px);
+    width: auto;
     max-width: none;
     margin-left: 0;
+  }
+
+  .header-actions {
+    order: 2;
+    margin-left: auto;
   }
 
   .nav {

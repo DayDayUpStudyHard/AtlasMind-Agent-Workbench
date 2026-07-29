@@ -1,7 +1,10 @@
 package com.atlasmind.controller;
 
+import cn.dev33.satoken.stp.StpUtil;
 import com.atlasmind.common.Result;
+import com.atlasmind.entity.User;
 import com.atlasmind.service.AgentProjectService;
+import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -13,10 +16,11 @@ import java.util.Map;
  */
 @RestController
 @RequiredArgsConstructor
-@RequestMapping("/api/projects")
+@RequestMapping("/api/workspace/projects")
 public class AgentWorkbenchController {
 
     private final AgentProjectService agentProjectService;
+    private final UserService userService;
 
     @GetMapping("/overview")
     public Result<Map<String, Object>> overview() {
@@ -77,13 +81,15 @@ public class AgentWorkbenchController {
             @PathVariable Long runId,
             @PathVariable Long actionId,
             @RequestBody(required = false) Map<String, Object> request) {
-        return Result.ok(agentProjectService.approveAction(runId, actionId, request == null ? Map.of() : request));
+        return Result.ok(agentProjectService.approveAction(runId, actionId, request == null ? Map.of() : request, currentActor()));
     }
 
-    @PostMapping("/runs/{runId}/actions/{actionId}/execute")
-    public Result<Map<String, Object>> execute(
-            @PathVariable Long runId,
-            @PathVariable Long actionId) {
-        return Result.ok(agentProjectService.executeAction(runId, actionId));
+    private String currentActor() {
+        long userId = StpUtil.getLoginIdAsLong();
+        User user = userService.getById(userId);
+        if (user == null) {
+            return "user:" + userId;
+        }
+        return user.getUsername() == null || user.getUsername().isBlank() ? "user:" + userId : user.getUsername();
     }
 }
