@@ -23,16 +23,12 @@ This iteration separates the product surface into two clear work modes:
 - Approved external actions are queued for asynchronous execution after approval; the front no longer exposes a second manual "execute" command.
 - Admin project pages are read-only operational views. Project creation, analysis start and business approvals are handled in the workspace.
 
-## 2026-07-30 update: blog domain removed
+## 2026-07-30 update: enterprise Agent workbench
 
-AtlasMind has been cleaned up as an enterprise R&D Agent Workbench. The legacy blog/CMS domain is no longer part of the active product surface:
+AtlasMind is now scoped as an enterprise R&D Agent Workbench.
 
-- Removed article/category/tag/comment/moment/about backend APIs and their service/mapper/entity code.
-- Removed blog routes and pages from both `agent-admin` and `agent-front`.
-- Reframed the admin app as an Agent operations console: project directory, knowledge governance, project data sync, Agent runs, reports/action audit state, observability, logs, and settings.
-- Rewrote `agent-server/sql/init.sql` so a fresh database initializes Agent, RAG, trace, project, evidence, report, approval, user, setting, and operation-log tables only.
-- Added `agent-server/sql/drop_legacy_blog_tables.sql` for existing local databases; it drops `t_article`, `t_category`, `t_tag`, `t_comment`, `t_moment`, `t_about`, and article relation tables.
-- Existing local legacy blog tables were dropped after confirmation that local data can be discarded.
+- The admin app is an Agent operations console: project directory, knowledge governance, project data sync, Agent runs, reports/action audit state, observability, logs, and settings.
+- `agent-server/sql/init.sql` initializes only the Agent, RAG, trace, project, evidence, report, approval, user, setting, and operation-log tables.
 
 The product boundary is now: **single enterprise/R&D team internal deployment, first user = tech lead or engineering manager, first scenario = project health analysis and delivery planning Agent**.
 
