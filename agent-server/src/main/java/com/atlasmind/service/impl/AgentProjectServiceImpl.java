@@ -111,7 +111,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 FROM agent_project WHERE id=? AND deleted=0
                 """, projectId));
         if (project == null) {
-            throw new IllegalArgumentException("Project not found");
+            throw new IllegalArgumentException("没有找到这个项目");
         }
         project.put("memories", jdbcTemplate.queryForList("""
                 SELECT id, memory_type AS memoryType, title, content, source_type AS sourceType,
@@ -146,7 +146,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     public Map<String, Object> createProject(Map<String, Object> request) {
         String name = text(request, "name");
         if (name.isBlank()) {
-            throw new IllegalArgumentException("Project name is required");
+            throw new IllegalArgumentException("项目名称不能为空");
         }
         String projectKey = text(request, "projectKey");
         if (projectKey.isBlank()) {
@@ -176,14 +176,14 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         Map<String, Object> project = getProject(projectId);
         String repositoryUrl = text(project, "repositoryUrl");
         if (repositoryUrl.isBlank()) {
-            throw new IllegalArgumentException("Project repository URL is required before sync");
+            throw new IllegalArgumentException("同步证据前需要先配置项目仓库地址");
         }
         Long sourceId = ensureProjectSource(projectId, value(project, "repositoryType", "GITHUB"),
                 repositoryUrl, value(project, "defaultBranch", "main"));
         Long jobId = insert("""
                 INSERT INTO project_sync_job
                 (project_id, source_id, sync_type, status, progress, message, started_at)
-                VALUES (?, ?, 'MANUAL', 'RUNNING', 10, 'Connecting to GitHub read API', NOW())
+                VALUES (?, ?, 'MANUAL', 'RUNNING', 10, '正在连接 GitHub 只读接口', NOW())
                 """, projectId, sourceId);
         jdbcTemplate.update("UPDATE project_source SET status='SYNCING', last_sync_job_id=?, last_error=NULL WHERE id=?",
                 jobId, sourceId);
@@ -194,14 +194,14 @@ public class AgentProjectServiceImpl implements AgentProjectService {
             jdbcTemplate.update("""
                     UPDATE project_sync_job SET status='DONE', progress=100, message=?,
                     counters_json=?, finished_at=NOW() WHERE id=?
-                    """, "Synced " + evidence.size() + " GitHub evidence items", json(counters), jobId);
+                    """, "已同步 " + evidence.size() + " 条 GitHub 证据", json(counters), jobId);
             jdbcTemplate.update("""
                     UPDATE project_source SET status='READY', last_sync_job_id=?, last_sync_at=NOW(),
                     last_error=NULL WHERE id=?
                     """, jobId, sourceId);
         } catch (Exception e) {
             jdbcTemplate.update("""
-                    UPDATE project_sync_job SET status='FAILED', progress=100, message='GitHub sync failed',
+                    UPDATE project_sync_job SET status='FAILED', progress=100, message='GitHub 证据同步失败',
                     error_message=?, finished_at=NOW() WHERE id=?
                     """, e.getMessage(), jobId);
             jdbcTemplate.update("""
@@ -267,21 +267,21 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         requireProject(projectId);
         String question = text(request, "question");
         if (question.isBlank()) {
-            question = "Analyze project health, key risks, and the next delivery plan";
+            question = "分析项目健康状态、关键风险和下一阶段交付计划";
         }
         Long runId = insert("""
                 INSERT INTO agent_run
                 (project_id, run_type, trigger_type, question, status, progress, current_step, started_at)
-                VALUES (?, 'HEALTH_ANALYSIS', ?, ?, 'CREATED', 0, 'Waiting for Agent dispatch', NOW())
+                VALUES (?, 'HEALTH_ANALYSIS', ?, ?, 'CREATED', 0, '等待 Agent 调度', NOW())
                 """,
                 projectId, value(request, "triggerType", "MANUAL"), question);
         String[][] steps = {
-                {"Context Builder", "Build project context"},
-                {"Evidence Retriever", "Retrieve project evidence"},
-                {"Project Analyst", "Analyze five health dimensions"},
-                {"Evidence Reviewer", "Verify conclusions and citations"},
-                {"Delivery Planner", "Create delivery plan"},
-                {"Report Composer", "Compose auditable report"}
+                {"上下文构建 Agent", "构建项目上下文"},
+                {"证据检索 Agent", "检索项目证据"},
+                {"项目分析 Agent", "分析五个健康维度"},
+                {"证据复核 Agent", "核验结论和引用来源"},
+                {"交付规划 Agent", "生成交付计划"},
+                {"报告生成 Agent", "生成可审计报告"}
         };
         for (int i = 0; i < steps.length; i++) {
             jdbcTemplate.update("""
@@ -313,7 +313,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 FROM agent_run WHERE id=?
                 """, runId));
         if (run == null) {
-            throw new IllegalArgumentException("Agent Run not found");
+            throw new IllegalArgumentException("没有找到这次 Agent Run");
         }
         run.put("steps", jdbcTemplate.queryForList("""
                 SELECT id, step_order AS stepOrder, role_name AS roleName, step_name AS stepName,
@@ -345,7 +345,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         Map<String, Object> action = firstOrNull(jdbcTemplate.queryForList(
                 "SELECT id FROM agent_action WHERE id=? AND run_id=?", actionId, runId));
         if (action == null) {
-            throw new IllegalArgumentException("Action not found");
+            throw new IllegalArgumentException("没有找到这个待执行动作");
         }
         boolean approved = booleanValue(request.get("approved"), true);
         String approver = approvedBy == null || approvedBy.isBlank() ? "authenticated-user" : approvedBy;
@@ -356,7 +356,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         if (!approved) {
             jdbcTemplate.update("UPDATE agent_run SET status='COMPLETED', progress=100, current_step='审批结束', finished_at=NOW() WHERE id=?", runId);
         } else {
-            jdbcTemplate.update("UPDATE agent_run SET current_step='Action approved; queued for execution' WHERE id=?", runId);
+            jdbcTemplate.update("UPDATE agent_run SET current_step='动作已批准，等待异步执行' WHERE id=?", runId);
             dispatchActionAfterCommit(runId, actionId);
         }
         return getRun(runId);
@@ -372,10 +372,10 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 WHERE a.id=? AND a.run_id=?
                 """, actionId, runId));
         if (action == null) {
-            throw new IllegalArgumentException("Action not found");
+            throw new IllegalArgumentException("没有找到这个待执行动作");
         }
         if (!"APPROVED".equals(action.get("status"))) {
-            throw new IllegalArgumentException("Action must be approved before execution");
+            throw new IllegalArgumentException("动作必须审批通过后才能执行");
         }
         try {
             Map<String, Object> payload = parseJson(text(action, "payloadJson"));
@@ -462,13 +462,13 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         Long projectId = longValue(run.get("projectId"));
         Map<String, Object> project = getProject(projectId);
         try {
-            advance(runId, "CONTEXT_BUILDING", 12, "Building project context", 1, "DONE", "Project facts, goals, tech stack, and long-term memory loaded");
-            advance(runId, "ANALYZING", 30, "Retrieving project evidence", 2, "DONE", "RAG plus GitHub connector adapter");
+            advance(runId, "CONTEXT_BUILDING", 12, "正在构建项目上下文", 1, "DONE", "已加载项目事实、目标、技术栈和长期记忆");
+            advance(runId, "ANALYZING", 30, "正在检索项目证据", 2, "DONE", "已读取 RAG 与 GitHub 连接器证据");
 
             List<Map<String, Object>> citations = retrieveEvidence(project);
-            advance(runId, "ANALYZING", 54, "Analyzing five health dimensions", 3, "DONE", "Delivery, quality, architecture, risk, and collaboration");
-            advance(runId, "VERIFYING", 70, "Verifying conclusions and citations", 4, "DONE", "Evidence Reviewer checked sources and unknowns");
-            advance(runId, "PLANNING", 84, "Creating delivery plan", 5, "DONE", "Tasks, dependencies, and acceptance criteria structured");
+            advance(runId, "ANALYZING", 54, "正在分析五个健康维度", 3, "DONE", "已分析交付、质量、架构、风险和协作维度");
+            advance(runId, "VERIFYING", 70, "正在核验结论和引用", 4, "DONE", "证据复核 Agent 已检查来源与待确认项");
+            advance(runId, "PLANNING", 84, "正在生成交付计划", 5, "DONE", "已结构化任务、依赖关系和验收标准");
 
             Map<String, Object> report = buildReport(project, citations);
             Long reportId = insert("""
@@ -487,16 +487,16 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                     VALUES (?,?,'CREATE_GITHUB_ISSUE','PENDING_APPROVAL',?,?)
                     """,
                     projectId, runId, report.get("issueTitle"),
-                    json(Map.of("body", report.get("issueBody"), "source", "AtlasMind report")));
+                    json(Map.of("body", report.get("issueBody"), "source", "AtlasMind 报告")));
             jdbcTemplate.update("""
                     UPDATE agent_project SET health_status=?, health_score=?, last_run_id=?, last_run_at=NOW()
                     WHERE id=?
                     """, report.get("healthStatus"), report.get("healthScore"), runId, projectId);
-            advance(runId, "WAITING_APPROVAL", 96, "Waiting for human approval", 6, "DONE",
-                    "Report #" + reportId + " generated; Issue action #" + actionId + " awaits approval");
+            advance(runId, "WAITING_APPROVAL", 96, "等待人工审批", 6, "DONE",
+                    "报告 #" + reportId + " 已生成；Issue 动作 #" + actionId + " 等待审批");
         } catch (Exception e) {
             jdbcTemplate.update("""
-                    UPDATE agent_run SET status='FAILED', progress=100, current_step='Run failed',
+                    UPDATE agent_run SET status='FAILED', progress=100, current_step='运行失败',
                     error_message=?, finished_at=NOW() WHERE id=?
                     """, e.getMessage(), runId);
         }
@@ -525,7 +525,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         }
         try {
             Map<String, Object> result = aiGateway.testRetrieval(Map.of(
-                    "message", "project health analysis " + text(project, "name") + " " + text(project, "description"),
+                    "message", "项目健康分析 " + text(project, "name") + " " + text(project, "description"),
                     "topK", 5
             ));
             Object hits = result.get("hits");
@@ -542,10 +542,10 @@ public class AgentProjectServiceImpl implements AgentProjectService {
             // A missing Python/ES service is represented as an explicit unknown, not a fake citation.
         }
         if (citations.isEmpty()) {
-            citations.add(Map.of(
+                citations.add(Map.of(
                     "sourceType", "PROJECT_CONTEXT",
                     "sourceId", text(project, "id"),
-                    "title", "Project onboarding facts",
+                    "title", "项目录入事实",
                     "snippet", text(project, "description"),
                     "score", 1.0,
                     "rank", 1
@@ -566,86 +566,88 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 || evidenceCounts.getOrDefault("FILE", 0) > 0
                 || evidenceCounts.getOrDefault("FILE_TREE", 0) > 0;
         List<Map<String, Object>> dimensions = List.of(
-                dimension("Delivery progress", hasIssueEvidence || hasPullRequestEvidence ? 76 : 64,
+                dimension("交付进展", hasIssueEvidence || hasPullRequestEvidence ? 76 : 64,
                         hasIssueEvidence || hasPullRequestEvidence
-                                ? "Open Issue/PR evidence is available for delivery risk review."
-                                : "Milestone is recorded, but live Issue/PR evidence is still missing."),
-                dimension("Quality stability", 66,
-                        "CI/CD evidence is not connected yet, so quality conclusions remain pending confirmation."),
-                dimension("Architecture and debt", hasFileEvidence ? 78 : 62,
+                                ? "已同步 Issue 或 PR 证据，可用于判断交付风险和待办边界。"
+                                : "项目已记录里程碑，但暂未同步实时 Issue/PR 证据，交付判断需要保守处理。"),
+                dimension("质量稳定性", 66,
+                        "CI/CD 证据尚未接入，测试、构建和发布结论需要保持待确认状态。"),
+                dimension("架构与技术债", hasFileEvidence ? 78 : 62,
                         hasFileEvidence
-                                ? "README, file tree, or build configuration evidence is available for architecture review."
-                                : "Repository file evidence is missing; architecture judgement should stay conservative."),
-                dimension("Project risk", hasGithubEvidence ? 70 : 58,
+                                ? "已同步 README、目录树或构建配置，可支撑初步架构判断。"
+                                : "仓库文件证据不足，架构和技术债判断只能作为待确认线索。"),
+                dimension("项目风险", hasGithubEvidence ? 70 : 58,
                         hasGithubEvidence
-                                ? "Evidence Reviewer has citable GitHub facts; unsupported risk statements are still flagged."
-                                : "Only onboarding facts are available, so risk analysis is intentionally limited."),
-                dimension("Engineering collaboration", hasCommitEvidence || hasPullRequestEvidence ? 74 : 60,
+                                ? "证据复核 Agent 已找到可引用的 GitHub 事实；缺少证据的判断仍标记为待确认。"
+                                : "当前主要依赖项目录入事实，风险分析范围被有意限制。"),
+                dimension("工程协作", hasCommitEvidence || hasPullRequestEvidence ? 74 : 60,
                         hasCommitEvidence || hasPullRequestEvidence
-                                ? "Recent commits or pull requests provide collaboration signals."
-                                : "Collaboration metrics require commit and PR sync.")
+                                ? "最近 Commit 或 PR 可作为协作节奏和变更活跃度信号。"
+                                : "协作质量判断需要继续同步 Commit、PR 和评审数据。")
         );
         int score = (int) Math.round(dimensions.stream()
                 .mapToInt(item -> integerValue(item.get("score"))).average().orElse(0));
         String status = score >= 80 ? "HEALTHY" : score >= 65 ? "WATCH" : "AT_RISK";
         List<Map<String, Object>> risks = List.of(
-                risk("R-01", hasIssueEvidence || hasPullRequestEvidence ? "Delivery work needs triage" : "Delivery evidence is incomplete",
-                        "MEDIUM",
+                risk("R-01", hasIssueEvidence || hasPullRequestEvidence ? "交付事项需要进一步分流" : "交付证据不完整",
+                        "中",
                         hasIssueEvidence || hasPullRequestEvidence
-                                ? "Open Issue/PR evidence exists and should be triaged into the next delivery boundary."
-                                : "The current report lacks live Issue, PR, and CI data.",
+                                ? "已存在 Issue/PR 证据，应将其整理进下一阶段交付边界和负责人列表。"
+                                : "当前报告缺少实时 Issue、PR 和 CI 数据，无法完整判断交付阻塞。",
                         citations.get(0)),
-                risk("R-02", hasFileEvidence ? "Technical debt needs code-level follow-up" : "Key technical debt needs confirmation",
-                        "MEDIUM",
+                risk("R-02", hasFileEvidence ? "技术债需要代码级跟进" : "关键技术债需要补证",
+                        "中",
                         hasFileEvidence
-                                ? "Repository documents or build files are available, but dependency/test scans are still needed."
-                                : "Repository structure, dependency, and test scan evidence are required.",
+                                ? "已具备部分仓库文档或构建文件证据，但仍需要依赖扫描、测试覆盖和模块级分析。"
+                                : "需要补充仓库结构、依赖和测试扫描证据后再形成结论。",
                         citations.get(0)),
-                risk("R-03", "Release target lacks acceptance boundary", "LOW", "Definition of Done and milestone acceptance criteria should be added.", Map.of(
+                risk("R-03", "发布目标缺少验收边界", "低", "建议补充 Definition of Done、里程碑验收标准和风险退出条件。", Map.of(
                         "sourceType", "PROJECT_CONTEXT", "sourceId", text(project, "id"),
-                        "title", "Project onboarding facts", "snippet", text(project, "releaseTarget")
+                        "title", "项目录入事实", "snippet", text(project, "releaseTarget")
                 ))
         );
         List<Map<String, Object>> plan = List.of(
-                task("P1", hasGithubEvidence ? "Triage synced GitHub evidence into delivery risks" : "Sync repository tree, README, Issues, and PRs", "Repository Analyst", "R-01",
-                        hasGithubEvidence ? "Map evidence-backed risks to owners and next milestone." : "Create citable code and collaboration facts."),
-                task("P2", "Add technical debt and dependency scan", "Project Analyst", "R-02", "Produce module, dependency, and test coverage evidence."),
-                task("P3", "Confirm next milestone acceptance criteria", "Delivery Planner", "R-03", "Turn report recommendations into executable delivery boundaries.")
+                task("P1", hasGithubEvidence ? "将已同步 GitHub 证据分流为交付风险" : "同步仓库目录、README、Issue 和 PR", "仓库分析 Agent", "R-01",
+                        hasGithubEvidence ? "把有证据支撑的风险映射到负责人和下一里程碑。" : "补齐可引用的代码事实和协作事实。"),
+                task("P2", "补充技术债、依赖和测试扫描", "项目分析 Agent", "R-02", "产出模块、依赖、测试覆盖和构建稳定性证据。"),
+                task("P3", "确认下一里程碑验收标准", "交付规划 Agent", "R-03", "将报告建议转为可执行的交付边界和验收条件。")
         );
-        String title = text(project, "name") + " Project Health and Delivery Plan";
-        String summary = "Current health status is " + status + " with score " + score + ". Evidence Reviewer checked " + repoFacts + " citable facts; unsupported conclusions are marked as pending confirmation.";
+        String title = text(project, "name") + " 项目健康与交付计划";
+        String statusLabel = healthStatusLabel(status);
+        String summary = "当前项目健康状态为「" + statusLabel + "」，评分 " + score + "/100。证据复核 Agent 检查了 "
+                + repoFacts + " 条可引用事实；缺少证据支撑的结论已标记为待确认。";
         String markdown = """
                 # %s
 
-                > Health status: **%s** | Score: **%d/100** | Source: Agent Run
+                > 健康状态：**%s** | 评分：**%d/100** | 来源：Agent Run
 
-                ## Summary
-
-                %s
-
-                ## Five Health Dimensions
+                ## 摘要
 
                 %s
 
-                ## Key Risks
+                ## 五个健康维度
 
                 %s
 
-                ## Next Delivery Plan
+                ## 关键风险
 
                 %s
 
-                ## Citations
+                ## 下一阶段交付计划
 
                 %s
 
-                ## Review Notes
+                ## 引用来源
 
-                Evidence Reviewer checked citations. Items without GitHub or CI facts remain pending confirmation and are not treated as final conclusions.
-                """.formatted(title, status, score, summary,
+                %s
+
+                ## 复核说明
+
+                当前报告由规则化证据分析器生成，用于在 LLM API 未配置时跑通 Agent 状态机、引用和审批闭环。证据复核 Agent 已检查引用；缺少 GitHub、Issue、PR 或 CI 事实的事项仍为待确认，不视为最终结论。
+                """.formatted(title, statusLabel, score, summary,
                 dimensions.stream().map(item -> "- " + item.get("name") + ": " + item.get("score") + "/100 | " + item.get("note")).reduce("", (a, b) -> a + b + "\n"),
                 risks.stream().map(item -> "- [" + item.get("severity") + "] " + item.get("title") + ": " + item.get("description")).reduce("", (a, b) -> a + b + "\n"),
-                plan.stream().map(item -> "- " + item.get("id") + " " + item.get("title") + " (owner role: " + item.get("ownerRole") + ", dependency: " + item.get("dependency") + ")").reduce("", (a, b) -> a + b + "\n"),
+                plan.stream().map(item -> "- " + item.get("id") + " " + item.get("title") + "（负责角色：" + item.get("ownerRole") + "，关联风险：" + item.get("dependency") + "）").reduce("", (a, b) -> a + b + "\n"),
                 citations.stream().limit(6).map(item -> "- [" + item.get("objectType") + "] " + item.get("title") + " | " + item.get("sourceRef")).reduce("", (a, b) -> a + b + "\n"));
         Map<String, Object> report = new HashMap<>();
         report.put("title", title);
@@ -657,9 +659,18 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         report.put("plan", plan);
         report.put("citations", citations);
         report.put("reportMarkdown", markdown);
-        report.put("issueTitle", "[AtlasMind] " + text(project, "name") + " delivery follow-up");
+        report.put("issueTitle", "[AtlasMind] " + text(project, "name") + " 交付跟进");
         report.put("issueBody", markdown);
         return report;
+    }
+
+    private String healthStatusLabel(String status) {
+        return switch (status) {
+            case "HEALTHY" -> "稳定";
+            case "WATCH" -> "关注";
+            case "AT_RISK" -> "有风险";
+            default -> "未分析";
+        };
     }
 
     private void advance(Long runId, String status, int progress, String currentStep,
@@ -678,7 +689,7 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         Integer count = jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM agent_project WHERE id=? AND deleted=0", Integer.class, projectId);
         if (number(count) == 0) {
-            throw new IllegalArgumentException("Project not found");
+            throw new IllegalArgumentException("没有找到这个项目");
         }
     }
 

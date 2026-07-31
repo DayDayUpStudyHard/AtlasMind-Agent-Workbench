@@ -40,7 +40,7 @@
 
       <section class="source-sync-panel">
         <div class="source-copy">
-          <p class="section-kicker">Evidence source</p>
+          <p class="section-kicker">证据来源</p>
           <h2>GitHub 只读证据同步</h2>
           <p>
             Agent Run 会优先读取这里沉淀的仓库、README、配置文件、Issue、PR 和 Commit 证据；
@@ -58,19 +58,19 @@
 
       <section class="health-layout">
         <div class="health-summary">
-          <div class="summary-label">Latest health signal</div>
+          <div class="summary-label">最新健康信号</div>
           <div class="summary-score">{{ project.healthScore || '—' }}<small>/100</small></div>
           <strong>{{ healthLabel(project.healthStatus) }}</strong>
           <p>{{ latestReport?.summary || '尚未运行分析。先同步证据，再启动一次 Agent Run，生成带引用的项目健康报告。' }}</p>
           <div class="summary-foot">
             <span>{{ latestReport ? formatDate(latestReport.createTime) : '等待首次运行' }}</span>
-            <span v-if="latestReport">Report #{{ latestReport.id }}</span>
+            <span v-if="latestReport">报告 #{{ latestReport.id }}</span>
           </div>
         </div>
         <div class="dimensions-panel">
           <div class="panel-heading">
-            <div><p class="section-kicker">Five dimensions</p><h2>项目健康</h2></div>
-            <span class="evidence-note">Evidence Reviewer 核验后更新</span>
+            <div><p class="section-kicker">五维分析</p><h2>项目健康</h2></div>
+            <span class="evidence-note">证据复核 Agent 核验后更新</span>
           </div>
           <div class="dimension-grid">
             <div v-for="item in dimensions" :key="item.name" class="dimension">
@@ -86,14 +86,14 @@
         <div class="main-column">
           <section class="panel-section">
             <div class="panel-heading">
-              <div><p class="section-kicker">Evidence-backed report</p><h2>关键风险</h2></div>
-              <span v-if="latestReport" class="report-status">{{ latestReport.status }}</span>
+              <div><p class="section-kicker">证据报告</p><h2>关键风险</h2></div>
+              <span v-if="latestReport" class="report-status">{{ reportStatusLabel(latestReport.status) }}</span>
             </div>
             <div v-if="risks.length" class="risk-list">
               <article v-for="risk in risks" :key="risk.id" class="risk-row">
-                <div class="risk-marker" :class="String(risk.severity).toLowerCase()"></div>
+                <div class="risk-marker" :class="severityClass(risk.severity)"></div>
                 <div class="risk-body">
-                  <div class="risk-top"><strong>{{ risk.title }}</strong><span>{{ risk.severity }}</span></div>
+                  <div class="risk-top"><strong>{{ risk.title }}</strong><span>{{ severityLabel(risk.severity) }}</span></div>
                   <p>{{ risk.description }}</p>
                   <small v-if="risk.citation">证据：{{ risk.citation.title }} · {{ risk.citation.snippet }}</small>
                 </div>
@@ -104,7 +104,7 @@
 
           <section class="panel-section">
             <div class="panel-heading">
-              <div><p class="section-kicker">Delivery plan</p><h2>下一阶段交付计划</h2></div>
+              <div><p class="section-kicker">交付计划</p><h2>下一阶段交付计划</h2></div>
               <span class="evidence-note">人工确认后执行</span>
             </div>
             <div v-if="plan.length" class="plan-list">
@@ -119,16 +119,16 @@
 
           <section class="panel-section">
             <div class="panel-heading">
-              <div><p class="section-kicker">Citations</p><h2>报告引用来源</h2></div>
+              <div><p class="section-kicker">引用来源</p><h2>报告引用来源</h2></div>
               <span class="evidence-note">{{ citations.length }} 条</span>
             </div>
             <div v-if="citations.length" class="citation-list">
               <a v-for="citation in citations" :key="`${citation.sourceType}-${citation.sourceId}-${citation.rank}`" class="citation-row" :href="citation.sourceUrl || undefined" target="_blank" rel="noreferrer">
-                <span class="citation-type">{{ citation.objectType || citation.sourceType }}</span>
+                <span class="citation-type">{{ objectLabel(citation.objectType || citation.sourceType) }}</span>
                 <div>
                   <strong>{{ citation.title }}</strong>
                   <p>{{ citation.snippet }}</p>
-                  <small>{{ citation.sourceRef || citation.sourceId }} · score {{ scoreText(citation.score) }}</small>
+                  <small>{{ citation.sourceRef || citation.sourceId }} · 置信分 {{ scoreText(citation.score) }}</small>
                 </div>
               </a>
             </div>
@@ -137,7 +137,7 @@
 
           <section v-if="latestReport?.reportMarkdown" class="panel-section report-section">
             <div class="panel-heading">
-              <div><p class="section-kicker">Artifact</p><h2>完整报告</h2></div>
+              <div><p class="section-kicker">报告产物</p><h2>完整报告</h2></div>
               <button class="quiet-button" type="button" @click="downloadMarkdown">导出 Markdown</button>
             </div>
             <div class="markdown-body" v-html="renderMarkdown(latestReport.reportMarkdown)"></div>
@@ -146,11 +146,11 @@
 
         <aside class="side-column">
           <section class="side-panel">
-            <div class="panel-heading"><div><p class="section-kicker">Agent Run</p><h2>运行记录</h2></div></div>
+            <div class="panel-heading"><div><p class="section-kicker">Agent 运行</p><h2>运行记录</h2></div></div>
             <div v-if="runs.length" class="run-list">
               <button v-for="run in runs" :key="run.id" type="button" class="run-row" :class="{ active: selectedRun?.id === run.id }" @click="selectRun(run.id)">
                 <span class="run-status" :class="String(run.status).toLowerCase()"></span>
-                <span class="run-copy"><strong>Run #{{ run.id }}</strong><small>{{ run.currentStep || run.status }}</small></span>
+                <span class="run-copy"><strong>运行 #{{ run.id }}</strong><small>{{ run.currentStep || runStatusLabel(run.status) }}</small></span>
                 <span class="run-progress">{{ run.progress || 0 }}%</span>
               </button>
             </div>
@@ -158,10 +158,10 @@
           </section>
 
           <section class="side-panel">
-            <div class="panel-heading"><div><p class="section-kicker">Approval gate</p><h2>待审批动作</h2></div></div>
+            <div class="panel-heading"><div><p class="section-kicker">审批闸门</p><h2>待审批动作</h2></div></div>
             <div v-if="pendingActions.length" class="action-list">
               <div v-for="action in pendingActions" :key="action.id" class="action-card">
-                <span class="action-label">{{ action.actionType }}</span>
+                <span class="action-label">{{ actionTypeLabel(action.actionType) }}</span>
                 <strong>{{ action.title }}</strong>
                 <p>Agent 已生成草稿，确认后才会调用 GitHub 写接口。</p>
                 <div class="action-buttons">
@@ -175,7 +175,7 @@
           </section>
 
           <section class="side-panel">
-            <div class="panel-heading"><div><p class="section-kicker">Evidence inventory</p><h2>证据库存</h2></div></div>
+            <div class="panel-heading"><div><p class="section-kicker">证据库存</p><h2>证据库存</h2></div></div>
             <div v-if="evidenceSummary.length" class="inventory-list">
               <div v-for="item in evidenceSummary" :key="item.objectType" class="inventory-row">
                 <span>{{ objectLabel(item.objectType) }}</span><strong>{{ item.count }}</strong>
@@ -192,10 +192,10 @@
           </section>
 
           <section class="side-panel source-panel">
-            <div class="panel-heading"><div><p class="section-kicker">Project context</p><h2>长期记忆</h2></div></div>
+            <div class="panel-heading"><div><p class="section-kicker">项目上下文</p><h2>长期记忆</h2></div></div>
             <div v-if="project.memories?.length" class="memory-list">
               <div v-for="memory in project.memories" :key="memory.id" class="memory-row">
-                <span>{{ memory.memoryType }}</span><strong>{{ memory.title }}</strong><p>{{ memory.content }}</p>
+                <span>{{ memoryTypeLabel(memory.memoryType) }}</span><strong>{{ memory.title }}</strong><p>{{ memory.content }}</p>
               </div>
             </div>
             <div v-else class="blank-state">项目事实和决策确认后会沉淀在这里。</div>
@@ -339,7 +339,7 @@ function downloadMarkdown() {
   const blob = new Blob([latestReport.value?.reportMarkdown || ''], { type: 'text/markdown;charset=utf-8' })
   const link = document.createElement('a')
   link.href = URL.createObjectURL(blob)
-  link.download = `${project.value.projectKey}-health-report.md`
+  link.download = `${project.value.projectKey}-健康分析报告.md`
   link.click()
   URL.revokeObjectURL(link.href)
 }
@@ -352,8 +352,33 @@ function healthClass(status) { return String(status || 'UNKNOWN').toLowerCase() 
 function healthLabel(status) { return { HEALTHY: '稳定', WATCH: '关注', AT_RISK: '有风险', UNKNOWN: '未分析' }[status] || '未分析' }
 function sourceStatusClass(status) { return String(status || 'PENDING').toLowerCase() }
 function sourceStatusLabel(status) { return { READY: '已就绪', SYNCING: '同步中', FAILED: '失败', PENDING: '待同步' }[status] || '待同步' }
+function reportStatusLabel(status) { return { DRAFT: '草稿', PUBLISHED: '已发布', ARCHIVED: '已归档' }[status] || status || '未知' }
+function runStatusLabel(status) {
+  return {
+    CREATED: '已创建',
+    CONTEXT_BUILDING: '构建上下文',
+    ANALYZING: '分析中',
+    VERIFYING: '复核中',
+    PLANNING: '规划中',
+    WAITING_APPROVAL: '等待审批',
+    COMPLETED: '已完成',
+    FAILED: '失败'
+  }[status] || status || '未知'
+}
+function severityClass(severity) {
+  return { 高: 'high', 中: 'medium', 低: 'low', HIGH: 'high', MEDIUM: 'medium', LOW: 'low' }[severity] || 'medium'
+}
+function severityLabel(severity) {
+  return { HIGH: '高', MEDIUM: '中', LOW: '低' }[severity] || severity || '待确认'
+}
+function actionTypeLabel(type) {
+  return { CREATE_GITHUB_ISSUE: '创建 GitHub Issue' }[type] || type || '外部动作'
+}
+function memoryTypeLabel(type) {
+  return { FACT: '事实', DECISION: '决策', RISK: '风险', PREFERENCE: '偏好', PROJECT_CONTEXT: '项目上下文' }[type] || type || '记忆'
+}
 function objectLabel(type) {
-  return { REPO: '仓库', README: 'README', FILE_TREE: '目录', FILE: '文件', ISSUE: 'Issue', PR: 'PR', COMMIT: 'Commit', PROJECT_CONTEXT: '项目事实' }[type] || type
+  return { GITHUB: 'GitHub', REPO: '仓库', README: 'README', FILE_TREE: '目录', FILE: '文件', ISSUE: 'Issue', PR: 'PR', COMMIT: 'Commit', PROJECT_CONTEXT: '项目事实' }[type] || type
 }
 </script>
 

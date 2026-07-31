@@ -1,5 +1,16 @@
 # AtlasMind Agent Workbench
 
+## 2026-07-30 update: Chinese health reports and analyzer boundary
+
+Project health reports now use Chinese wording across the backend report generator and the front workspace detail page. The default seed project is also localized so a fresh or restarted local database no longer presents the workbench as an English demo.
+
+Current MVP behavior is explicit:
+
+- When no LLM API key is configured, AtlasMind uses a rule-based evidence analyzer to generate a conservative health report.
+- The analyzer is not fake LLM output. It reads project facts, synced GitHub evidence, RAG fallback results, and citations, then marks weakly evidenced conclusions as pending confirmation.
+- This keeps the Agent Run state machine, citation chain, approval gate and observability path runnable before the deeper LLM report composer is connected.
+- Existing reports in `agent_report` are stored snapshots. Old English reports remain English until a new Agent Run regenerates the report.
+
 ## 2026-07-30 update: workspace/admin responsibility split
 
 This iteration separates the product surface into two clear work modes:
@@ -18,7 +29,7 @@ AtlasMind has been cleaned up as an enterprise R&D Agent Workbench. The legacy b
 
 - Removed article/category/tag/comment/moment/about backend APIs and their service/mapper/entity code.
 - Removed blog routes and pages from both `agent-admin` and `agent-front`.
-- Reframed the admin app as an Agent operations console: project directory, knowledge sources, evidence/data-source health, Agent runs, reports/action audit state, observability, logs, and settings.
+- Reframed the admin app as an Agent operations console: project directory, knowledge governance, project data sync, Agent runs, reports/action audit state, observability, logs, and settings.
 - Rewrote `agent-server/sql/init.sql` so a fresh database initializes Agent, RAG, trace, project, evidence, report, approval, user, setting, and operation-log tables only.
 - Added `agent-server/sql/drop_legacy_blog_tables.sql` for existing local databases; it drops `t_article`, `t_category`, `t_tag`, `t_comment`, `t_moment`, `t_about`, and article relation tables.
 - Existing local legacy blog tables were dropped after confirmation that local data can be discarded.
@@ -198,7 +209,7 @@ Tool Calling：连接真实工程系统
 | 可观测性 | 管理端已具备问答链路查看基础 |
 | 评估集 | 已有评估用例和运行结果数据模型 |
 | Agent Run | 已落地异步运行、步骤状态、报告快照和审批动作 |
-| GitHub 只读证据同步 | 已支持仓库元数据、README、根目录关键文件、Commit、Issue、PR 同步到 `project_evidence` |
+| GitHub 只读项目数据同步 | 已支持仓库元数据、README、根目录关键文件、Commit、Issue、PR 同步到 `project_evidence` |
 | 本地项目 / Jira / 禅道 / CI/CD | 已预留 connector 边界，后续建设 |
 | 报告 Artifact | 已支持 Web 报告、Citation 展示和 Markdown 导出 |
 | 审批式执行 | 已支持 GitHub Issue 草稿审批、登录态审批人记录与异步受控执行 |
@@ -217,7 +228,7 @@ Tool Calling：连接真实工程系统
 8. 审批与审计
 9. 系统设置
 
-当前前台保留项目组合、项目工作台、知识来源浏览和项目级 Agent 对话；历史博客式页面、文章动态和留言主流程已移除。
+当前前台保留项目组合、项目工作台、Agent 参考库浏览和项目级 Agent 对话；历史博客式页面、文章动态和留言主流程已移除。
 
 ## 技术架构
 
@@ -351,7 +362,7 @@ MINERU_ENABLED=false
 
 ## 首条垂直闭环（已落地）
 
-当前版本已经把第一条研发交付闭环接入前后端，并补上真实 GitHub 证据同步：
+当前版本已经把第一条研发交付闭环接入前后端，并补上真实 GitHub 项目数据同步：
 
 ```text
 项目接入
@@ -374,7 +385,7 @@ MINERU_ENABLED=false
 - `project_source`、`project_sync_job`、`project_evidence` 数据模型。
 - 项目总览首页与项目工作台详情页。
 - GitHub 只读同步：仓库元数据、README、根目录文件树、关键配置文件、最近 Commit、Open Issue 和 Open PR。
-- Agent Run 优先使用真实 `project_evidence` 作为 Citation，没有同步证据时再回退知识库检索和项目事实。
+- Agent Run 优先使用真实 `project_evidence` 作为 Citation，没有同步证据时再回退 Agent 参考库检索和项目事实。
 - 五维健康视图：交付、质量、架构、风险、工程协作。
 - 风险证据、交付任务、Agent Run 进度和审批动作展示。
 - 异步执行、失败状态、报告快照和 Markdown 导出。

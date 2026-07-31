@@ -2,7 +2,7 @@
   <div class="page">
     <section class="page-head">
       <div>
-        <span class="eyebrow">Reports & Action State</span>
+        <span class="eyebrow">报告与动作状态</span>
         <h2>报告与动作状态</h2>
         <p>后台查看 Agent 报告、业务审批队列和外部动作执行结果。审批决定由项目前台的负责人完成，后台只处理阻塞与审计。</p>
       </div>
@@ -19,9 +19,9 @@
           <article v-for="report in reports" :key="report.id" class="record-row">
             <div>
               <strong>{{ report.title }}</strong>
-              <p>{{ report.projectName }} / {{ report.healthStatus }} / {{ report.healthScore }}/100</p>
+              <p>{{ report.projectName }} / {{ healthLabel(report.healthStatus) }} / {{ report.healthScore }}/100</p>
             </div>
-            <el-tag effect="plain">{{ report.status }}</el-tag>
+            <el-tag effect="plain">{{ reportStatusLabel(report.status) }}</el-tag>
           </article>
           <el-empty v-if="!loading && reports.length === 0" description="暂无报告" :image-size="72" />
         </div>
@@ -36,10 +36,10 @@
           <article v-for="action in actions" :key="action.id" class="record-row">
             <div>
               <strong>{{ action.title }}</strong>
-              <p>{{ action.projectName }} / {{ action.actionType }}</p>
+              <p>{{ action.projectName }} / {{ actionTypeLabel(action.actionType) }}</p>
               <small v-if="action.errorMessage">{{ action.errorMessage }}</small>
             </div>
-            <el-tag :type="tagType(action.status)" effect="plain">{{ action.status }}</el-tag>
+            <el-tag :type="tagType(action.status)" effect="plain">{{ actionStatusLabel(action.status) }}</el-tag>
           </article>
           <el-empty v-if="!loading && actions.length === 0" description="暂无动作" :image-size="72" />
         </div>
@@ -74,6 +74,18 @@ async function fetchData() {
 
 function tagType(status) {
   return { EXECUTED: 'success', BLOCKED: 'danger', REJECTED: 'info', PENDING_APPROVAL: 'warning' }[status] || 'info'
+}
+function healthLabel(status) {
+  return { HEALTHY: '稳定', WATCH: '关注', AT_RISK: '有风险', UNKNOWN: '未分析' }[status] || '未分析'
+}
+function reportStatusLabel(status) {
+  return { DRAFT: '草稿', PUBLISHED: '已发布', ARCHIVED: '已归档' }[status] || status || '未知'
+}
+function actionTypeLabel(type) {
+  return { CREATE_GITHUB_ISSUE: '创建 GitHub Issue' }[type] || type || '外部动作'
+}
+function actionStatusLabel(status) {
+  return { EXECUTED: '已执行', BLOCKED: '执行阻塞', REJECTED: '已驳回', PENDING_APPROVAL: '待审批', APPROVED: '已批准' }[status] || status || '未知'
 }
 </script>
 

@@ -13,7 +13,7 @@
           <span class="nav-label">工作台</span>
         </router-link>
         <router-link to="/knowledge" class="nav-link">
-          <span class="nav-label">知识来源</span>
+          <span class="nav-label">Agent 参考库</span>
         </router-link>
       </nav>
       <div class="search-box" @submit.prevent="doSearch">

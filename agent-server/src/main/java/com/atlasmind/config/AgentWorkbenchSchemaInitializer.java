@@ -199,21 +199,21 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 INSERT INTO agent_project
                 (name, project_key, description, repository_type, repository_url, default_branch,
                  business_scope, release_target, current_milestone, team_size, tech_stack,
-                 health_status, health_score, deleted)
+                health_status, health_score, deleted)
                 SELECT 'AtlasMind Agent Workbench', 'ATLASMIND',
-                       'R&D delivery Agent platform for project health analysis, risk discovery, and delivery planning.',
+                       '面向企业研发团队的智能交付 Agent 工作台，用于项目健康分析、风险发现和交付规划。',
                        'GITHUB', 'https://github.com/DayDayUpStudyHard/AtlasMind-Agent-Workbench',
-                       'master', 'Agent workbench for enterprise engineering teams', '2026 Q3',
-                       'MVP: project health analysis and delivery planning', 1,
+                       'master', '企业研发团队内部项目治理与交付协同', '2026 Q3',
+                       'MVP：项目健康分析与交付计划', 1,
                        'Spring Boot / Vue 3 / FastAPI / MySQL / Redis / Elasticsearch',
                        'UNKNOWN', 0, 0
                 WHERE NOT EXISTS (SELECT 1 FROM agent_project WHERE project_key='ATLASMIND')
                 """);
         jdbcTemplate.update("""
                 UPDATE agent_project
-                SET description='R&D delivery Agent platform for project health analysis, risk discovery, and delivery planning.',
-                    business_scope='Agent workbench for enterprise engineering teams',
-                    current_milestone='MVP: project health analysis and delivery planning'
+                SET description='面向企业研发团队的智能交付 Agent 工作台，用于项目健康分析、风险发现和交付规划。',
+                    business_scope='企业研发团队内部项目治理与交付协同',
+                    current_milestone='MVP：项目健康分析与交付计划'
                 WHERE project_key='ATLASMIND'
                 """);
         jdbcTemplate.update("""

@@ -145,7 +145,7 @@ const menuItems = [
   { path: '/', label: 'Agent 控制台', icon: icons.console },
   { path: '/projects', label: '项目目录', icon: icons.project },
   { path: '/knowledge', label: '知识来源', icon: icons.knowledge },
-  { path: '/evidence-sync', label: '证据同步', icon: icons.sync },
+  { path: '/evidence-sync', label: '项目数据同步', icon: icons.sync },
   { path: '/agent-runs', label: 'Agent 运行记录', icon: icons.run },
   { path: '/reports', label: '报告与动作', icon: icons.report },
   { path: '/ai-observability', label: '可观测性', icon: icons.observe },

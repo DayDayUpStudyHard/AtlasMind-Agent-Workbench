@@ -2,9 +2,9 @@
   <div class="page">
     <section class="page-head">
       <div>
-        <span class="eyebrow">Evidence Sync</span>
-        <h2>证据同步</h2>
-        <p>查看项目证据来源和最近同步任务。GitHub 已接入，本地项目、Jira、禅道、CI/CD 作为连接器接口位保留。</p>
+        <span class="eyebrow">项目数据同步</span>
+        <h2>项目数据同步</h2>
+        <p>把 GitHub、本地项目、Jira/禅道、CI/CD 里的项目资料同步进来，作为 Agent 分析项目、生成报告和展示引用来源的依据。</p>
       </div>
       <el-button @click="fetchProjects">刷新</el-button>
     </section>
@@ -16,11 +16,11 @@
             <span>{{ project.projectKey }}</span>
             <h3>{{ project.name }}</h3>
           </div>
-          <el-tag effect="plain">{{ project.syncStatus || 'PENDING' }}</el-tag>
+          <el-tag effect="plain">{{ syncLabel(project.syncStatus) }}</el-tag>
         </div>
         <p>{{ project.repositoryUrl || '暂未配置仓库地址' }}</p>
         <div class="card-meta">
-          <span>证据 {{ project.evidenceCount || 0 }}</span>
+          <span>已入库资料 {{ project.evidenceCount || 0 }}</span>
           <span>最近同步 {{ formatDate(project.lastSyncAt) }}</span>
         </div>
       </section>
@@ -43,7 +43,7 @@ import { getProjects } from '../api/index.js'
 const loading = ref(false)
 const projects = ref([])
 const connectors = [
-  { name: 'GitHub', status: '已接入', note: '同步 README、文件树、Issue、PR 和 Commit 证据。' },
+  { name: 'GitHub', status: '已接入', note: '同步 README、文件树、Issue、PR 和 Commit，给项目健康分析提供依据。' },
   { name: '本地项目', status: '接口预留', note: '后续接入本地目录扫描、技术文档和依赖分析。' },
   { name: 'Jira / 禅道', status: '接口预留', note: '后续接入需求、缺陷、迭代和负责人数据。' },
   { name: 'CI/CD', status: '接口预留', note: '后续接入构建、测试、发布和失败记录。' }
@@ -62,6 +62,9 @@ async function fetchProjects() {
 
 function formatDate(value) {
   return value ? String(value).substring(0, 16) : '-'
+}
+function syncLabel(status) {
+  return { READY: '已同步', SYNCING: '同步中', FAILED: '同步失败', PENDING: '待同步' }[status] || '待同步'
 }
 </script>
 

@@ -2,13 +2,13 @@
   <div class="knowledge-page">
     <section class="knowledge-head">
       <div>
-        <span class="page-kicker">Knowledge Base</span>
-        <h1>浏览已上传的知识文档</h1>
-        <p>这里展示后台上传并完成解析的文档。点击任一文档可查看分块内容和所在知识空间。</p>
+        <span class="page-kicker">Agent 参考库</span>
+        <h1>查看 Agent 可引用的参考资料</h1>
+        <p>这里展示后台治理后开放给前台的规范、技术文档、决策记录和项目资料。Agent 在回答、健康分析和报告生成时会把这些内容作为可引用上下文。</p>
       </div>
       <div class="page-stats">
         <strong>{{ visibleDocuments.length }}</strong>
-        <span>可见文档</span>
+        <span>参考资料</span>
       </div>
     </section>
 
@@ -18,7 +18,7 @@
           <circle cx="11" cy="11" r="8" />
           <line x1="21" y1="21" x2="16.65" y2="16.65" />
         </svg>
-        <input v-model="keyword" type="text" placeholder="搜索标题或文件名" />
+        <input v-model="keyword" type="text" placeholder="搜索规范、文档或文件名" />
       </div>
       <div class="space-filters">
         <button
@@ -44,7 +44,7 @@
 
     <section class="knowledge-grid">
       <main class="document-list">
-        <div v-if="loading" class="loading-state">正在加载知识文档...</div>
+        <div v-if="loading" class="loading-state">正在加载 Agent 参考资料...</div>
         <template v-else>
           <button
             v-for="doc in visibleDocuments"
@@ -59,16 +59,16 @@
                 <span class="doc-space">{{ doc.spaceName || '未命名空间' }}</span>
                 <strong>{{ doc.title }}</strong>
               </div>
-              <span class="doc-status">{{ doc.status }}</span>
+              <span class="doc-status">{{ statusLabel(doc.status) }}</span>
             </div>
             <p>{{ doc.fileName }} · {{ doc.fileType || 'FILE' }}</p>
             <div class="document-meta">
-              <span>Chunks {{ doc.chunkCount || 0 }}</span>
+              <span>片段 {{ doc.chunkCount || 0 }}</span>
               <span>{{ formatSize(doc.fileSize) }}</span>
               <span>{{ formatDate(doc.createTime) }}</span>
             </div>
           </button>
-          <div v-if="!visibleDocuments.length" class="empty-state">没有匹配的知识文档</div>
+          <div v-if="!visibleDocuments.length" class="empty-state">没有匹配的参考资料</div>
         </template>
       </main>
 
@@ -81,7 +81,7 @@
               <h2>{{ selectedDocument.title }}</h2>
               <p>{{ selectedDocument.fileName }}</p>
             </div>
-            <span class="doc-status">{{ selectedDocument.status }}</span>
+            <span class="doc-status">{{ statusLabel(selectedDocument.status) }}</span>
           </div>
 
           <div class="detail-meta">
@@ -94,7 +94,7 @@
           <div class="chunk-list">
             <article v-for="chunk in chunks" :key="chunk.id" class="chunk-card">
               <div class="chunk-head">
-                <strong>Chunk {{ chunk.chunkIndex + 1 }}</strong>
+                <strong>片段 {{ chunk.chunkIndex + 1 }}</strong>
                 <span v-if="chunk.sourcePage != null">P{{ chunk.sourcePage }}</span>
               </div>
               <p>{{ chunk.sectionTitle || '未命名章节' }}</p>
@@ -103,7 +103,7 @@
           </div>
         </template>
         <div v-else class="empty-detail">
-          请选择一篇文档查看详情
+          请选择一份参考资料查看详情
         </div>
       </aside>
     </section>
@@ -202,6 +202,18 @@ function formatSize(bytes) {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / 1024 / 1024).toFixed(1)} MB`
+}
+
+function statusLabel(status) {
+  return {
+    READY: '可引用',
+    PARSING: '解析中',
+    CHUNKING: '切分中',
+    EMBEDDING: '向量化中',
+    INDEXING: '索引中',
+    FAILED: '失败',
+    DELETED: '已删除'
+  }[status] || status || '未知'
 }
 </script>
 

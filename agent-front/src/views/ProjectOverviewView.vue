@@ -5,7 +5,7 @@
         <p class="eyebrow"><span class="eyebrow-mark"></span> AtlasMind / R&D control plane</p>
         <h1>把项目状态变成<br><em>可行动的交付判断</em></h1>
         <p class="hero-copy">
-          连接项目事实、知识来源和 Agent Run。先看全局风险，再进入一个项目核验证据、生成计划并提交经过审批的执行动作。
+          连接项目事实、Agent 参考库和 Agent Run。先看全局风险，再进入一个项目核验证据、生成计划并提交经过审批的执行动作。
         </p>
       </div>
       <div class="hero-aside">
@@ -24,7 +24,7 @@
     </section>
 
     <section class="section-head">
-      <div><p class="section-kicker">Portfolio view</p><h2>项目总览</h2><p>从项目健康状态进入具体证据、风险和交付计划。</p></div>
+      <div><p class="section-kicker">项目组合视图</p><h2>项目总览</h2><p>从项目健康状态进入具体证据、风险和交付计划。</p></div>
       <button type="button" class="quiet-button" @click="loadOverview" :disabled="loading"><span aria-hidden="true">↻</span> {{ loading ? '同步中' : '刷新状态' }}</button>
     </section>
 
@@ -34,13 +34,13 @@
         <div class="project-card-top"><span class="project-key">{{ project.projectKey }}</span><span class="health-chip" :class="healthClass(project.healthStatus)">{{ healthLabel(project.healthStatus) }}</span></div>
         <h3>{{ project.name }}</h3>
         <p class="project-description">{{ project.description || '尚未补充项目描述。' }}</p>
-        <div class="score-line"><strong>{{ project.healthScore || '—' }}</strong><span>/ 100 health signal</span><div class="score-bar"><i :style="{ width: `${project.healthScore || 0}%` }"></i></div></div>
+        <div class="score-line"><strong>{{ project.healthScore || '—' }}</strong><span>/ 100 健康信号</span><div class="score-bar"><i :style="{ width: `${project.healthScore || 0}%` }"></i></div></div>
         <div class="project-meta">
-          <span>{{ project.repositoryType || 'SOURCE' }}</span>
-          <span>{{ project.evidenceCount || 0 }} evidence</span>
+          <span>{{ sourceTypeLabel(project.repositoryType) }}</span>
+          <span>{{ project.evidenceCount || 0 }} 条证据</span>
           <span>{{ syncLabel(project.syncStatus) }}</span>
-          <span>{{ project.runCount || 0 }} runs</span>
-          <span>{{ project.openRisks || 0 }} approvals</span>
+          <span>{{ project.runCount || 0 }} 次运行</span>
+          <span>{{ project.openRisks || 0 }} 个审批</span>
         </div>
         <div class="project-card-footer"><span>{{ project.currentMilestone || '待设置里程碑' }}</span><span class="arrow" aria-hidden="true">↗</span></div>
       </router-link>
@@ -51,13 +51,13 @@
 
     <section class="lower-grid">
       <div class="lower-panel">
-        <div class="panel-heading"><div><p class="section-kicker">Operating model</p><h2>一条可审计的工作链</h2></div><router-link to="/knowledge" class="text-link">查看证据源 ↗</router-link></div>
+        <div class="panel-heading"><div><p class="section-kicker">运行模型</p><h2>一条可审计的工作链</h2></div><router-link to="/knowledge" class="text-link">查看 Agent 参考库 ↗</router-link></div>
         <div class="workflow-line">
           <div v-for="(item, index) in workflow" :key="item.title" class="workflow-step"><span class="step-index">0{{ index + 1 }}</span><strong>{{ item.title }}</strong><p>{{ item.description }}</p></div>
         </div>
       </div>
       <div class="lower-panel boundary-panel">
-        <p class="section-kicker">Execution boundary</p><h2>先判断，再执行</h2>
+        <p class="section-kicker">执行边界</p><h2>先判断，再执行</h2>
         <p>分析、引用和计划可以自动运行；创建 GitHub Issue 之前，必须经过人工审批。代码修改、合并 PR 和部署暂不自动化。</p>
         <div class="boundary-tags"><span>RAG</span><span>Tool Calling</span><span>Evidence Review</span><span>Approval Gate</span></div>
       </div>
@@ -66,7 +66,7 @@
     <div v-if="showCreate" class="modal-backdrop" @click.self="showCreate = false">
       <form class="create-modal" @submit.prevent="createProjectNow">
         <button type="button" class="modal-close" aria-label="关闭" @click="showCreate = false">×</button>
-        <p class="section-kicker">Project onboarding</p><h2>接入研发项目</h2><p class="modal-copy">先录入少量业务事实，再让 Agent 读取 GitHub 和技术文档。</p>
+        <p class="section-kicker">项目接入</p><h2>接入研发项目</h2><p class="modal-copy">先录入少量业务事实，再让 Agent 读取 GitHub 和技术文档。</p>
         <label>项目名称<input v-model="form.name" required placeholder="例如：支付服务重构" /></label>
         <label>GitHub 仓库<input v-model="form.repositoryUrl" placeholder="https://github.com/org/repository" /></label>
         <label>当前里程碑<input v-model="form.currentMilestone" placeholder="例如：MVP 验收" /></label>
@@ -145,6 +145,7 @@ async function createProjectNow() {
 function healthClass(status) { return String(status || 'UNKNOWN').toLowerCase() }
 function healthLabel(status) { return { HEALTHY: '稳定', WATCH: '关注', AT_RISK: '有风险', UNKNOWN: '未分析' }[status] || '未分析' }
 function syncLabel(status) { return { READY: '已同步', SYNCING: '同步中', FAILED: '同步失败', PENDING: '待同步' }[status] || '待同步' }
+function sourceTypeLabel(type) { return { GITHUB: 'GitHub 仓库', LOCAL: '本地项目', JIRA: 'Jira', ZENTAO: '禅道', CI: 'CI/CD' }[type] || '证据源' }
 </script>
 
 <style scoped>

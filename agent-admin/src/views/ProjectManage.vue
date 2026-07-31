@@ -2,7 +2,7 @@
   <div class="page">
     <section class="page-head">
       <div>
-        <span class="eyebrow">Project Directory</span>
+        <span class="eyebrow">项目目录</span>
         <h2>项目目录</h2>
         <p>后台只维护平台侧可见性：项目源、同步状态、证据覆盖和最近运行情况。项目接入、分析启动和业务审批在前台工作台完成。</p>
       </div>
@@ -12,15 +12,17 @@
     <el-table :data="projects" v-loading="loading" stripe class="data-table">
       <el-table-column prop="projectKey" label="项目 Key" width="130" />
       <el-table-column prop="name" label="项目" min-width="180" />
-      <el-table-column prop="repositoryType" label="来源" width="110" />
+      <el-table-column prop="repositoryType" label="来源" width="110">
+        <template #default="{ row }">{{ sourceTypeLabel(row.repositoryType) }}</template>
+      </el-table-column>
       <el-table-column prop="repositoryUrl" label="仓库地址" min-width="260" show-overflow-tooltip />
       <el-table-column prop="syncStatus" label="源状态" width="130">
         <template #default="{ row }">
-          <el-tag effect="plain">{{ row.syncStatus || 'PENDING' }}</el-tag>
+          <el-tag effect="plain">{{ syncLabel(row.syncStatus) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="evidenceCount" label="证据" width="90" />
-      <el-table-column prop="runCount" label="Run" width="90" />
+      <el-table-column prop="runCount" label="运行" width="90" />
       <el-table-column prop="openRisks" label="待审批" width="100" />
       <el-table-column prop="lastSyncAt" label="最近同步" width="170">
         <template #default="{ row }">{{ formatDate(row.lastSyncAt) }}</template>
@@ -50,6 +52,12 @@ async function fetchProjects() {
 
 function formatDate(value) {
   return value ? String(value).substring(0, 16) : '-'
+}
+function syncLabel(status) {
+  return { READY: '已同步', SYNCING: '同步中', FAILED: '同步失败', PENDING: '待同步' }[status] || '待同步'
+}
+function sourceTypeLabel(type) {
+  return { GITHUB: 'GitHub 仓库', LOCAL: '本地项目', JIRA: 'Jira', ZENTAO: '禅道', CI: 'CI/CD' }[type] || '证据源'
 }
 </script>
 
