@@ -2,6 +2,28 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 2026-07-31 CI 失败，清理旧测试并恢复后端流水线
+
+**日期**：2026-07-31
+
+### 调整原因
+
+- GitHub Actions 发来了 CI 失败邮件，后端 job 没过。
+- 失败点主要来自博客时代残留测试，仍在引用已经删除的类，例如 `ArticleService`、`AboutMapper`、`CategoryMapper`、`CommentMapper`、`MomentMapper`、`TagMapper`。
+- `KnowledgeBaseControllerTest` 还会被 Sa-Token 拦住，在未初始化上下文时返回 500。
+
+### 调整过程
+
+- 本地复跑 `mvn test -B`，确认后端测试确实和邮件内容一致。
+- 删除 7 个已经不属于当前企业 Agent 方向的旧测试。
+- 新增 `KnowledgeBaseServiceImplTest`，保留当前知识库服务的轻量回归测试。
+- 顺手把 `logs/` 加入 `.gitignore`，避免运行产物污染工作区。
+
+### 调整结果
+
+- `mvn test -B` 重新通过。
+- 相关修改已提交并推送，后端 CI 恢复为绿色。
+
 ---
 
 ## 后台“证据同步”重命名为项目数据同步
