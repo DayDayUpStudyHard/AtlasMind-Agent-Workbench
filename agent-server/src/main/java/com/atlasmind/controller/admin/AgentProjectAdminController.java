@@ -3,6 +3,7 @@ package com.atlasmind.controller.admin;
 import com.atlasmind.common.Result;
 import com.atlasmind.service.AgentProjectService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -59,5 +60,23 @@ public class AgentProjectAdminController {
     @GetMapping("/actions")
     public Result<List<Map<String, Object>>> actions(@RequestParam(required = false) String status) {
         return Result.ok(agentProjectService.listActions(status));
+    }
+
+    @DeleteMapping("/runs/{runId}")
+    public Result<?> deleteRun(@PathVariable Long runId) {
+        agentProjectService.deleteRun(runId);
+        return Result.ok();
+    }
+
+    @DeleteMapping("/reports/{reportId}")
+    public Result<?> deleteReport(@PathVariable Long reportId) {
+        agentProjectService.deleteReport(reportId);
+        return Result.ok();
+    }
+
+    @DeleteMapping("/actions/{actionId}")
+    public Result<?> deleteAction(@PathVariable Long actionId) {
+        agentProjectService.deleteAction(actionId);
+        return Result.ok();
     }
 }

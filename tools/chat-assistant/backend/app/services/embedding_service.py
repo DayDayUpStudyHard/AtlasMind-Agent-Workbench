@@ -27,6 +27,8 @@ class EmbeddingService:
             self.client = OpenAI(
                 api_key=settings.embedding_api_key,
                 base_url=settings.embedding_base_url,
+                timeout=12.0,
+                max_retries=0,
             )
             self.model = settings.embedding_model
             self.dim = settings.embedding_dim

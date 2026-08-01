@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
 
 import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 知识库文档元数据。原始文件存储在文件系统，解析后的 chunk 存在 MySQL。
@@ -43,4 +45,7 @@ public class KbDocument {
     private String latestJobMessage;
     @TableField(exist = false)
     private String latestJobErrorMessage;
+
+    @TableField(exist = false)
+    private List<Map<String, Object>> boundProjects;
 }

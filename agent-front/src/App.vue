@@ -13,7 +13,7 @@
             </router-view>
           </main>
           <AppFooter v-if="!isLoginPage" />
-          <ChatWindow v-if="!isLoginPage && route.path !== '/'" />
+          <ChatWindow v-if="!isLoginPage" />
         </div>
         <button class="theme-toggle" @click="toggleTheme" :title="themeLabel">
           <svg v-if="currentTheme === 'light'" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>

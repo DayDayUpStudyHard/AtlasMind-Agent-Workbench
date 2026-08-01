@@ -7,6 +7,7 @@ echo ==============================
 echo.
 
 cd /d "%~dp0"
+set "MAVEN_OPTS=-Duser.home=%USERPROFILE% %MAVEN_OPTS%"
 
 echo [1/4] Starting Java backend (Spring Boot :18080) ...
 start "AtlasMind-Agent-Server" cmd /k "title AtlasMind-Agent-Server && cd /d %~dp0agent-server && mvnw.cmd spring-boot:run"

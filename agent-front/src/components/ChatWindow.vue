@@ -1,11 +1,12 @@
 <template>
-  <div class="chat-widget">
+  <div class="chat-widget" :class="{ home: isHome, 'project-scope': !!project }">
     <!-- 浮动触发按钮 -->
-    <button class="chat-trigger" :class="{ active: panelOpen }" @click="togglePanel" title="AI智能问答">
+    <button class="chat-trigger" :class="{ active: panelOpen }" @click="togglePanel" title="打开 AI 对话" aria-label="打开 AI 对话">
       <svg class="trigger-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
         <path d="M4 5h16v12H7l-3 3z" />
         <path d="M8 9h8M8 13h5" />
       </svg>
+      <span class="trigger-label">AI 对话</span>
     </button>
 
     <!-- 侧边聊天面板 -->
@@ -22,20 +23,41 @@
                 </svg>
               </span>
               <span class="header-title">AI 智能问答</span>
-              <span class="header-badge">RAG</span>
+              <span class="header-badge">{{ project ? 'PROJECT' : 'RAG' }}</span>
+              <span v-if="project" class="header-project-title">{{ project.name }}</span>
             </div>
             <button class="close-btn" @click="panelOpen = false">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>
 
+          <div class="chat-scope-bar">
+            <label class="scope-picker">
+              <span class="scope-label">对话项目</span>
+              <select v-model="selectedProjectId" :disabled="streaming || projectsLoading" @change="handleProjectChange">
+                <option value="">全局知识库（不绑定项目）</option>
+                <option v-for="item in projects" :key="item.id" :value="String(item.id)">
+                  {{ item.name }}
+                </option>
+              </select>
+            </label>
+            <span class="scope-hint">{{ project ? '回答将结合当前项目健康报告和交付证据' : '选择项目后，回答会自动绑定项目上下文' }}</span>
+          </div>
+
           <!-- 消息列表 -->
           <div class="chat-messages" ref="msgList">
             <div v-if="messages.length === 0" class="chat-empty">
-              <div class="empty-icon">💬</div>
+              <p class="empty-kicker">{{ project ? 'PROJECT AGENT' : 'KNOWLEDGE ASSISTANT' }}</p>
+              <p class="empty-guidance">{{ project ? '围绕当前项目的健康、风险、证据和交付计划提问。' : '从 Agent 参考库中查找研发知识和项目经验。' }}</p>
+              <div class="empty-icon" aria-hidden="true">
+                <svg width="42" height="42" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <path d="M4 5h16v11H7l-3 3z" />
+                  <path d="M8 9h8M8 12h5" />
+                </svg>
+              </div>
               <p class="empty-text">基于企业知识库为你解答</p>
               <div class="suggestions">
-                <button v-for="s in suggestions" :key="s" class="sug-chip" @click="send(s)">{{ s }}</button>
+                <button v-for="s in activeSuggestions" :key="s" class="sug-chip" @click="send(s)">{{ s }}</button>
               </div>
             </div>
 
@@ -75,10 +97,14 @@
 
           <!-- 输入区 -->
           <div class="chat-input">
+            <div v-if="project" class="input-context" title="本次对话将使用当前项目上下文">
+              <span class="context-dot"></span>
+              <span>{{ project.name }}</span>
+            </div>
             <input
               v-model="inputText"
               class="chat-input-field"
-              placeholder="输入问题，基于企业知识库回答..."
+              :placeholder="project ? '围绕当前项目提问健康、风险或交付计划...' : '输入问题，基于企业知识库回答...'"
               @keydown.enter="send()"
               :disabled="streaming"
             />
@@ -96,11 +122,18 @@
 </template>
 
 <script setup>
-import { ref, nextTick, onMounted } from 'vue'
+import { computed, ref, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { marked } from 'marked'
-import { createAiSession, getAiSessionMessages } from '../api/index.js'
+import { createAiSession, getAiSessionMessages, getProjectOverview } from '../api/index.js'
 
 const panelOpen = ref(false)
+const route = useRoute()
+const isHome = computed(() => route.path === '/')
+const project = ref(null)
+const projects = ref([])
+const projectsLoading = ref(false)
+const selectedProjectId = ref('')
 const inputText = ref('')
 const messages = ref([])
 const streaming = ref(false)
@@ -114,14 +147,104 @@ const suggestions = ref([
 const msgList = ref(null)
 const sessionId = ref(null)
 const sessionToken = ref('')
+const projectSuggestions = [
+  '当前项目的主要风险是什么？',
+  '下一步交付计划应该怎么排？',
+  '这份健康报告有哪些证据支持？',
+  '当前里程碑是否存在延期风险？',
+]
+const activeSuggestions = computed(() => project.value ? projectSuggestions : suggestions.value)
 
-onMounted(restoreSession)
+const sessionStorageKey = computed(() => 'atlasmind-chat-session-' + (project.value?.id || 'global'))
+
+onMounted(async () => {
+  const storedProject = localStorage.getItem('atlasmind-chat-project')
+  let parsedStoredProject = null
+  if (storedProject) {
+    try { parsedStoredProject = JSON.parse(storedProject) } catch { localStorage.removeItem('atlasmind-chat-project') }
+  }
+  await loadProjects()
+  const routeProject = findProject(route.params.id)
+  if (routeProject) {
+    project.value = normalizeProject(routeProject)
+    selectedProjectId.value = String(routeProject.id)
+  } else if (parsedStoredProject?.id) {
+    project.value = normalizeProject(parsedStoredProject)
+    selectedProjectId.value = String(parsedStoredProject.id)
+  }
+  await restoreSession()
+  window.addEventListener('atlasmind:open-chat', handleOpenChat)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('atlasmind:open-chat', handleOpenChat)
+})
+
+watch(() => route.params.id, async (routeId) => {
+  const routeProject = findProject(routeId)
+  if (routeProject && String(project.value?.id || '') !== String(routeProject.id)) {
+    await applyProject(routeProject)
+  }
+})
 
 function togglePanel() {
   panelOpen.value = !panelOpen.value
   if (panelOpen.value && messages.value.length === 0) {
     loadSuggestions()
   }
+}
+
+async function handleOpenChat(event) {
+  const nextProject = event.detail || null
+  const currentId = project.value?.id
+  const nextId = nextProject?.projectId
+  if (String(currentId || '') !== String(nextId || '')) {
+    await applyProject(findProject(nextId) || (nextId ? { id: nextId, name: nextProject.projectName || '当前项目' } : null))
+  }
+  panelOpen.value = true
+  if (!messages.value.length) loadSuggestions()
+}
+
+async function loadProjects() {
+  projectsLoading.value = true
+  try {
+    const response = await getProjectOverview()
+    projects.value = response.data.data?.projects || []
+  } catch {
+    projects.value = []
+  } finally {
+    projectsLoading.value = false
+  }
+}
+
+function normalizeProject(value) {
+  return value ? { id: value.id, name: value.name || '当前项目' } : null
+}
+
+function findProject(projectId) {
+  if (!projectId) return null
+  return projects.value.find(item => String(item.id) === String(projectId)) || null
+}
+
+async function handleProjectChange() {
+  await applyProject(findProject(selectedProjectId.value))
+}
+
+async function applyProject(nextProject) {
+  const next = normalizeProject(nextProject)
+  if (String(project.value?.id || '') === String(next?.id || '')) return
+
+  project.value = next
+  selectedProjectId.value = next ? String(next.id) : ''
+  sessionId.value = null
+  sessionToken.value = ''
+  messages.value = []
+  inputText.value = ''
+  localStorage.removeItem('atlasmind-chat-project')
+  if (project.value) {
+    localStorage.setItem('atlasmind-chat-project', JSON.stringify(project.value))
+  }
+  await restoreSession()
 }
 
 async function loadSuggestions() {
@@ -135,8 +258,8 @@ async function loadSuggestions() {
 }
 
 async function restoreSession() {
-  const storedId = Number(localStorage.getItem('atlasmind-chat-session') || 0)
-  const storedToken = localStorage.getItem('atlasmind-chat-session-token') || ''
+  const storedId = Number(localStorage.getItem(sessionStorageKey.value) || 0)
+  const storedToken = localStorage.getItem(sessionStorageKey.value + '-token') || ''
   if (!storedId || !storedToken) return
   try {
     const response = await getAiSessionMessages(storedId, storedToken)
@@ -148,20 +271,24 @@ async function restoreSession() {
       sources: []
     }))
   } catch {
-    localStorage.removeItem('atlasmind-chat-session')
-    localStorage.removeItem('atlasmind-chat-session-token')
+    localStorage.removeItem(sessionStorageKey.value)
+    localStorage.removeItem(sessionStorageKey.value + '-token')
   }
 }
 
 async function ensureSession() {
   if (sessionId.value) return sessionId.value
   try {
-    const response = await createAiSession({ source: 'FLOATING_WIDGET', scope: 'GLOBAL' })
+    const response = await createAiSession({
+      source: project.value ? 'PROJECT_ASSISTANT' : 'KNOWLEDGE_ASSISTANT',
+      scope: project.value ? 'PROJECT' : 'GLOBAL',
+      projectId: project.value?.id || null
+    })
     sessionId.value = response.data.data?.id || null
     sessionToken.value = response.data.data?.ownerToken || ''
     if (sessionId.value) {
-      localStorage.setItem('atlasmind-chat-session', String(sessionId.value))
-      localStorage.setItem('atlasmind-chat-session-token', sessionToken.value)
+      localStorage.setItem(sessionStorageKey.value, String(sessionId.value))
+      localStorage.setItem(sessionStorageKey.value + '-token', sessionToken.value)
     }
     return sessionId.value
   } catch {
@@ -213,7 +340,8 @@ async function send(msg) {
         message: content,
         history,
         sessionId: activeSessionId,
-        ownerToken: sessionToken.value
+        ownerToken: sessionToken.value,
+        projectId: project.value?.id || null
       }),
     })
 
@@ -549,5 +677,234 @@ async function send(msg) {
 .chat-send-btn:hover:not(:disabled) {
   background: var(--atlas-primary-dark);
   transform: none;
+}
+.chat-widget.home .chat-trigger { display: none; }
+.chat-widget.project-scope .header-title { display: none; }
+.header-project-title {
+  display: block;
+  color: var(--atlas-text);
+  font-size: 15px;
+  font-weight: 800;
+}
+.chat-panel {
+  width: min(520px, 100vw);
+  border-top: 4px solid var(--atlas-primary);
+  box-shadow: -18px 0 42px rgba(31,45,61,.16);
+}
+.chat-header {
+  min-height: 78px;
+  padding: 15px 20px;
+}
+.header-left { min-width: 0; }
+.header-copy {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 3px;
+}
+.header-context {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.header-badge {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  font-size: 10px;
+  letter-spacing: .04em;
+}
+.close-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 4px;
+}
+.chat-scope-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 12px 20px 13px;
+  background: var(--atlas-bg);
+  border-bottom: 1px solid var(--atlas-border);
+}
+.scope-picker {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 5px;
+}
+.scope-label {
+  color: var(--atlas-primary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.scope-picker select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 32px 0 11px;
+  color: var(--atlas-text);
+  background: var(--atlas-surface);
+  border: 1px solid var(--atlas-border-strong);
+  border-radius: 4px;
+  outline: 0;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.scope-picker select:focus {
+  border-color: var(--atlas-primary);
+  box-shadow: 0 0 0 3px rgba(66,111,166,.12);
+}
+.scope-picker select:disabled {
+  cursor: wait;
+  opacity: .65;
+}
+.scope-hint {
+  max-width: 170px;
+  padding-bottom: 4px;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.chat-messages { padding: 22px 22px 24px; }
+.chat-empty {
+  max-width: 390px;
+  margin: 30px auto 0;
+  padding: 28px 18px;
+  border: 1px solid var(--atlas-border);
+  border-top: 2px solid var(--atlas-primary);
+  background: var(--atlas-bg);
+}
+.empty-icon {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  margin: 0 auto 18px;
+  place-items: center;
+  color: var(--atlas-primary);
+  background: var(--atlas-surface-soft);
+  border: 1px solid var(--atlas-border);
+  border-radius: 5px;
+}
+.empty-kicker {
+  margin: 0 0 8px;
+  color: var(--atlas-primary);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.empty-guidance {
+  margin: 0 0 20px;
+  color: var(--atlas-text);
+  font-family: var(--atlas-font-display);
+  font-size: 22px;
+  line-height: 1.3;
+}
+.empty-text { display: none; }
+.suggestions { justify-content: flex-start; }
+.sug-chip {
+  min-height: 38px;
+  padding: 8px 11px;
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: left;
+}
+.msg-bubble {
+  max-width: 91%;
+  padding: 12px 15px;
+  border-radius: 5px;
+  font-size: 14px;
+  line-height: 1.7;
+}
+.msg-wrapper.user .msg-bubble { border-bottom-right-radius: 2px; }
+.msg-wrapper.assistant .msg-bubble { border-bottom-left-radius: 2px; }
+.msg-sources {
+  margin-top: 13px;
+  padding-top: 11px;
+}
+.source-item {
+  margin: 8px 0 0;
+  padding: 8px;
+  background: rgba(255,255,255,.55);
+  border: 1px solid var(--atlas-border);
+}
+.chat-input {
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 16px 16px;
+}
+.input-context {
+  display: flex;
+  flex-basis: 100%;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--atlas-muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #3f7f5d;
+}
+.chat-input-field {
+  min-height: 44px;
+  font-size: 14px;
+}
+.chat-send-btn {
+  width: 44px;
+  height: 44px;
+}
+.chat-trigger {
+  width: 148px;
+  height: 54px;
+  gap: 9px;
+  padding: 0 16px;
+  border-radius: 5px;
+  background: var(--atlas-primary);
+  color: #fff;
+  border-color: var(--atlas-primary);
+  box-shadow: 0 8px 18px rgba(31,45,61,.18);
+}
+.chat-trigger:hover,
+.chat-trigger.active {
+  color: #fff;
+  background: var(--atlas-primary-dark);
+  border-color: var(--atlas-primary-dark);
+  box-shadow: 0 10px 22px rgba(31,45,61,.22);
+}
+.trigger-icon {
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+}
+.trigger-label {
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+@media (max-width: 620px) {
+  .chat-panel { width: 100vw; }
+  .chat-messages { padding: 16px; }
+  .chat-empty { margin-top: 12px; }
+  .chat-trigger { right: 16px; bottom: 24px; width: 56px; height: 56px; padding: 0; }
+  .chat-trigger .trigger-label { display: none; }
+  .chat-scope-bar { align-items: stretch; flex-direction: column; gap: 7px; }
+  .scope-hint { max-width: none; padding-bottom: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .slide-enter-active,
+  .slide-leave-active { transition: none; }
 }
 </style>

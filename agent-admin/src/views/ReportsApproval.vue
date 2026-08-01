@@ -19,9 +19,12 @@
           <article v-for="report in reports" :key="report.id" class="record-row">
             <div>
               <strong>{{ report.title }}</strong>
-              <p>{{ report.projectName }} / {{ healthLabel(report.healthStatus) }} / {{ report.healthScore }}/100</p>
+              <p>{{ report.projectName }} / {{ reportMeta(report) }}</p>
             </div>
-            <el-tag effect="plain">{{ reportStatusLabel(report.status) }}</el-tag>
+            <div class="record-actions">
+              <el-tag effect="plain">{{ reportStatusLabel(report.status) }}</el-tag>
+              <el-button type="danger" link @click="removeReport(report)">删除</el-button>
+            </div>
           </article>
           <el-empty v-if="!loading && reports.length === 0" description="暂无报告" :image-size="72" />
         </div>
@@ -39,7 +42,10 @@
               <p>{{ action.projectName }} / {{ actionTypeLabel(action.actionType) }}</p>
               <small v-if="action.errorMessage">{{ action.errorMessage }}</small>
             </div>
-            <el-tag :type="tagType(action.status)" effect="plain">{{ actionStatusLabel(action.status) }}</el-tag>
+            <div class="record-actions">
+              <el-tag :type="tagType(action.status)" effect="plain">{{ actionStatusLabel(action.status) }}</el-tag>
+              <el-button type="danger" link :disabled="action.status === 'APPROVED'" @click="removeAction(action)">删除</el-button>
+            </div>
           </article>
           <el-empty v-if="!loading && actions.length === 0" description="暂无动作" :image-size="72" />
         </div>
@@ -50,7 +56,8 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getAgentActions, getAgentReports } from '../api/index.js'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { deleteAgentAction, deleteAgentReport, getAgentActions, getAgentReports } from '../api/index.js'
 
 const loading = ref(false)
 const reports = ref([])
@@ -78,6 +85,11 @@ function tagType(status) {
 function healthLabel(status) {
   return { HEALTHY: '稳定', WATCH: '关注', AT_RISK: '有风险', UNKNOWN: '未分析' }[status] || '未分析'
 }
+function reportMeta(report) {
+  if (report.reportType === 'ONBOARDING_GUIDE') return '项目接手手册'
+  if (report.reportType === 'DECISION_MEMO') return '研发决策备忘录'
+  return `${healthLabel(report.healthStatus)} / ${report.healthScore}/100`
+}
 function reportStatusLabel(status) {
   return { DRAFT: '草稿', PUBLISHED: '已发布', ARCHIVED: '已归档' }[status] || status || '未知'
 }
@@ -86,6 +98,38 @@ function actionTypeLabel(type) {
 }
 function actionStatusLabel(status) {
   return { EXECUTED: '已执行', BLOCKED: '执行阻塞', REJECTED: '已驳回', PENDING_APPROVAL: '待审批', APPROVED: '已批准' }[status] || status || '未知'
+}
+
+async function removeReport(report) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除报告 #${report.id} 吗？这不会删除同一次运行记录。`,
+      '删除报告',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+    await deleteAgentReport(report.id)
+    ElMessage.success('报告已删除')
+    await fetchData()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.response?.data?.message || '删除报告失败')
+  }
+}
+
+async function removeAction(action) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除动作 #${action.id} 吗？已批准且执行中的动作不会被删除。`,
+      '删除动作',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+    await deleteAgentAction(action.id)
+    ElMessage.success('动作已删除')
+    await fetchData()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.response?.data?.message || '删除动作失败')
+  }
 }
 </script>
 
@@ -108,6 +152,7 @@ function actionStatusLabel(status) {
 .record-row strong { color: #1f2d3d; overflow-wrap: anywhere; }
 .record-row p { margin: 5px 0 0; color: #607184; font-size: 13px; line-height: 1.55; }
 .record-row small { display: block; margin-top: 6px; color: #b35c56; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.record-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
 @media (max-width: 980px) { .split-grid { grid-template-columns: 1fr; } }
-@media (max-width: 720px) { .page-head, .record-row { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 720px) { .page-head, .record-row { align-items: flex-start; flex-direction: column; } .record-actions { align-items: flex-start; } }
 </style>

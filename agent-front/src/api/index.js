@@ -67,7 +67,7 @@ export function createProject(data) {
 }
 
 export function syncProjectEvidence(projectId) {
-  return api.post(`/api/workspace/projects/${projectId}/sync`)
+  return api.post(`/api/workspace/projects/${projectId}/sync`, null, { timeout: 120000 })
 }
 
 export function getProjectEvidence(projectId, params = {}) {
@@ -79,11 +79,35 @@ export function getProjectSyncJobs(projectId) {
 }
 
 export function startProjectRun(projectId, data = {}) {
-  return api.post(`/api/workspace/projects/${projectId}/runs`, data)
+  return api.post(`/api/workspace/projects/${projectId}/runs`, data, { timeout: 120000 })
 }
 
 export function getProjectRun(runId) {
   return api.get(`/api/workspace/projects/runs/${runId}`)
+}
+
+export function getWorkspaceNotifications(params = {}) {
+  return api.get('/api/workspace/notifications', { params })
+}
+
+export function getWorkspaceUnreadCount() {
+  return api.get('/api/workspace/notifications/unread-count')
+}
+
+export function readWorkspaceNotification(id) {
+  return api.put(`/api/workspace/notifications/${id}/read`)
+}
+
+export function readAllWorkspaceNotifications() {
+  return api.put('/api/workspace/notifications/read-all')
+}
+
+export function getWorkspaceAiStatus() {
+  return api.get('/api/workspace/ai-status', { timeout: 15000 })
+}
+
+export function getRecentWorkspaceRuns() {
+  return api.get('/api/workspace/runs/recent')
 }
 
 export function approveProjectAction(runId, actionId, data = {}) {

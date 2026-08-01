@@ -17,4 +17,16 @@ public interface AiGateway {
     void deleteDocumentIndex(Long documentId);
 
     Map<String, Object> testRetrieval(Map<String, Object> payload);
+
+    Map<String, Object> analyzeProject(Map<String, Object> payload);
+
+    Map<String, Object> runProjectTask(Map<String, Object> payload);
+
+    Map<String, Object> planAgent(Map<String, Object> payload);
+
+    Map<String, Object> nextAgentTurn(Map<String, Object> payload);
+
+    Map<String, Object> reflectAgent(Map<String, Object> payload);
+
+    Map<String, Object> health();
 }

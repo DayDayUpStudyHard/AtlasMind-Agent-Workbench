@@ -16,6 +16,7 @@ import com.atlasmind.mapper.KbSpaceMapper;
 import com.atlasmind.service.KnowledgeBaseService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.multipart.MultipartFile;
@@ -52,6 +53,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     private final KbIngestJobMapper jobMapper;
     private final KbNotificationMapper notificationMapper;
     private final AiGateway aiGateway;
+    private final JdbcTemplate jdbcTemplate;
 
     @Value("${atlasmind.upload-path:upload/}")
     private String uploadPath;
@@ -111,6 +113,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         if (status != null && !status.isBlank()) query.eq(KbDocument::getStatus, status);
         Page<KbDocument> result = documentMapper.selectPage(new Page<>(page, size), query);
         fillLatestJobs(result.getRecords());
+        fillBoundProjects(result.getRecords());
         return result;
     }
 
@@ -129,7 +132,8 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
 
     @Override
     @Transactional
-    public Map<String, Object> uploadDocument(Long spaceId, MultipartFile file, String title, String parseMode) throws IOException {
+    public Map<String, Object> uploadDocument(Long spaceId, MultipartFile file, String title, String parseMode,
+                                              List<Long> projectIds) throws IOException {
         validateUploadFile(file);
         requireSpace(spaceId);
 
@@ -143,7 +147,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         Path dest = dir.resolve(storedName).toAbsolutePath().normalize();
         file.transferTo(dest);
 
-        return createUploadedDocument(spaceId, originalName, fileType, file.getSize(), dest, title, "IMPORT", parseMode);
+        return createUploadedDocument(spaceId, originalName, fileType, file.getSize(), dest, title, "IMPORT", parseMode, projectIds);
     }
 
     @Override
@@ -169,7 +173,8 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     @Override
     @Transactional
     public Map<String, Object> completeChunkedUpload(Long spaceId, String uploadId, String fileName,
-                                                     long fileSize, int totalChunks, String title, String parseMode) throws IOException {
+                                                     long fileSize, int totalChunks, String title, String parseMode,
+                                                     List<Long> projectIds) throws IOException {
         requireSpace(spaceId);
         validateChunkMeta(uploadId, fileName, fileSize, 0, totalChunks);
 
@@ -194,11 +199,12 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         }
 
         deleteDirectory(chunkDir);
-        return createUploadedDocument(spaceId, fileName, fileType, actualSize, dest, title, "IMPORT", parseMode);
+        return createUploadedDocument(spaceId, fileName, fileType, actualSize, dest, title, "IMPORT", parseMode, projectIds);
     }
 
     private Map<String, Object> createUploadedDocument(Long spaceId, String originalName, String fileType,
-                                                       long fileSize, Path dest, String title, String jobType, String parseMode) {
+                                                       long fileSize, Path dest, String title, String jobType,
+                                                       String parseMode, List<Long> projectIds) {
         KbDocument document = new KbDocument();
         document.setSpaceId(spaceId);
         document.setTitle(title == null || title.isBlank() ? stripExt(originalName) : title);
@@ -214,6 +220,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         document.setIndexName("kb_chunks");
         document.setDeleted(0);
         documentMapper.insert(document);
+        bindDocumentProjects(document.getId(), projectIds == null ? List.of() : projectIds);
 
         KbIngestJob job = createJob(document.getId(), jobType);
         triggerIngest(document, job);
@@ -273,6 +280,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         document.setDeleted(1);
         document.setStatus("DISABLED");
         documentMapper.updateById(document);
+        jdbcTemplate.update("DELETE FROM project_kb_document WHERE document_id=?", id);
         try {
             aiGateway.deleteDocumentIndex(id);
         } catch (Exception e) {
@@ -322,6 +330,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         } catch (Exception e) {
             createFailureNotification(Map.of("documentId", id), e.getMessage());
         }
+        jdbcTemplate.update("DELETE FROM project_kb_document WHERE document_id=?", id);
         chunkMapper.hardDeleteByDocumentId(id);
         documentMapper.hardDeleteById(id);
         if (document.getFilePath() != null) {
@@ -332,6 +341,31 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
     @Override
     public Map<String, Object> qaTest(Map<String, Object> request) {
         return aiGateway.testRetrieval(request);
+    }
+
+    @Override
+    @Transactional
+    public void bindDocumentProjects(Long documentId, List<Long> projectIds) {
+        requireDocument(documentId);
+        jdbcTemplate.update("DELETE FROM project_kb_document WHERE document_id=?", documentId);
+        if (projectIds == null || projectIds.isEmpty()) {
+            return;
+        }
+        for (Long projectId : projectIds.stream().distinct().toList()) {
+            Integer exists = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM agent_project WHERE id=? AND deleted=0",
+                    Integer.class,
+                    projectId
+            );
+            if (exists == null || exists == 0) {
+                continue;
+            }
+            jdbcTemplate.update("""
+                    INSERT INTO project_kb_document (project_id, document_id, usage_type)
+                    VALUES (?, ?, 'ANALYSIS_CONTEXT')
+                    ON DUPLICATE KEY UPDATE usage_type=VALUES(usage_type)
+                    """, projectId, documentId);
+        }
     }
 
     @Override
@@ -482,6 +516,28 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
             document.setLatestJobProgress(job.getProgress());
             document.setLatestJobMessage(job.getMessage());
             document.setLatestJobErrorMessage(job.getErrorMessage());
+        }
+    }
+
+    private void fillBoundProjects(List<KbDocument> documents) {
+        if (documents == null || documents.isEmpty()) return;
+        List<Long> documentIds = documents.stream().map(KbDocument::getId).toList();
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT pkd.document_id AS documentId, p.id AS projectId, p.name AS projectName, p.project_key AS projectKey
+                FROM project_kb_document pkd
+                JOIN agent_project p ON p.id=pkd.project_id
+                WHERE pkd.document_id IN (%s) AND p.deleted=0
+                ORDER BY p.name ASC
+                """.formatted(documentIds.stream().map(id -> "?").reduce((a, b) -> a + "," + b).orElse("NULL")),
+                documentIds.toArray());
+        Map<Long, List<Map<String, Object>>> byDocument = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long documentId = row.get("documentId") instanceof Number number ? number.longValue() : null;
+            if (documentId == null) continue;
+            byDocument.computeIfAbsent(documentId, ignored -> new java.util.ArrayList<>()).add(row);
+        }
+        for (KbDocument document : documents) {
+            document.setBoundProjects(byDocument.getOrDefault(document.getId(), List.of()));
         }
     }
 

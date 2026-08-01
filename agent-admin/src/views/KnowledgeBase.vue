@@ -58,6 +58,11 @@
           <el-form-item label="标题">
             <el-input v-model="uploadForm.title" placeholder="不填则使用文件名" />
           </el-form-item>
+          <el-form-item label="适用项目">
+            <el-select v-model="uploadForm.projectIds" multiple clearable collapse-tags placeholder="选择用于哪些项目分析">
+              <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+            </el-select>
+          </el-form-item>
           <el-form-item label="解析模式">
             <el-segmented
               v-model="uploadForm.parseMode"
@@ -167,6 +172,14 @@
         <el-table-column label="空间" width="120">
           <template #default="{ row }">{{ spaceName(row.spaceId) }}</template>
         </el-table-column>
+        <el-table-column label="适用项目" min-width="170">
+          <template #default="{ row }">
+            <div v-if="row.boundProjects?.length" class="bound-projects">
+              <span v-for="project in row.boundProjects" :key="project.projectId">{{ project.projectName }}</span>
+            </div>
+            <span v-else class="muted">未绑定</span>
+          </template>
+        </el-table-column>
         <el-table-column prop="fileType" label="类型" width="80" align="center" />
         <el-table-column label="解析" width="110" align="center">
           <template #default="{ row }">{{ parseModeLabel(row.parseMode) }}</template>
@@ -200,10 +213,11 @@
         <el-table-column label="更新时间" width="170">
           <template #default="{ row }">{{ formatTime(row.updateTime || row.createTime) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="360" align="center">
+        <el-table-column label="操作" width="430" align="center">
           <template #default="{ row }">
             <div class="actions">
               <button class="action-btn preview" @click="openChunks(row)">切片</button>
+              <button class="action-btn bind" @click="openBindDialog(row)">绑定项目</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReparse(row)">重解析</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReindex(row)">重索引</button>
               <button v-if="row.deleted === 1" class="action-btn restore" @click="doRestore(row)">恢复</button>
@@ -259,6 +273,20 @@
         <el-empty v-if="!chunkLoading && chunks.length === 0" description="暂无切片" :image-size="72" />
       </div>
     </el-dialog>
+
+    <el-dialog v-model="bindDialogVisible" :title="bindDialogTitle" width="520px">
+      <el-form label-position="top">
+        <el-form-item label="适用项目">
+          <el-select v-model="bindProjectIds" multiple clearable filterable placeholder="选择用于哪些项目分析">
+            <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="bindDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="saveDocumentProjects">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -268,12 +296,14 @@ import { ElMessage } from 'element-plus'
 import { InfoFilled, Plus, Refresh, Search, Upload, UploadFilled } from '@element-plus/icons-vue'
 import {
   completeKbDocumentUpload,
+  bindKbDocumentProjects,
   createKbSpace,
   deleteKbDocument,
   getRuntimeSettings,
   getKbDocumentChunks,
   getKbDocuments,
   getKbSpaces,
+  getProjects,
   importDebugRecord,
   permanentDeleteKbDocument,
   reindexKbDocument,
@@ -284,6 +314,7 @@ import {
 } from '../api/index.js'
 
 const spaces = ref([])
+const projects = ref([])
 const documents = ref([])
 const chunks = ref([])
 const selectedSpaceId = ref(null)
@@ -304,10 +335,14 @@ const selectedFile = ref(null)
 const documentPollTimer = ref(null)
 const chunkDialogVisible = ref(false)
 const chunkDialogTitle = ref('切片预览')
+const bindDialogVisible = ref(false)
+const bindDialogTitle = ref('绑定适用项目')
+const bindingDocument = ref(null)
+const bindProjectIds = ref([])
 const spaceDialogVisible = ref(false)
 const editingSpace = ref(null)
 const spaceForm = ref({ name: '', description: '', icon: 'book', color: '#426fa6', sort: 0, enabled: 1 })
-const uploadForm = ref({ spaceId: null, title: '', parseMode: 'OCR' })
+const uploadForm = ref({ spaceId: null, title: '', parseMode: 'OCR', projectIds: [] })
 const parseModeOptions = [
   { label: '快速', value: 'FAST' },
   { label: 'OCR', value: 'OCR' },
@@ -326,6 +361,7 @@ const hasActiveJobs = computed(() => documents.value.some(row => isActiveJob(row
 
 onMounted(async () => {
   await fetchSpaces()
+  await fetchProjects()
   await fetchDocuments()
   await fetchRuntimeSettings()
   startDocumentPolling()
@@ -343,6 +379,11 @@ async function fetchRuntimeSettings() {
     maxTopK.value = Number(values['ai.retrieval.max-top-k']) || 10
     qaForm.value.topK = Math.min(Number(values['ai.retrieval.top-k']) || 5, maxTopK.value)
   } catch {}
+}
+
+async function fetchProjects() {
+  const res = await getProjects()
+  projects.value = res.data.data || []
 }
 
 async function fetchSpaces() {
@@ -465,12 +506,14 @@ async function doUpload() {
       fileSize: file.size,
       totalChunks,
       title: uploadForm.value.title,
-      parseMode: uploadForm.value.parseMode
+      parseMode: uploadForm.value.parseMode,
+      projectIds: uploadForm.value.projectIds
     })
     uploadProgress.value = 100
     ElMessage.success('导入任务已创建，完成后会在消息中心提醒')
     uploadForm.value.title = ''
     uploadForm.value.parseMode = 'OCR'
+    uploadForm.value.projectIds = []
     selectedFile.value = null
     uploadRef.value?.clearFiles()
     await fetchDocuments()
@@ -480,6 +523,21 @@ async function doUpload() {
     uploading.value = false
     uploadProgress.value = 0
   }
+}
+
+function openBindDialog(row) {
+  bindingDocument.value = row
+  bindDialogTitle.value = `绑定适用项目 - ${row.title}`
+  bindProjectIds.value = (row.boundProjects || []).map(project => Number(project.projectId))
+  bindDialogVisible.value = true
+}
+
+async function saveDocumentProjects() {
+  if (!bindingDocument.value) return
+  await bindKbDocumentProjects(bindingDocument.value.id, bindProjectIds.value)
+  ElMessage.success('适用项目已更新')
+  bindDialogVisible.value = false
+  await fetchDocuments()
 }
 
 function createUploadId() {
@@ -981,6 +1039,7 @@ function formatScore(value) {
 }
 
 .action-btn.preview { color: #047857; border-color: #d1fae5; }
+.action-btn.bind { color: #7c3aed; border-color: #ddd6fe; }
 .action-btn.edit { color: #315987; border-color: #dbeafe; }
 .action-btn.restore { color: #7c3aed; border-color: #ede9fe; }
 .action-btn.delete { color: #b45309; border-color: #fde68a; }
@@ -1014,6 +1073,21 @@ function formatScore(value) {
 .empty-line {
   color: #94a3b8;
   font-size: 12px;
+}
+
+.bound-projects {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.bound-projects span {
+  color: #315987;
+  background: #eff6ff;
+  border: 1px solid #dbeafe;
+  border-radius: 999px;
+  font-size: 12px;
+  padding: 3px 8px;
 }
 
 @media (max-width: 1100px) {

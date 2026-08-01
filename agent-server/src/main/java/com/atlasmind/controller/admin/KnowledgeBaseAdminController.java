@@ -82,8 +82,9 @@ public class KnowledgeBaseAdminController {
             @RequestParam Long spaceId,
             @RequestParam MultipartFile file,
             @RequestParam(required = false) String title,
-            @RequestParam(required = false) String parseMode) throws IOException {
-        return Result.ok(knowledgeBaseService.uploadDocument(spaceId, file, title, parseMode));
+            @RequestParam(required = false) String parseMode,
+            @RequestParam(required = false) List<Long> projectIds) throws IOException {
+        return Result.ok(knowledgeBaseService.uploadDocument(spaceId, file, title, parseMode, projectIds));
     }
 
     @OperationLog(value = "上传知识库文档分片", type = "CREATE")
@@ -108,9 +109,24 @@ public class KnowledgeBaseAdminController {
             @RequestParam long fileSize,
             @RequestParam int totalChunks,
             @RequestParam(required = false) String title,
-            @RequestParam(required = false) String parseMode) throws IOException {
+            @RequestParam(required = false) String parseMode,
+            @RequestParam(required = false) List<Long> projectIds) throws IOException {
         return Result.ok(knowledgeBaseService.completeChunkedUpload(
-                spaceId, uploadId, fileName, fileSize, totalChunks, title, parseMode));
+                spaceId, uploadId, fileName, fileSize, totalChunks, title, parseMode, projectIds));
+    }
+
+    @OperationLog(value = "绑定知识库文档项目", type = "UPDATE")
+    @PutMapping("/documents/{id}/projects")
+    public Result<?> bindProjects(@PathVariable Long id, @RequestBody Map<String, Object> request) {
+        Object value = request.get("projectIds");
+        List<Long> projectIds = value instanceof List<?> list
+                ? list.stream()
+                    .filter(item -> item instanceof Number || item instanceof String)
+                    .map(item -> item instanceof Number number ? number.longValue() : Long.valueOf(String.valueOf(item)))
+                    .toList()
+                : List.of();
+        knowledgeBaseService.bindDocumentProjects(id, projectIds);
+        return Result.ok();
     }
 
     @OperationLog(value = "导入 Debug 修复记录", type = "CREATE")

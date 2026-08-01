@@ -38,5 +38,11 @@ public interface AgentProjectService {
 
     List<Map<String, Object>> listActions(String status);
 
+    void deleteRun(Long runId);
+
+    void deleteReport(Long reportId);
+
+    void deleteAction(Long actionId);
+
     void executeRun(Long runId);
 }

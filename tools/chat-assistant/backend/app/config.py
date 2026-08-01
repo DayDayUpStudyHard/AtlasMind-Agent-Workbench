@@ -42,6 +42,7 @@ class Settings:
     # ====== Chat ======
     chat_max_tokens: int = int(os.getenv("CHAT_MAX_TOKENS", "2048"))
     chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
+    project_analysis_timeout_seconds: float = float(os.getenv("PROJECT_ANALYSIS_TIMEOUT_SECONDS", "90"))
     retrieval_top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "5"))
     internal_token: str = os.getenv("CHAT_ASSISTANT_TOKEN", "")
     kb_chunk_insert_batch_size: int = int(os.getenv("KB_CHUNK_INSERT_BATCH_SIZE", "200"))

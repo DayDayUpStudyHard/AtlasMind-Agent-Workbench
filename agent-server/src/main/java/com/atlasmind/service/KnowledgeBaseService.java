@@ -29,13 +29,17 @@ public interface KnowledgeBaseService {
 
     List<KbDocumentChunk> listChunks(Long documentId);
 
-    Map<String, Object> uploadDocument(Long spaceId, MultipartFile file, String title, String parseMode) throws IOException;
+    Map<String, Object> uploadDocument(Long spaceId, MultipartFile file, String title, String parseMode,
+                                       List<Long> projectIds) throws IOException;
 
     Map<String, Object> uploadDocumentChunk(String uploadId, String fileName, long fileSize,
                                             int chunkIndex, int totalChunks, MultipartFile chunk) throws IOException;
 
     Map<String, Object> completeChunkedUpload(Long spaceId, String uploadId, String fileName,
-                                              long fileSize, int totalChunks, String title, String parseMode) throws IOException;
+                                              long fileSize, int totalChunks, String title, String parseMode,
+                                              List<Long> projectIds) throws IOException;
+
+    void bindDocumentProjects(Long documentId, List<Long> projectIds);
 
     Map<String, Object> importDebugRecord() throws IOException;
 

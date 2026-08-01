@@ -98,6 +98,48 @@ class KbStore:
             return None
         return row
 
+    def get_project_context(self, project_id: int | None) -> dict | None:
+        if not project_id:
+            return None
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, name, description,
+                               business_scope AS businessScope,
+                               release_target AS releaseTarget,
+                               current_milestone AS currentMilestone,
+                               tech_stack AS techStack,
+                               health_status AS healthStatus,
+                               health_score AS healthScore
+                        FROM agent_project
+                        WHERE id=%s AND deleted=0
+                        LIMIT 1
+                        """,
+                        (project_id,),
+                    )
+                    project = cur.fetchone()
+                    if not project:
+                        return None
+                    cur.execute(
+                        """
+                        SELECT title, summary, health_status AS healthStatus,
+                               health_score AS healthScore,
+                               risks_json AS risksJson, plan_json AS planJson
+                        FROM agent_report
+                        WHERE project_id=%s
+                        ORDER BY id DESC
+                        LIMIT 1
+                        """,
+                        (project_id,),
+                    )
+                    project["latestReport"] = cur.fetchone()
+                    return project
+        except Exception:
+            # Project context is an enhancement; global knowledge chat remains available.
+            return None
+
     def list_session_messages(self, session_id: int, limit: int = 10) -> list[dict]:
         with self._conn() as conn:
             with conn.cursor() as cur:

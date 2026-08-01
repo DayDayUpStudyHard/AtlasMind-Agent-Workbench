@@ -12,6 +12,9 @@
     <el-table :data="runs" v-loading="loading" stripe class="data-table">
       <el-table-column prop="id" label="Run ID" width="90" />
       <el-table-column prop="projectName" label="项目" min-width="170" />
+      <el-table-column prop="runType" label="任务类型" width="140">
+        <template #default="{ row }">{{ runTypeLabel(row.runType) }}</template>
+      </el-table-column>
       <el-table-column prop="question" label="问题" min-width="260" show-overflow-tooltip />
       <el-table-column prop="status" label="状态" width="150" />
       <el-table-column prop="progress" label="进度" width="180">
@@ -23,13 +26,26 @@
       <el-table-column prop="createTime" label="创建时间" width="170">
         <template #default="{ row }">{{ formatDate(row.createTime) }}</template>
       </el-table-column>
+      <el-table-column label="操作" width="110" fixed="right">
+        <template #default="{ row }">
+          <el-button
+            type="danger"
+            link
+            :disabled="isRunning(row.status)"
+            @click="removeRun(row)"
+          >
+            删除
+          </el-button>
+        </template>
+      </el-table-column>
     </el-table>
   </div>
 </template>
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getAgentRuns } from '../api/index.js'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { deleteAgentRun, getAgentRuns } from '../api/index.js'
 
 const loading = ref(false)
 const runs = ref([])
@@ -47,6 +63,30 @@ async function fetchRuns() {
 
 function formatDate(value) {
   return value ? String(value).substring(0, 16) : '-'
+}
+
+function isRunning(status) {
+  return ['CREATED', 'CONTEXT_BUILDING', 'ANALYZING', 'VERIFYING', 'PLANNING'].includes(status)
+}
+
+function runTypeLabel(type) {
+  return { HEALTH_ANALYSIS: '健康分析', PROJECT_ONBOARDING: '项目接手', ENGINEERING_DECISION: '研发决策' }[type] || type || 'Agent 任务'
+}
+
+async function removeRun(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除 Agent Run #${row.id} 吗？关联步骤、报告和动作也会一起删除。`,
+      '删除运行记录',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+    await deleteAgentRun(row.id)
+    ElMessage.success('运行记录已删除')
+    await fetchRuns()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.response?.data?.message || '删除运行记录失败')
+  }
 }
 </script>
 

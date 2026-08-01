@@ -53,6 +53,9 @@ export function getProjectRun(runId) { return api.get(`/api/admin/projects/runs/
 export function getAgentRuns() { return api.get('/api/admin/projects/runs') }
 export function getAgentReports() { return api.get('/api/admin/projects/reports') }
 export function getAgentActions(params = {}) { return api.get('/api/admin/projects/actions', { params }) }
+export function deleteAgentRun(id) { return api.delete(`/api/admin/projects/runs/${id}`) }
+export function deleteAgentReport(id) { return api.delete(`/api/admin/projects/reports/${id}`) }
+export function deleteAgentAction(id) { return api.delete(`/api/admin/projects/actions/${id}`) }
 
 export function getKbSpaces() { return api.get('/api/admin/kb/spaces') }
 export function createKbSpace(data) { return api.post('/api/admin/kb/spaces', data) }
@@ -62,12 +65,13 @@ export function deleteKbSpace(id) { return api.delete(`/api/admin/kb/spaces/${id
 export function getKbDocuments(params) { return api.get('/api/admin/kb/documents', { params }) }
 export function getKbDocument(id) { return api.get(`/api/admin/kb/documents/${id}`) }
 export function getKbDocumentChunks(id) { return api.get(`/api/admin/kb/documents/${id}/chunks`) }
-export function uploadKbDocument(spaceId, file, title = '', parseMode = 'OCR') {
+export function uploadKbDocument(spaceId, file, title = '', parseMode = 'OCR', projectIds = []) {
   const formData = new FormData()
   formData.append('spaceId', spaceId)
   formData.append('file', file)
   if (title) formData.append('title', title)
   if (parseMode) formData.append('parseMode', parseMode)
+  projectIds.forEach(id => formData.append('projectIds', id))
   return api.post('/api/admin/kb/documents/upload', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: KB_UPLOAD_TIMEOUT
@@ -86,7 +90,7 @@ export function uploadKbDocumentChunk({ uploadId, fileName, fileSize, chunkIndex
     timeout: KB_UPLOAD_TIMEOUT
   })
 }
-export function completeKbDocumentUpload({ spaceId, uploadId, fileName, fileSize, totalChunks, title = '', parseMode = 'OCR' }) {
+export function completeKbDocumentUpload({ spaceId, uploadId, fileName, fileSize, totalChunks, title = '', parseMode = 'OCR', projectIds = [] }) {
   const formData = new FormData()
   formData.append('spaceId', spaceId)
   formData.append('uploadId', uploadId)
@@ -95,6 +99,7 @@ export function completeKbDocumentUpload({ spaceId, uploadId, fileName, fileSize
   formData.append('totalChunks', totalChunks)
   if (title) formData.append('title', title)
   if (parseMode) formData.append('parseMode', parseMode)
+  projectIds.forEach(id => formData.append('projectIds', id))
   return api.post('/api/admin/kb/documents/upload/complete', formData, {
     headers: { 'Content-Type': 'multipart/form-data' },
     timeout: KB_UPLOAD_TIMEOUT
@@ -106,6 +111,9 @@ export function restoreKbDocument(id) { return api.post(`/api/admin/kb/documents
 export function permanentDeleteKbDocument(id) { return api.delete(`/api/admin/kb/documents/${id}/permanent`) }
 export function reparseKbDocument(id) { return api.post(`/api/admin/kb/documents/${id}/reparse`) }
 export function reindexKbDocument(id) { return api.post(`/api/admin/kb/documents/${id}/reindex`) }
+export function bindKbDocumentProjects(id, projectIds = []) {
+  return api.put(`/api/admin/kb/documents/${id}/projects`, { projectIds })
+}
 export function testKbQa(data) { return api.post('/api/admin/kb/qa/test', data) }
 
 export function getAiObservabilityTraces(params) {

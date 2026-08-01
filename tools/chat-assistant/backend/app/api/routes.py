@@ -143,6 +143,7 @@ async def chat_send(request: ChatRequest):
 
             top_k = max(1, min(request.topK, 20))
             store = get_kb().store
+            project_context = store.get_project_context(request.projectId)
             if request.sessionId:
                 session = store.get_session(request.sessionId, request.ownerToken)
                 if not session:
@@ -283,6 +284,13 @@ async def chat_send(request: ChatRequest):
                     store.create_tool_call(trace_id, **call)
 
             contexts = llm.build_context(sources)
+            if project_context:
+                contexts = (
+                    "当前对话绑定的项目上下文（只能基于这些事实回答，不要补造未知信息）：\n"
+                    + json.dumps(project_context, ensure_ascii=False, default=str)
+                    + "\n\n"
+                    + contexts
+                )
             citations = [_citation_payload(hit, retrieval_type) for hit in sources]
 
             yield _sse("status", {"status": "thinking"})
@@ -332,27 +340,39 @@ async def get_suggestions():
 
 
 @router.get("/health")
-async def health():
-    result = {"status": "ok", "components": {}}
+async def health(probe: bool = False):
+    result = {"status": "ok", "probe": probe, "components": {}}
 
     if not settings.llm_api_key:
         result["components"]["llm"] = {"status": "error", "message": "LLM_API_KEY is not set"}
         result["status"] = "degraded"
     else:
         result["components"]["llm"] = {
-            "status": "ok",
+            "status": "ok" if not probe else "checking",
             "model": settings.llm_model,
             "base_url": settings.llm_base_url,
         }
+        if probe:
+            error = get_llm().validate_connection()
+            result["components"]["llm"]["status"] = "ok" if error is None else "error"
+            if error:
+                result["components"]["llm"]["message"] = error
+                result["status"] = "degraded"
 
     emb = get_embedding()
     if emb.configured:
         result["components"]["embedding"] = {
-            "status": "ok",
+            "status": "ok" if not probe else "checking",
             "model": settings.embedding_model,
             "base_url": settings.embedding_base_url,
             "dim": settings.embedding_dim,
         }
+        if probe:
+            vector = emb.embed("AtlasMind health check")
+            result["components"]["embedding"]["status"] = "ok" if vector else "error"
+            if not vector:
+                result["components"]["embedding"]["message"] = "Embedding API 请求失败或未返回向量"
+                result["status"] = "degraded"
     else:
         result["components"]["embedding"] = {"status": "info", "message": "Embedding is not configured; keyword search is used"}
 
@@ -375,6 +395,89 @@ async def health():
         result["status"] = "degraded"
 
     return result
+
+
+@internal_router.post("/project-analysis")
+async def project_analysis(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Generate a structured, evidence-bounded project health report."""
+    _check_internal_token(x_internal_token)
+    try:
+        return get_llm().analyze_project(
+            payload.get("project") or {},
+            payload.get("citations") or [],
+            payload.get("deterministicScoring") or {},
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=502, detail="LLM API key is invalid") from exc
+    except (APIConnectionError, APIError, ValueError) as exc:
+        logger.exception("Structured project analysis failed")
+        raise HTTPException(status_code=502, detail=f"Project analysis failed: {exc}") from exc
+
+
+@internal_router.post("/project-tasks")
+async def project_task(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Generate a structured artifact for an evidence-bounded project task."""
+    _check_internal_token(x_internal_token)
+    try:
+        return get_llm().run_project_task(
+            payload.get("taskType") or "",
+            payload.get("project") or {},
+            payload.get("taskInput") or {},
+            payload.get("citations") or [],
+        )
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=502, detail="LLM API key is invalid") from exc
+    except (APIConnectionError, APIError, ValueError) as exc:
+        logger.exception("Structured project task failed")
+        raise HTTPException(status_code=502, detail=f"Project task failed: {exc}") from exc
+
+
+@internal_router.post("/agent/plan")
+async def agent_plan(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Create a bounded Agent plan without executing tools."""
+    _check_internal_token(x_internal_token)
+    try:
+        return get_llm().plan_agent(payload)
+    except (AuthenticationError, APIConnectionError, APIError, ValueError) as exc:
+        logger.exception("Agent planning failed")
+        raise HTTPException(status_code=502, detail=f"Agent planning failed: {exc}") from exc
+
+
+@internal_router.post("/agent/next-turn")
+async def agent_next_turn(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Select Java-owned tools through native OpenAI-compatible function calling."""
+    _check_internal_token(x_internal_token)
+    try:
+        return get_llm().next_agent_turn(payload)
+    except (AuthenticationError, APIConnectionError, APIError, ValueError) as exc:
+        logger.exception("Agent function-calling turn failed")
+        raise HTTPException(status_code=502, detail=f"Agent turn failed: {exc}") from exc
+
+
+@internal_router.post("/agent/reflect")
+async def agent_reflect(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Verify evidence coverage and request bounded re-planning when needed."""
+    _check_internal_token(x_internal_token)
+    try:
+        return get_llm().reflect_agent(payload)
+    except (AuthenticationError, APIConnectionError, APIError, ValueError) as exc:
+        logger.exception("Agent reflection failed")
+        raise HTTPException(status_code=502, detail=f"Agent reflection failed: {exc}") from exc
 
 
 @internal_router.post("/kb/ingest/jobs")
