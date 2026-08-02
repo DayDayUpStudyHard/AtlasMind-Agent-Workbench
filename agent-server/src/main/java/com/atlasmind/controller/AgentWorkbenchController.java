@@ -66,6 +66,11 @@ public class AgentWorkbenchController {
         return Result.ok(agentProjectService.listProjectEvidence(projectId, request == null ? Map.of() : request));
     }
 
+    @GetMapping("/memories/{memoryId}")
+    public Result<Map<String, Object>> memory(@PathVariable Long memoryId) {
+        return Result.ok(agentProjectService.getMemory(memoryId));
+    }
+
     @GetMapping("/{projectId}/sync-jobs")
     public Result<List<Map<String, Object>>> syncJobs(@PathVariable Long projectId) {
         return Result.ok(agentProjectService.listSyncJobs(projectId));

@@ -177,6 +177,21 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     }
 
     @Override
+    public Map<String, Object> getMemory(Long memoryId) {
+        Map<String, Object> memory = firstOrNull(jdbcTemplate.queryForList("""
+                SELECT id, project_id AS projectId, memory_type AS memoryType,
+                       title, content, source_type AS sourceType, source_id AS sourceId,
+                       confirmed, confirmed_by AS confirmedBy,
+                       create_time AS createTime, update_time AS updateTime
+                FROM agent_project_memory WHERE id=?
+                """, memoryId));
+        if (memory == null) {
+            throw new IllegalArgumentException("未找到该记忆记录");
+        }
+        return memory;
+    }
+
+    @Override
     public Map<String, Object> getProject(Long projectId) {
         Map<String, Object> project = firstOrNull(jdbcTemplate.queryForList("""
                 SELECT id, name, project_key AS projectKey, description, repository_type AS repositoryType,
@@ -191,10 +206,13 @@ public class AgentProjectServiceImpl implements AgentProjectService {
             throw new IllegalArgumentException("没有找到这个项目");
         }
         project.put("memories", jdbcTemplate.queryForList("""
-                SELECT id, memory_type AS memoryType, title, content, source_type AS sourceType,
+                SELECT id, memory_type AS memoryType, title,
+                       LEFT(content, 200) AS content, source_type AS sourceType,
                        source_id AS sourceId, confirmed, confirmed_by AS confirmedBy,
                        create_time AS createTime, update_time AS updateTime
-                FROM agent_project_memory WHERE project_id=? ORDER BY confirmed DESC, update_time DESC
+                FROM agent_project_memory WHERE project_id=?
+                ORDER BY confirmed DESC, update_time DESC
+                LIMIT 20
                 """, projectId));
         project.put("sources", jdbcTemplate.queryForList("""
                 SELECT id, source_type AS sourceType, source_url AS sourceUrl, default_branch AS defaultBranch,
@@ -207,16 +225,18 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 SELECT object_type AS objectType, COUNT(*) AS count
                 FROM project_evidence WHERE project_id=? GROUP BY object_type ORDER BY object_type
                 """, projectId));
-        project.put("runs", listRuns(projectId));
+        project.put("runs", jdbcTemplate.queryForList("""
+                SELECT id, project_id AS projectId, run_type AS runType, trigger_type AS triggerType,
+                       question, status, progress, current_step AS currentStep, error_message AS errorMessage,
+                       started_at AS startedAt, finished_at AS finishedAt, create_time AS createTime
+                FROM agent_run WHERE project_id=? ORDER BY id DESC LIMIT 5
+                """, projectId));
         project.put("reports", jdbcTemplate.queryForList("""
-                SELECT id, run_id AS runId, report_type AS reportType, title, summary, health_status AS healthStatus,
-                       health_score AS healthScore, dimensions_json AS dimensionsJson,
-                       risks_json AS risksJson, plan_json AS planJson, citations_json AS citationsJson,
+                SELECT id, run_id AS runId, report_type AS reportType, title, summary,
+                       health_status AS healthStatus, health_score AS healthScore,
                        scoring_version AS scoringVersion, evidence_hash AS evidenceHash,
-                       analysis_mode AS analysisMode, scoring_rationale_json AS scoringRationaleJson,
-                       content_json AS contentJson,
-                       report_markdown AS reportMarkdown, status, create_time AS createTime
-                FROM agent_report WHERE project_id=? ORDER BY id DESC LIMIT 10
+                       analysis_mode AS analysisMode, status, create_time AS createTime
+                FROM agent_report WHERE project_id=? ORDER BY id DESC LIMIT 5
                 """, projectId));
         return project;
     }

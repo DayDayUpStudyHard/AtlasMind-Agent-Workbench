@@ -44,5 +44,7 @@ public interface AgentProjectService {
 
     void deleteReport(Long reportId);
 
+    Map<String, Object> getMemory(Long memoryId);
+
     void deleteAction(Long actionId);
 }
