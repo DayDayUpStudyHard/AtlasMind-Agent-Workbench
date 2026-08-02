@@ -56,6 +56,7 @@ public class HttpGitHubRepositoryGateway implements GitHubRepositoryGateway {
 
         addReadme(owner, repo, ref, evidence);
         addRootFiles(owner, repo, ref, evidence);
+        addSourceCode(owner, repo, ref, evidence);
         addCommits(owner, repo, ref, evidence);
         addIssues(owner, repo, evidence);
         addPullRequests(owner, repo, evidence);
@@ -70,6 +71,107 @@ public class HttpGitHubRepositoryGateway implements GitHubRepositoryGateway {
                     text(readme, "path"), content, readme));
         } catch (Exception ignored) {
             // Some repositories do not expose a README on the selected branch.
+        }
+    }
+
+    // ── Source code collection (recursive, depth-limited) ──────────────
+
+    private static final List<String> SOURCE_DIRS = List.of("src", "app", "lib", "agent-server/src",
+            "tools", "agent-front/src");
+    private static final List<String> SOURCE_EXTENSIONS = List.of(
+            ".java", ".py", ".js", ".ts", ".vue", ".jsx", ".tsx", ".sql", ".yml", ".yaml",
+            ".xml", ".json", ".css", ".scss", ".html", ".md", ".sh", ".dockerfile");
+    private static final int SOURCE_MAX_FILES = 50;
+    private static final int SOURCE_MAX_DEPTH = 4;
+    private static final int SOURCE_SNIPPET_CHARS = 3000;
+
+    private void addSourceCode(String owner, String repo, String ref, List<Map<String, Object>> evidence) {
+        int collected = 0;
+        for (String dir : SOURCE_DIRS) {
+            if (collected >= SOURCE_MAX_FILES) break;
+            collected += collectSourceDir(owner, repo, ref, dir, 0, evidence, collected);
+        }
+    }
+
+    private int collectSourceDir(String owner, String repo, String ref, String path,
+                                  int depth, List<Map<String, Object>> evidence, int collected) {
+        if (depth > SOURCE_MAX_DEPTH || collected >= SOURCE_MAX_FILES) return 0;
+        int added = 0;
+        try {
+            List<Map<String, Object>> contents = getList(
+                    "/repos/" + owner + "/" + repo + "/contents/" + path + "?ref=" + ref);
+            for (Map<String, Object> item : contents) {
+                if (collected + added >= SOURCE_MAX_FILES) break;
+                String type = text(item, "type");
+                String itemPath = text(item, "path");
+                if ("file".equals(type) && isSourceFile(itemPath)) {
+                    addFile(owner, repo, ref, itemPath, evidence);
+                    added++;
+                } else if ("dir".equals(type) && !isSkippedDir(itemPath)) {
+                    added += collectSourceDir(owner, repo, ref, itemPath, depth + 1,
+                            evidence, collected + added);
+                }
+            }
+        } catch (Exception ignored) {
+            // Directory may not exist in this repo — skip silently.
+        }
+        return added;
+    }
+
+    private boolean isSourceFile(String path) {
+        String lower = path.toLowerCase();
+        for (String ext : SOURCE_EXTENSIONS) {
+            if (lower.endsWith(ext)) return true;
+        }
+        return false;
+    }
+
+    private boolean isSkippedDir(String path) {
+        String name = path.contains("/") ? path.substring(path.lastIndexOf('/') + 1) : path;
+        return name.startsWith(".") || name.equals("node_modules")
+                || name.equals("target") || name.equals("dist")
+                || name.equals("build") || name.equals("__pycache__")
+                || name.equals(".git") || name.equals("vendor");
+    }
+
+    /** Read a single file's full content from GitHub (on-demand, not synced). */
+    public Map<String, Object> readFileContent(String repositoryUrl, String branch, String filePath) {
+        String[] repo = parseRepository(repositoryUrl);
+        String ref = branch == null || branch.isBlank() ? "main" : branch;
+        try {
+            Map<String, Object> file = getMap("/repos/" + repo[0] + "/" + repo[1]
+                    + "/contents/" + filePath + "?ref=" + ref);
+            String content = decodeContent(text(file, "content"));
+            return Map.of("path", filePath, "content", content,
+                    "size", text(file, "size"), "url", text(file, "html_url"));
+        } catch (Exception e) {
+            return Map.of("path", filePath, "error", e.getMessage());
+        }
+    }
+
+    /** Search code in a GitHub repository using the GitHub Search API. */
+    public List<Map<String, Object>> searchCode(String repositoryUrl, String query, int limit) {
+        String[] repo = parseRepository(repositoryUrl);
+        try {
+            List<Map<String, Object>> items = getList("/search/code?q="
+                    + java.net.URLEncoder.encode(query, StandardCharsets.UTF_8)
+                    + "+repo:" + repo[0] + "/" + repo[1]
+                    + "&per_page=" + Math.min(limit, 10));
+            List<Map<String, Object>> results = new ArrayList<>();
+            for (Map<String, Object> item : items) {
+                Map<String, Object> entry = new LinkedHashMap<>();
+                entry.put("path", text(item, "path"));
+                entry.put("name", text(item, "name"));
+                entry.put("url", text(item, "html_url"));
+                entry.put("gitUrl", text(item, "git_url"));
+                Map<String, Object> repoInfo = mapValue(item.get("repository"));
+                entry.put("repo", text(repoInfo, "full_name"));
+                results.add(entry);
+                if (results.size() >= limit) break;
+            }
+            return results;
+        } catch (Exception e) {
+            return List.of(Map.of("error", e.getMessage()));
         }
     }
 

@@ -42,6 +42,9 @@ class Settings:
     # ====== Redis ======
     redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 
+    # ====== GitHub (for Agent source-code tools) ======
+    github_token: str = os.getenv("GITHUB_TOKEN", "")
+
     # ====== Chat ======
     chat_max_tokens: int = int(os.getenv("CHAT_MAX_TOKENS", "2048"))
     chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))

@@ -211,6 +211,13 @@ class EvidenceStore(ABC):
         ...
 
     @abstractmethod
+    async def search_source_code(
+        self, project_id: int, arguments: dict
+    ) -> list[dict]:
+        """Search synced source code evidence by keyword + optional file pattern."""
+        ...
+
+    @abstractmethod
     async def semantic_memory_search(
         self, project_id: int, query: str, arguments: dict
     ) -> list[dict]:
@@ -571,6 +578,50 @@ class MySqlTraceStore(TraceStore):
 
 
 class MySqlEvidenceStore(EvidenceStore):
+    async def search_source_code(
+        self, project_id: int, arguments: dict
+    ) -> list[dict]:
+        return await _run_sync(self._source_code_sync, project_id, arguments)
+
+    @staticmethod
+    def _source_code_sync(project_id, arguments):
+        limit = max(1, min(15, int(arguments.get("limit", 8))))
+        query = str(arguments.get("query", "")).lower()
+        file_pattern = str(arguments.get("filePattern", ""))
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT id AS sourceId, source_type AS sourceType,
+                              object_type AS objectType, title, source_ref AS sourceRef,
+                              source_url AS sourceUrl, content_snippet AS snippet,
+                              confidence_score AS score, observed_at AS observedAt
+                       FROM project_evidence
+                       WHERE project_id=%s
+                         AND object_type IN ('SOURCE', 'FILE', 'README')
+                       ORDER BY confidence_score DESC, update_time DESC
+                       LIMIT 200""",
+                    (project_id,),
+                )
+                rows = list(cur.fetchall())
+        filtered = []
+        for row in rows:
+            if query:
+                haystack = (
+                    str(row.get("title", "")) + " "
+                    + str(row.get("sourceRef", "")) + " "
+                    + str(row.get("snippet", ""))
+                ).lower()
+                if query not in haystack:
+                    continue
+            if file_pattern:
+                fp = file_pattern.lower().lstrip("*")
+                if fp and fp not in str(row.get("title", "")).lower():
+                    continue
+            filtered.append(row)
+            if len(filtered) >= limit:
+                break
+        return [_normalize_value(r) for r in filtered]
+
     async def search_evidence(self, project_id: int, arguments: dict) -> list[dict]:
         return await _run_sync(self._search_sync, project_id, arguments)
 

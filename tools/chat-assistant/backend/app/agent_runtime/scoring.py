@@ -48,6 +48,7 @@ class HealthScoringEngine:
         has_readme = counts.get("README", 0) > 0
         has_file_tree = counts.get("FILE_TREE", 0) > 0
         has_file = counts.get("FILE", 0) > 0
+        has_source_code = counts.get("SOURCE", 0) > 0 or counts.get("FILE", 0) > 1
         has_commit = counts.get("COMMIT", 0) > 0
         has_issue = counts.get("ISSUE", 0) > 0
         has_pr = counts.get("PR", 0) > 0
@@ -75,10 +76,11 @@ class HealthScoringEngine:
         quality += self._signal(rationale, "工程质量", has_pr, 5, "PR 评审")
 
         architecture = 45
-        architecture += self._signal(rationale, "架构可维护性", has_readme, 15, "README")
-        architecture += self._signal(rationale, "架构可维护性", has_file_tree, 15, "目录结构")
-        architecture += self._signal(rationale, "架构可维护性", has_deps, 15, "构建配置")
-        architecture += self._signal(rationale, "架构可维护性", has_tech_stack, 10, "技术栈")
+        architecture += self._signal(rationale, "架构可维护性", has_readme, 12, "README")
+        architecture += self._signal(rationale, "架构可维护性", has_file_tree, 10, "目录结构")
+        architecture += self._signal(rationale, "架构可维护性", has_deps, 10, "构建配置")
+        architecture += self._signal(rationale, "架构可维护性", has_source_code, 15, "源码可检索")
+        architecture += self._signal(rationale, "架构可维护性", has_tech_stack, 8, "技术栈")
 
         risk = 45
         risk += self._signal(rationale, "风险暴露", has_github, 15, "真实仓库证据")

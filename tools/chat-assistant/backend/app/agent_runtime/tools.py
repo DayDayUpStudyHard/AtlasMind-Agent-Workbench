@@ -5,6 +5,7 @@ All data access goes through EvidenceStore / ReportStore; no raw SQL here.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .persistence import EvidenceStore, ReportStore
@@ -113,9 +114,43 @@ _TOOL_DEFINITIONS: list[dict] = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchSourceCode",
+            "description": "按关键词搜索项目源码文件（从已同步的 SOURCE 证据中检索）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索词，如类名、函数名、关键字"},
+                    "filePattern": {"type": "string", "description": "文件名模式，如 *.java、*.py"},
+                    "limit": {"type": "integer", "description": "返回条数，1 到 15", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "readSourceFile",
+            "description": "从 GitHub 仓库直接读取指定文件的完整内容（不依赖同步快照）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filePath": {"type": "string", "description": "仓库中的文件路径，如 src/main.py"},
+                },
+                "required": ["filePath"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 _TOOL_NAMES = {t["function"]["name"] for t in _TOOL_DEFINITIONS}
+# Verify definitions cover all names (safety check)
+assert "searchSourceCode" in _TOOL_NAMES, "searchSourceCode missing from tool names"
+assert "readSourceFile" in _TOOL_NAMES, "readSourceFile missing from tool names"
 
 _CITATION_SOURCE_TOOLS = {"searchProjectEvidence", "searchProjectKnowledge"}
 
@@ -203,7 +238,56 @@ class AgentToolRegistry:
                 "canonicalEvidenceCount": len(evidence),
             }
 
+        if tool_name == "searchSourceCode":
+            return {"items": await self.evidence.search_source_code(
+                ctx.project_id, arguments)}
+
+        if tool_name == "readSourceFile":
+            return await self._read_source_file(ctx, arguments)
+
         raise ValueError(f"Tool is not allowlisted: {tool_name}")
+
+    async def _read_source_file(self, ctx, arguments: dict) -> dict:
+        """Read a file's full content from the GitHub API."""
+        import urllib.request
+        import base64
+
+        repo_url = str(ctx.project.get("repositoryUrl", ""))
+        if not repo_url:
+            return {"error": "项目未绑定 GitHub 仓库"}
+
+        clean = repo_url.rstrip("/").removesuffix(".git")
+        marker = clean.find("github.com/")
+        if marker < 0:
+            return {"error": "仅支持 github.com 仓库"}
+        path_seg = clean[marker + len("github.com/"):]
+        parts = path_seg.split("/")
+        if len(parts) < 2:
+            return {"error": "无法解析仓库路径"}
+
+        file_path = str(arguments.get("filePath", "")).lstrip("/")
+        api_url = (f"https://api.github.com/repos/{parts[0]}/{parts[1]}"
+                   f"/contents/{file_path}")
+
+        from app.config import settings
+        req = urllib.request.Request(api_url)
+        req.add_header("Accept", "application/vnd.github+json")
+        req.add_header("X-GitHub-Api-Version", "2022-11-28")
+        if settings.github_token:
+            req.add_header("Authorization", f"Bearer {settings.github_token}")
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            content = base64.b64decode(data.get("content", "")).decode("utf-8")
+            return {
+                "path": file_path,
+                "content": content,
+                "size": data.get("size", 0),
+                "url": data.get("html_url", ""),
+            }
+        except Exception as e:
+            return {"path": file_path, "error": str(e)}
 
     # -- concurrency classification (F5) -----------------------------------
 
