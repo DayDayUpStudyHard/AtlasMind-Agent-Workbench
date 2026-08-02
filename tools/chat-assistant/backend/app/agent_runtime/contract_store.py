@@ -302,3 +302,92 @@ class ContractStore:
                     )
                     return [_normalize_value(r) for r in cur.fetchall()]
         return await _run_sync(_get)
+
+
+    # ── Obligation extraction (Phase 6) ────────────────────────────
+
+    async def extract_obligations(self, case_id: int, arguments: dict) -> list[dict]:
+        import json
+        clause_types = arguments.get("clauseTypes") or ["PAYMENT","DELIVERY","ACCEPTANCE","NOTICE","RENEWAL"]
+        if isinstance(clause_types, str):
+            clause_types = json.loads(clause_types)
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    ph = ",".join(["%s"]*len(clause_types))
+                    cur.execute(
+                        f"""SELECT id, clause_type AS clauseType, title, content,
+                                   semantic_elements AS semanticElements, clause_number AS clauseNumber
+                            FROM contract_clause WHERE case_id=%s AND clause_type IN ({ph}) LIMIT 20""",
+                        [case_id] + list(clause_types))
+                    clauses = [_normalize_value(r) for r in cur.fetchall()]
+                    for c in clauses:
+                        if isinstance(c.get("semanticElements"), str):
+                            try: c["semanticElements"] = json.loads(c["semanticElements"])
+                            except: pass
+            ob_map = {
+                "PAYMENT": [("付款义务","按合同约定支付款项"),("发票义务","按时开具合规发票")],
+                "DELIVERY": [("交付义务","按时交付约定的产品或服务")],
+                "ACCEPTANCE": [("验收义务","在约定时间内完成验收")],
+                "NOTICE": [("通知义务","按合同约定发送通知"),("续签通知","在规定时间内发出续签或终止通知")],
+                "RENEWAL": [("续签评估","在合同到期前完成续签评估")],
+            }
+            obs = []
+            for c in clauses:
+                ct = str(c.get("clauseType",""))
+                for t,d in ob_map.get(ct,[]):
+                    obs.append({"title":f"{t} — {c.get("clauseNumber",c.get("title",""))}",
+                        "obligationType":ct,"description":d,"sourceClauseId":c.get("id"),
+                        "evidenceRequired":1 if ct in ("PAYMENT","DELIVERY") else 0})
+            return obs
+        return await _run_sync(_get)
+
+    async def verify_evidence(self, obligation_id: int) -> dict:
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT o.id, o.title, o.status, o.evidence_required,
+                                  d.id AS docId, d.file_name AS docFileName
+                           FROM contract_obligation o LEFT JOIN contract_document d
+                           ON d.case_id=o.case_id AND d.document_type='FULFILLMENT_EVIDENCE'
+                           WHERE o.id=%s""", (obligation_id,))
+                    rows = [_normalize_value(r) for r in cur.fetchall()]
+                    if not rows: return {"error":"Obligation not found"}
+                    o = rows[0]; has = any(r.get("docId") for r in rows)
+                    return {"obligationId":o.get("id"),"title":o.get("title"),
+                        "status":o.get("status"),"evidenceRequired":bool(o.get("evidenceRequired")),
+                        "hasEvidence":has,"verified":has}
+        return await _run_sync(_get)
+
+    # ── Version comparison (Phase 7) ───────────────────────────────
+
+    async def compare_versions(self, case_id: int, base_v: int, new_v: int) -> dict:
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id, version, file_name AS fileName, content_hash AS contentHash
+                           FROM contract_document WHERE case_id=%s AND version IN (%s,%s) ORDER BY version""",
+                        (case_id, base_v, new_v))
+                    docs = [_normalize_value(r) for r in cur.fetchall()]
+                    if len(docs)<2: return {"error":"Both versions must exist","docs":docs}
+                    dids = [d["id"] for d in docs]
+                    cur.execute(
+                        """SELECT document_id, clause_type AS clauseType, clause_number AS clauseNumber,
+                                  title, content FROM contract_clause WHERE document_id IN (%s,%s)
+                                  ORDER BY clause_type, clause_number""",
+                        (dids[0], dids[1]))
+                    all_c = [_normalize_value(r) for r in cur.fetchall()]
+            base_c = {f"{c.get("clauseType")}:{c.get("clauseNumber")}":c for c in all_c if c.get("document_id")==dids[0]}
+            new_c = {f"{c.get("clauseType")}:{c.get("clauseNumber")}":c for c in all_c if c.get("document_id")==dids[1]}
+            added = [c for k,c in new_c.items() if k not in base_c]
+            removed = [c for k,c in base_c.items() if k not in new_c]
+            changed = []
+            for k in set(base_c)&set(new_c):
+                if base_c[k].get("content","") != new_c[k].get("content",""):
+                    changed.append({"clauseKey":k,"base":base_c[k],"new":new_c[k]})
+            return {"baseVersion":base_v,"newVersion":new_v,"added":len(added),"removed":len(removed),
+                "changed":len(changed),"addedClauses":added,"removedClauses":removed,
+                "changedClauses":changed,"summary":f"Add {len(added)} del {len(removed)} mod {len(changed)}"}
+        return await _run_sync(_get)

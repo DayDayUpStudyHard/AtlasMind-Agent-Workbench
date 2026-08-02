@@ -53,6 +53,22 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 "SELECT COUNT(*) FROM contract_case WHERE expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) AND deleted=0", Integer.class));
         data.put("overdue", jdbcTemplate.queryForObject(
                 "SELECT COUNT(*) FROM contract_case WHERE status='IN_FULFILLMENT' AND expiry_date < CURDATE() AND deleted=0", Integer.class));
+        // Obligation stats
+        data.put("obligationsTotal", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation", Integer.class));
+        data.put("obligationsOverdue", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation WHERE status='OVERDUE'", Integer.class));
+        data.put("obligationsDueSoon", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation WHERE status='PLANNED' AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)", Integer.class));
+        // Amount stats
+        data.put("totalAmount", jdbcTemplate.queryForObject(
+                "SELECT COALESCE(SUM(amount), 0) FROM contract_case WHERE deleted=0", java.math.BigDecimal.class));
+        // Active Agent runs
+        data.put("activeRuns", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM agent_run WHERE subject_type='CONTRACT_CASE' AND status IN ('CREATED','CONTEXT_BUILDING','ANALYZING','VERIFYING','PLANNING')", Integer.class));
+        // Open findings
+        data.put("openFindings", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_review_finding WHERE status='OPEN'", Integer.class));
         return data;
     }
 

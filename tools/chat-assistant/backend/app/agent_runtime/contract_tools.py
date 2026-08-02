@@ -130,6 +130,51 @@ CONTRACT_TOOL_DEFINITIONS: list[dict] = [
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "extractObligations",
+            "description": "从已批准合同条款中提取履约义务候选项（付款、交付、验收、通知、续签）",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "clauseTypes": {"type": "array", "items": {"type": "string"},
+                        "description": "PAYMENT|DELIVERY|ACCEPTANCE|NOTICE|RENEWAL"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "verifyFulfillmentEvidence",
+            "description": "验证已上传的履约证据是否覆盖义务要求",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "obligationId": {"type": "integer", "description": "履约义务 ID"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compareContractVersions",
+            "description": "比较两个合同版本的条款变化并标记受影响规则",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "baseVersion": {"type": "integer", "description": "基线版本号"},
+                    "newVersion": {"type": "integer", "description": "新版本号"},
+                },
+                "required": ["baseVersion", "newVersion"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 CONTRACT_TOOL_NAMES = {t["function"]["name"] for t in CONTRACT_TOOL_DEFINITIONS}
@@ -207,6 +252,18 @@ class ContractToolRegistry:
             engine = ContractRiskScoringEngine()
             return {"scoring": engine.score(
                 case.get("case", {}), rules, findings)}
+
+        if tool_name == "extractObligations":
+            return {"obligations": await self.store.extract_obligations(case_id, arguments)}
+
+        if tool_name == "verifyFulfillmentEvidence":
+            return await self.store.verify_evidence(int(arguments.get("obligationId", 0)))
+
+        if tool_name == "compareContractVersions":
+            return await self.store.compare_versions(
+                case_id,
+                int(arguments.get("baseVersion", 0)),
+                int(arguments.get("newVersion", 0)))
 
         raise ValueError(f"Tool not allowlisted: {tool_name}")
 
