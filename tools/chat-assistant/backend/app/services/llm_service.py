@@ -469,7 +469,7 @@ class LLMService:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 temperature=temperature,
-                max_tokens=max(4096, settings.chat_max_tokens),
+                max_tokens=max(8192, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
                 stream=False,
             ),
@@ -568,8 +568,22 @@ class LLMService:
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
 
+    @staticmethod
+    def _repair_json(text: str) -> str:
+        """Apply lightweight repairs for common LLM JSON mistakes."""
+        # Remove trailing commas before ] or }
+        text = re.sub(r",\s*([}\]])", r"\1", text)
+        # Remove comments (// and /* */)
+        text = re.sub(r"//[^\n]*", "", text)
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
+        return text
+
     def _parse_json_object(self, content: str) -> dict:
-        """Accept plain JSON and the fenced JSON some compatible models return."""
+        """Accept plain JSON and the fenced JSON some compatible models return.
+
+        Tries strict parse first, then lenient repairs for common LLM mistakes
+        (trailing commas, comments, unescaped characters).
+        """
         candidate = content.strip()
         fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", candidate, re.DOTALL | re.IGNORECASE)
         if fenced:
@@ -579,7 +593,37 @@ class LLMService:
             end = candidate.rfind("}")
             if start >= 0 and end > start:
                 candidate = candidate[start:end + 1]
-        parsed = json.loads(candidate)
-        if not isinstance(parsed, dict):
-            raise ValueError("project analysis response must be a JSON object")
-        return parsed
+
+        errors = []
+        # Attempt 1: strict parse
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError as e:
+            errors.append(str(e))
+
+        # Attempt 2: repair + parse
+        try:
+            repaired = self._repair_json(candidate)
+            parsed = json.loads(repaired)
+            if isinstance(parsed, dict):
+                logger.info("JSON repaired successfully after error: %s", errors[0][:120])
+                return parsed
+        except json.JSONDecodeError as e:
+            errors.append(str(e))
+
+        # Attempt 3: try json5 if available
+        try:
+            import json5
+            parsed = json5.loads(candidate)
+            if isinstance(parsed, dict):
+                logger.info("JSON parsed via json5 after errors: %s", errors[0][:120])
+                return parsed
+        except (ImportError, Exception):
+            pass
+
+        raise ValueError(
+            f"Failed to parse JSON after {len(errors)} attempts: "
+            + "; ".join(e[:120] for e in errors)
+        )

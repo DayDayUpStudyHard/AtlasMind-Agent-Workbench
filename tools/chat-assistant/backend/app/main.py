@@ -9,9 +9,19 @@ from app.api.routes import internal_router, kb_router, router, run_migrations
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    """Startup: run DB migrations.  Shutdown: cleanup (reserved)."""
+    """Startup: run DB migrations, eagerly init Agent Runtime (worker + recovery)."""
     await run_migrations()
+    # Eager init agent runtime — starts Stream worker + recovery loop
+    from app.api.routes import get_dispatcher
+    get_dispatcher()  # eager-init: starts recovery loop + Stream worker + prompts registry
     yield
+    # Shutdown: stop the Stream worker gracefully
+    try:
+        from app.api.routes import _agent_worker
+        if _agent_worker is not None:
+            await _agent_worker.stop()
+    except Exception:
+        pass
 
 
 app = FastAPI(

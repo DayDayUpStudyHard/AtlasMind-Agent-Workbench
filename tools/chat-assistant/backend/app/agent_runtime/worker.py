@@ -126,8 +126,9 @@ class AgentRunWorker:
             self._redis = aioredis.from_url(
                 self._redis_url,
                 decode_responses=True,
-                socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_connect_timeout=5,
+                socket_timeout=10,        # must exceed XREADGROUP block (2s)
+                socket_keepalive=True,
             )
         return self._redis
 
