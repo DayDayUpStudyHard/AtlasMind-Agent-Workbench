@@ -2,6 +2,66 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## Agent Runtime 可靠性增强：取消可观测 + 幂等去重 + LLM 重试熔断
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- **取消不可观测**：设 `status=CANCELLED` 后 harness 循环从不检查，取消完全无效。
+- **无幂等保护**：相同 `requestId` 重复 POST `/internal/agent/run` 会创建第二个 asyncio task，导致双写竞争。
+- **LLM 调用无重试**：DeepSeek API 短暂波动（503/超时）直接触发 `_fallback_*` 降级路径，降低报告质量。
+
+### 调整过程
+
+**F4: 取消可观测 + 幂等去重**
+- `policy.py` 新增 `RunCancelled` 异常类型。
+- `runner.py` AgentRunner 新增 `_check_cancelled()` 方法，在每个 Phase 边界和每次工具调用前查询 run 状态，发现 CANCELLED 则抛出 `RunCancelled` 终止执行。
+- `RunDispatcher.dispatch()` 捕获 `RunCancelled`，不标 FAILED（状态已在 DB 中设为 CANCELLED）。
+- `routes.py` 新增 `_active_runs: dict[str, Task]`，按 `requestId` 去重——重复 POST 返回已有任务状态而非创建新 task。
+
+**F2: LLM 重试 + 熔断器**
+- `llm_service.py` 新增 `CircuitBreaker` 类：5 分钟内连续 5 次失败 → 熔断 60s。
+- 新增 `_call_llm_with_retry()` 方法：指数退避重试（plan/reflect/analyze 3 次，tool_turn 2 次），认证错误不重试。
+- 5 个 LLM 调用方法全部接入重试 + 熔断：`plan_agent`, `next_agent_turn`, `reflect_agent`, `analyze_project`, `run_project_task`。
+
+### 调整结果
+
+- 幂等测试通过：相同 `requestId` 返回 `"任务已在调度中"`。
+- 取消测试通过：POST `/cancel` 后 DB 状态立即变为 CANCELLED。
+- E2E 测试 Run 49 通过：score=70, hash 匹配，5 维分数全部正确。
+- 熔断器状态机正常：CLOSED → OPEN（5 次失败）→ HALF_OPEN（60s 后）→ CLOSED（成功）。
+
+---
+
+## Agent Runtime 正式切换至 Python 并清理 Java 旧 Harness
+
+**日期**：2026-08-02 | **Commit**：`bc53211`
+
+### 调整原因
+
+- Agent Runtime 迁移（Java → Python）Phase 1-4 全部验证通过，Shadow Run 8/8 逐位项一致。
+- Java `agent/runtime/` 包（10 个文件）的旧 harness 代码已成为死代码，继续保留增加维护负担。
+- 三档 dispatch（java/python/shadow）中的 java 和 shadow 分支已无用，需清理。
+
+### 调整过程
+
+- `AGENT_RUNTIME` 设为 `python`，正式切换到 Python Agent Runtime。
+- 删除 `agent/runtime/` 包全部 10 个文件：`AgentHarness`, `DefaultAgentHarness`, `AgentHarnessResult`, `AgentTaskContext`, `AgentExecutionPolicy`, `AgentToolRegistry`, `AgentTraceStore`, `AgentArtifactExecutor`, `JdbcAgentArtifactExecutor`, `DeterministicHealthScoringEngine`。
+- 删除 `AgentRunExecutor.java`（旧 harness 异步调度器）。
+- 清理 `AgentProjectServiceImpl.java`：从 1892 行减至 ~1053 行，删除 30+ 旧 harness 方法（`executeRun`, `completeRunSteps`, `advance`, `scoreProject`, `buildReport`, `normalizeAiReport`, `fallbackProjectTask`, 等），`dispatchByMode(java/shadow/python)` 简化为 `dispatchToPython()`。
+- `AgentProjectService.java` 接口移除 `executeRun(Long)` 方法声明。
+- `AgentWorkbenchSchemaInitializer.java` 移除 Python 拥有的表 DDL（`agent_project_memory`, `agent_run`, `agent_run_step`, `agent_report`, `agent_run_trace`, `agent_tool_call`），移除 `addColumnIfMissing` 方法和孤立的 `agent_project_memory` 清理 SQL。
+
+### 调整结果
+
+- Maven 编译通过，无错误。
+- E2E 测试 Run 48 通过 Java→Python 桥接完成：score=70, hash=9ac3b8e4f806948f3a8ee74a9bbc46..., 5 维分数全部正确。
+- Java 侧不再包含任何 Agent 运行时逻辑，架构简化为 `用户 → Java (API/鉴权/审批) → HTTP → Python Agent Runtime`。
+- 回滚方式：revert commit `bc53211` + `UPDATE system_config SET config_value='java'`。
+
+---
+
 ## 2026-07-31 CI 失败，清理旧测试并恢复后端流水线
 
 **日期**：2026-07-31

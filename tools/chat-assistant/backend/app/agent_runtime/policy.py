@@ -20,6 +20,10 @@ class RepeatedToolCall(Exception):
     """Raised when the model requests an identical tool call twice."""
 
 
+class RunCancelled(Exception):
+    """Raised when the run has been cancelled by an external request."""
+
+
 class AgentExecutionPolicy:
     """Enforces bounded, non-repeating execution."""
 

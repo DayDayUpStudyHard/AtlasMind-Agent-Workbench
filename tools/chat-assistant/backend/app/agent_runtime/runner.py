@@ -43,7 +43,7 @@ from .persistence import (
     RunStore,
     TraceStore,
 )
-from .policy import AgentExecutionPolicy, BudgetExceeded
+from .policy import AgentExecutionPolicy, BudgetExceeded, RunCancelled
 from .scoring import HealthScoringEngine
 from .tools import AgentToolRegistry
 
@@ -91,6 +91,7 @@ class AgentRunner:
         execution_mode = "native-function-calling"
 
         # ── Phase 1: Context Building ───────────────────────────────
+        await self._check_cancelled(ctx.run_id)
         await self.run_store.update_run(
             ctx.run_id, status="CONTEXT_BUILDING", progress=8,
             current_step="Harness 正在加载项目记忆",
@@ -105,6 +106,7 @@ class AgentRunner:
         )
 
         # ── Phase 2: Planning ───────────────────────────────────────
+        await self._check_cancelled(ctx.run_id)
         plan = await self._plan(ctx, observations)
         await self.trace_store.append_trace(
             ctx.run_id, "PLAN_CREATED", "Planner 已生成有界执行计划", plan,
@@ -117,6 +119,7 @@ class AgentRunner:
         # ── Phase 3: Tool-Calling Turn Loop ─────────────────────────
         planner_finished = False
         for turn_index in range(MAX_TURNS):
+            await self._check_cancelled(ctx.run_id)
             if policy.remaining_tool_calls() <= 2:
                 break
             try:
@@ -142,6 +145,7 @@ class AgentRunner:
                 continue
 
             for call in calls:
+                await self._check_cancelled(ctx.run_id)
                 if policy.remaining_tool_calls() <= 2:
                     break
                 tool_name = str(call.get("name", ""))
@@ -159,9 +163,11 @@ class AgentRunner:
                 )
 
         # ── Phase 4: Evidence & Scoring Guarantee ───────────────────
+        await self._check_cancelled(ctx.run_id)
         await self._ensure_evidence_and_scoring(ctx, policy, observations)
 
         # ── Phase 5: Reflection ─────────────────────────────────────
+        await self._check_cancelled(ctx.run_id)
         citations = self.tools.citations_from(observations)
         scoring = self.tools.scoring_from(observations)
 
@@ -212,6 +218,7 @@ class AgentRunner:
         )
 
         # ── Phase 6: Artifact Generation ────────────────────────────
+        await self._check_cancelled(ctx.run_id)
         await self.run_store.update_run(
             ctx.run_id, status="PLANNING", progress=86,
             current_step="执行器正在生成结构化产物",
@@ -243,6 +250,21 @@ class AgentRunner:
             "rawArtifact": raw_artifact,
             "executionMode": execution_mode,
         }
+
+    # -- cancellation -----------------------------------------------------
+
+    async def _check_cancelled(self, run_id: int) -> None:
+        """Query the current run status and abort if it has been cancelled."""
+        try:
+            run = await self.run_store.get_run(run_id)
+            if run and run.get("status") == "CANCELLED":
+                raise RunCancelled(f"Run {run_id} was cancelled")
+        except RunCancelled:
+            raise
+        except Exception:
+            # If we can't read the run (e.g. DB blip), continue —
+            # we'd rather finish than abort on a transient read error.
+            pass
 
     # -- tool execution ---------------------------------------------------
 
@@ -565,6 +587,10 @@ class RunDispatcher:
                 run_id, status="COMPLETED", progress=100,
                 current_step="产物已生成",
             )
+        except RunCancelled:
+            logger.info("Harness run %s cancelled by external request", run_id)
+            # Status is already CANCELLED in DB (set by cancel endpoint);
+            # just ensure progress and heartbeat stop.
         except Exception as exc:
             logger.exception("Harness run %s failed", run_id)
             await self.run_store.update_run(

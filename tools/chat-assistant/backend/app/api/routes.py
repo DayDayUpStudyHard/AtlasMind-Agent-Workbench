@@ -40,6 +40,7 @@ _kb_service: KbService | None = None
 # ── Agent Runtime singletons ────────────────────────────────────────
 _agent_dispatcher = None   # RunDispatcher
 _agent_recovery_task: asyncio.Task | None = None
+_active_runs: dict[str, asyncio.Task] = {}  # requestId → Task (idempotency)
 
 
 def _check_internal_token(token: str | None) -> None:
@@ -673,8 +674,24 @@ async def start_agent_run(
         raise HTTPException(status_code=400, detail="runId is required")
     dispatcher = get_dispatcher()
 
-    # Idempotency: same requestId → no-op (Java handles dedup at its layer)
-    asyncio.create_task(dispatcher.dispatch(request.run_id, request))
+    # Idempotency: same requestId → return existing run (no duplicate task)
+    request_id = request.request_id or ""
+    if request_id and request_id in _active_runs:
+        existing = _active_runs[request_id]
+        if not existing.done():
+            return StartRunResponse(
+                run_id=request.run_id,
+                status=RunStatus.CREATED,
+                progress=0,
+                current_step="任务已在调度中",
+            ).to_dict()
+        # Task finished — clean up stale entry
+        _active_runs.pop(request_id, None)
+
+    task = asyncio.create_task(dispatcher.dispatch(request.run_id, request))
+    if request_id:
+        _active_runs[request_id] = task
+        task.add_done_callback(lambda _t, rid=request_id: _active_runs.pop(rid, None))
 
     return StartRunResponse(
         run_id=request.run_id,

@@ -1,9 +1,57 @@
 """LLM 服务 — prompt 构建 + 流式调用 DeepSeek API。"""
 import json
+import logging
 import re
+import time
 from typing import Generator
 from openai import OpenAI, APIError, APIConnectionError, AuthenticationError
 from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# ── Circuit breaker ───────────────────────────────────────────────────
+
+class CircuitBreaker:
+    """Simple in-memory circuit breaker.
+
+    After `fail_max` consecutive failures within `window_seconds`, the breaker
+    opens for `timeout_seconds`.  While open all calls are rejected immediately.
+    """
+
+    def __init__(self, fail_max: int = 5, window_seconds: float = 300.0,
+                 timeout_seconds: float = 60.0):
+        self._fail_max = fail_max
+        self._window = window_seconds
+        self._timeout = timeout_seconds
+        self._failures: list[float] = []   # timestamps of recent failures
+        self._opened_at: float = 0.0
+
+    @property
+    def is_open(self) -> bool:
+        if self._opened_at <= 0:
+            return False
+        if time.monotonic() - self._opened_at > self._timeout:
+            # Transition to half-open
+            self._opened_at = 0.0
+            self._failures.clear()
+            return False
+        return True
+
+    def success(self) -> None:
+        if self._opened_at > 0:
+            self._opened_at = 0.0  # half-open → closed on success
+        self._failures.clear()
+
+    def failure(self) -> None:
+        now = time.monotonic()
+        self._failures = [t for t in self._failures if now - t < self._window]
+        self._failures.append(now)
+        if len(self._failures) >= self._fail_max:
+            self._opened_at = now
+            logger.warning("Circuit breaker OPEN (failures=%d, timeout=%ds)",
+                           len(self._failures), self._timeout)
+
+_llm_circuit_breaker = CircuitBreaker()
 
 RAG_SYSTEM_PROMPT = """你是 AtlasMind Agent Workbench 的企业知识库 AI 助手。你的知识来源于企业内部知识内容和上传文档（Markdown/TXT/PDF），涵盖研发文档、项目复盘、制度 SOP、FAQ 和交付资料。
 
@@ -195,6 +243,42 @@ class LLMService:
         )
         self.model = settings.llm_model
 
+    # ── retry helper ─────────────────────────────────────────────────
+
+    def _call_llm_with_retry(self, fn, max_retries: int = 3, backoff_base: float = 2.0):
+        """Call *fn()* with exponential backoff retry + circuit breaker.
+
+        *fn* is a zero-argument callable that performs a single LLM API call.
+        Returns the result on success.  Raises the last exception after all
+        retries are exhausted or the circuit breaker is open.
+        """
+        last_exc = None
+        for attempt in range(max_retries + 1):
+            if _llm_circuit_breaker.is_open:
+                raise APIError("LLM circuit breaker is open — skipping call")
+
+            try:
+                result = fn()
+                _llm_circuit_breaker.success()
+                return result
+            except AuthenticationError:
+                raise  # never retry auth errors
+            except (APIConnectionError, APIError) as exc:
+                last_exc = exc
+                _llm_circuit_breaker.failure()
+                if attempt < max_retries:
+                    delay = backoff_base ** attempt
+                    logger.warning(
+                        "LLM call failed (attempt %s/%s), retrying in %.1fs: %s",
+                        attempt + 1, max_retries + 1, delay, exc,
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error("LLM call exhausted all %s retries: %s",
+                                 max_retries + 1, exc)
+
+        raise last_exc  # type: ignore[misc]
+
     def validate_connection(self) -> str | None:
         """测试 LLM 连接（流式调用验证），返回 None 表示成功。"""
         try:
@@ -295,16 +379,19 @@ class LLMService:
             "evidence": evidence,
             "deterministicScoring": deterministic_scoring or {},
         }
-        response = self.analysis_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": PROJECT_ANALYSIS_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.2,
-            max_tokens=max(4096, settings.chat_max_tokens),
-            response_format={"type": "json_object"},
-            stream=False,
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": PROJECT_ANALYSIS_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.2,
+                max_tokens=max(4096, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=3, backoff_base=2.0,
         )
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
@@ -341,16 +428,19 @@ class LLMService:
             "taskInput": task_input,
             "evidence": evidence,
         }
-        response = self.analysis_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
-            ],
-            temperature=0.15,
-            max_tokens=max(4096, settings.chat_max_tokens),
-            response_format={"type": "json_object"},
-            stream=False,
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+                ],
+                temperature=0.15,
+                max_tokens=max(4096, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=3, backoff_base=2.0,
         )
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
@@ -364,18 +454,20 @@ class LLMService:
         tools = payload.get("availableTools") or []
         if not tools:
             raise ValueError("availableTools is required for an Agent turn")
-        response = self.analysis_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": AGENT_TOOL_TURN_SYSTEM_PROMPT},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
-            ],
-            tools=tools,
-            tool_choice="auto",
-            temperature=0.05,
-            max_tokens=1600,
-            stream=False,
-        )
+        def _call():
+            return self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": AGENT_TOOL_TURN_SYSTEM_PROMPT},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                tools=tools,
+                tool_choice="auto",
+                temperature=0.05,
+                max_tokens=1600,
+                stream=False,
+            )
+        response = self._call_llm_with_retry(_call, max_retries=2, backoff_base=1.0)
         if not response.choices:
             raise ValueError("Agent turn returned no choices")
         message = response.choices[0].message
@@ -417,17 +509,20 @@ class LLMService:
 
     def _structured_completion(self, system_prompt: str, payload: dict,
                                temperature: float = 0.1) -> dict:
-        response = self.analysis_client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
-            ],
-            temperature=temperature,
-            max_tokens=2400,
-            response_format={"type": "json_object"},
-            stream=False,
-        )
+        def _call():
+            response = self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=temperature,
+                max_tokens=2400,
+                response_format={"type": "json_object"},
+                stream=False,
+            )
+            return response
+        response = self._call_llm_with_retry(_call, max_retries=3, backoff_base=2.0)
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
 
