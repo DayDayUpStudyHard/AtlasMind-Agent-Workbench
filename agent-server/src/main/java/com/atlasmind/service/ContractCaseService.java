@@ -32,4 +32,11 @@ public interface ContractCaseService {
     Map<String, Object> approveAction(Long runId, Long actionId, Map<String, Object> request, String approvedBy);
 
     Map<String, Object> executeAction(Long runId, Long actionId);
+
+    // Obligation management
+    List<Map<String, Object>> listObligations(Long caseId);
+    Map<String, Object> createObligation(Long caseId, Map<String, Object> request);
+    Map<String, Object> updateObligation(Long obligationId, Map<String, Object> request);
+    Map<String, Object> uploadFulfillmentEvidence(Long caseId, Map<String, Object> request);
+    List<Map<String, Object>> listReminders();
 }

@@ -358,6 +358,67 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         });
     }
 
+    // ── Obligations (Phase 8) ─────────────────────────────────────
+
+    @Override
+    public List<Map<String, Object>> listObligations(Long caseId) {
+        return jdbcTemplate.queryForList(
+                """SELECT id, title, obligation_type AS obligationType, responsible_user_id AS responsibleUserId,
+                          due_date AS dueDate, trigger_condition AS triggerCondition, status,
+                          evidence_required AS evidenceRequired, completed_at AS completedAt
+                   FROM contract_obligation WHERE case_id=? ORDER BY due_date ASC""", caseId);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> createObligation(Long caseId, Map<String, Object> request) {
+        jdbcTemplate.update("""
+                INSERT INTO contract_obligation (case_id, title, obligation_type, responsible_user_id, due_date, trigger_condition, evidence_required, status)
+                VALUES (?,?,?,?,?,?,?,'PLANNED')
+                """, caseId, str(request, "title"), str(request, "obligationType"),
+                request.get("responsibleUserId"), request.get("dueDate"),
+                str(request, "triggerCondition"), request.getOrDefault("evidenceRequired", 0));
+        return getCase(caseId);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> updateObligation(Long obligationId, Map<String, Object> request) {
+        List<String> sets = new ArrayList<>();
+        List<Object> params = new ArrayList<>();
+        for (String f : new String[]{"status", "title"}) {
+            if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
+        }
+        if (request.containsKey("completedAt")) {
+            sets.add("completed_at=?,completed_by=?"); params.add(request.get("completedAt")); params.add(request.get("completedBy"));
+        }
+        if (!sets.isEmpty()) {
+            params.add(obligationId);
+            jdbcTemplate.update("UPDATE contract_obligation SET " + String.join(",", sets) + " WHERE id=?", params.toArray());
+        }
+        return Map.of("id", obligationId, "updated", true);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> uploadFulfillmentEvidence(Long caseId, Map<String, Object> request) {
+        jdbcTemplate.update("""
+                INSERT INTO contract_document (case_id, document_type, file_name, file_path, file_size, parse_status)
+                VALUES (?,'FULFILLMENT_EVIDENCE',?,?,?,'PENDING')
+                """, caseId, str(request, "fileName"), str(request, "filePath"), request.get("fileSize"));
+        return getCase(caseId);
+    }
+
+    @Override
+    public List<Map<String, Object>> listReminders() {
+        return jdbcTemplate.queryForList("""
+                SELECT o.id, o.title, o.due_date AS dueDate, o.status, c.case_key AS caseKey, c.title AS caseTitle
+                FROM contract_obligation o JOIN contract_case c ON c.id=o.case_id
+                WHERE o.status IN ('PLANNED','OVERDUE','DUE_SOON')
+                ORDER BY o.due_date ASC LIMIT 30
+                """);
+    }
+
     // ── DB helpers ─────────────────────────────────────────────────
 
     private Long insert(String sql, Object... params) {

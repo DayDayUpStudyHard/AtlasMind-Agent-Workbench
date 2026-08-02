@@ -83,6 +83,32 @@ public class ContractWorkspaceController {
                 request == null ? Map.of() : request, currentActor()));
     }
 
+    // Obligations
+    @GetMapping("/{caseId}/obligations")
+    public Result<List<Map<String, Object>>> obligations(@PathVariable Long caseId) {
+        return Result.ok(contractCaseService.listObligations(caseId));
+    }
+
+    @PostMapping("/{caseId}/obligations")
+    public Result<Map<String, Object>> createObligation(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        return Result.ok(contractCaseService.createObligation(caseId, request));
+    }
+
+    @PutMapping("/obligations/{obligationId}")
+    public Result<Map<String, Object>> updateObligation(@PathVariable Long obligationId, @RequestBody Map<String, Object> request) {
+        return Result.ok(contractCaseService.updateObligation(obligationId, request));
+    }
+
+    @PostMapping("/{caseId}/fulfillment-evidence")
+    public Result<Map<String, Object>> uploadFulfillmentEvidence(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        return Result.ok(contractCaseService.uploadFulfillmentEvidence(caseId, request));
+    }
+
+    @GetMapping("/reminders")
+    public Result<List<Map<String, Object>>> reminders() {
+        return Result.ok(contractCaseService.listReminders());
+    }
+
     private String currentActor() {
         long userId = StpUtil.getLoginIdAsLong();
         User user = userService.getById(userId);

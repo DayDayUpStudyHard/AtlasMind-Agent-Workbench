@@ -16,6 +16,12 @@
       <div class="kpi-card"><strong>{{ portfolio.inFulfillment || 0 }}</strong><span>履约中</span></div>
       <div class="kpi-card danger"><strong>{{ portfolio.expiringSoon || 0 }}</strong><span>30天内到期</span></div>
       <div class="kpi-card danger"><strong>{{ portfolio.overdue || 0 }}</strong><span>已逾期</span></div>
+      <div class="kpi-card"><strong>{{ portfolio.obligationsTotal || 0 }}</strong><span>履约义务</span></div>
+      <div class="kpi-card danger"><strong>{{ portfolio.obligationsOverdue || 0 }}</strong><span>已逾期义务</span></div>
+      <div class="kpi-card warn"><strong>{{ portfolio.obligationsDueSoon || 0 }}</strong><span>7天内到期义务</span></div>
+      <div class="kpi-card"><strong>{{ portfolio.totalAmount ? (portfolio.totalAmount/10000).toFixed(0)+'万' : '0' }}</strong><span>合同总额</span></div>
+      <div class="kpi-card"><strong>{{ portfolio.activeRuns || 0 }}</strong><span>运行中任务</span></div>
+      <div class="kpi-card warn"><strong>{{ portfolio.openFindings || 0 }}</strong><span>未解决发现</span></div>
     </section>
 
     <!-- Quick actions -->
