@@ -55,6 +55,44 @@ public class HttpGitHubIssueGateway implements GitHubIssueGateway {
         }
     }
 
+    @Override
+    public Map<String, Object> createMilestone(String repositoryUrl, String title,
+                                                String description, String dueOn) {
+        if (token == null || token.isBlank()) {
+            throw new IllegalStateException("GitHub App token 未配置");
+        }
+        String[] repository = parseRepository(repositoryUrl);
+        try {
+            Map<String, Object> body = new java.util.HashMap<>();
+            body.put("title", title);
+            body.put("description", description == null ? "" : description);
+            if (dueOn != null && !dueOn.isBlank()) {
+                // GitHub expects ISO 8601: YYYY-MM-DDTHH:MM:SSZ
+                body.put("due_on", dueOn + "T00:00:00Z");
+            }
+            String payload = objectMapper.writeValueAsString(body);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create("https://api.github.com/repos/" + repository[0]
+                            + "/" + repository[1] + "/milestones"))
+                    .timeout(Duration.ofSeconds(15))
+                    .header("Accept", "application/vnd.github+json")
+                    .header("Authorization", "Bearer " + token)
+                    .header("X-GitHub-Api-Version", "2022-11-28")
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofString(payload))
+                    .build();
+            HttpResponse<String> response = httpClient.send(request,
+                    HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalStateException(
+                        "GitHub Milestone 创建失败: HTTP " + response.statusCode());
+            }
+            return objectMapper.readValue(response.body(), new TypeReference<>() {});
+        } catch (Exception e) {
+            throw new IllegalStateException(e.getMessage(), e);
+        }
+    }
+
     private String[] parseRepository(String repositoryUrl) {
         if (repositoryUrl == null || repositoryUrl.isBlank()) {
             throw new IllegalArgumentException("项目尚未绑定 GitHub 仓库");

@@ -39,6 +39,11 @@ public class AgentWorkbenchController {
         return Result.ok(agentProjectService.overview());
     }
 
+    @GetMapping("/organization/overview")
+    public Result<Map<String, Object>> organizationOverview() {
+        return Result.ok(agentProjectService.organizationOverview());
+    }
+
     @GetMapping
     public Result<List<Map<String, Object>>> list() {
         return Result.ok(agentProjectService.listProjects());

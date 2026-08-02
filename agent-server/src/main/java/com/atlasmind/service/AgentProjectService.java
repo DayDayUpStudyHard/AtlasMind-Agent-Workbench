@@ -10,6 +10,8 @@ public interface AgentProjectService {
 
     Map<String, Object> overview();
 
+    Map<String, Object> organizationOverview();
+
     List<Map<String, Object>> listProjects();
 
     Map<String, Object> getProject(Long projectId);

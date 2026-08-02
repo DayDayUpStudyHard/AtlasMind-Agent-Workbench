@@ -76,7 +76,11 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         '"description":"string","citationSourceId":"string"}],\n'
         '  "plan": [{"id":"P1","title":"string","ownerRole":"string","dependency":"string",'
         '"acceptance":"string","riskId":"string","citationSourceId":"string"}],\n'
-        '  "citations": [{"sourceId":"string","reason":"string"}]\n}\n\n'
+        '  "citations": [{"sourceId":"string","reason":"string"}],\n'
+        '  "actionProposals": [\n'
+        '    {"type":"CREATE_GITHUB_ISSUE | UPDATE_PROJECT_CONFIG | CREATE_GITHUB_MILESTONE",'
+        '"title":"string","description":"string","priority":"HIGH|MEDIUM|LOW"}\n'
+        '  ]\n}\n\n'
         "Rules:\n"
         "1. The backend supplies deterministicScoring. Use its healthStatus, healthScore,\n"
         "   dimensions, and rationale as fixed facts. Do not invent alternative scores.\n"
@@ -87,7 +91,12 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         "4. Treat missing CI, test, deployment, owner, schedule, and dependency data as\n"
         "   unknown. Never turn an unknown into a positive claim.\n"
         "5. Generate three to six concrete plan items. Each item must have an observable\n"
-        "   acceptance criterion."
+        "   acceptance criterion.\n"
+        "6. actionProposals: generate 1-3 executable action proposals. Supported types:\n"
+        "   CREATE_GITHUB_ISSUE (for risks needing code/docs changes),\n"
+        "   UPDATE_PROJECT_CONFIG (for project metadata updates like milestone/teamSize),\n"
+        "   CREATE_GITHUB_MILESTONE (for upcoming releases with due dates).\n"
+        "   Each proposal must cite a riskId or citationSourceId when applicable."
     ),
     "project_onboarding": (
         "You are the project handover and onboarding agent for AtlasMind.\n"
@@ -116,18 +125,29 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         'Required JSON shape:\n'
         '{\n  "title":"string",\n  "summary":"string",\n  "recommendation":"string",\n'
         '  "confidence":"HIGH | MEDIUM | LOW",\n'
-        '  "criteria":[{"name":"string","importance":"HIGH | MEDIUM | LOW","reason":"string",'
-        '"citationSourceId":"string"}],\n'
+        '  "criteria":[{"name":"string","importance":"HIGH | MEDIUM | LOW",'
+        '"reason":"string","citationSourceId":"string"}],\n'
+        '  "comparisonMatrix":[\n'
+        '    {"criterion":"string","optionScores":[{"option":"string","score":0,"rationale":"string"}]}\n'
+        '  ],\n'
         '  "options":[{"name":"string","verdict":"string","benefits":["string"],'
-        '"costs":["string"],"risks":["string"],"citationSourceIds":["string"]}],\n'
+        '"costs":["string"],"risks":["string"],"migrationCost":"LOW|MEDIUM|HIGH",'
+        '"safetyRisk":"LOW|MEDIUM|HIGH","compatibility":"LOW|MEDIUM|HIGH",'
+        '"teamFamiliarity":"LOW|MEDIUM|HIGH","citationSourceIds":["string"]}],\n'
         '  "risks":[{"id":"R-01","title":"string","severity":"HIGH | MEDIUM | LOW",'
         '"description":"string","citationSourceId":"string"}],\n'
         '  "plan":[{"id":"P1","title":"string","ownerRole":"string","acceptance":"string",'
         '"citationSourceId":"string"}],\n'
-        '  "citations":[{"sourceId":"string","reason":"string"}]\n}\n'
-        "The human owns the final decision. Recommend one option or a staged experiment, explain\n"
-        "trade-offs, list assumptions and unknowns, and generate validation steps. Every project-\n"
-        "specific claim must cite supplied evidence; unsupported claims must be marked 待确认."
+        '  "citations":[{"sourceId":"string","reason":"string"}],\n'
+        '  "actionProposals":[{"type":"CREATE_GITHUB_ISSUE","title":"string",'
+        '"description":"string","priority":"HIGH|MEDIUM|LOW"}]\n}\n\n'
+        "Rules:\n"
+        "1. comparisonMatrix: score each option (1-10) per criterion with rationale.\n"
+        "2. options[].migrationCost/safetyRisk/compatibility/teamFamiliarity: use LOW/MEDIUM/HIGH.\n"
+        "3. Every quantitative score must cite evidence via citationSourceIds.\n"
+        "4. Recommend one option or a staged experiment, explain trade-offs, list assumptions.\n"
+        "5. actionProposals: at least 1 executable next step for the recommended option.\n"
+        "6. The human owns the final decision — present trade-offs, not orders."
     ),
     "rag_system": (
         "你是 AtlasMind Agent Workbench 的企业知识库 AI 助手。你的知识来源于企业内部知识内容和上传文档"

@@ -2,6 +2,63 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 业务功能：闭环动作执行 + 决策量化对比 + 跨项目洞察
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- **Agent 只能建议不能执行**：报告生成后仅创建 1 个 `CREATE_GITHUB_ISSUE` action，无法生成多种可执行动作提案，用户无法一键触发项目配置更新、Milestone 创建等。
+- **工程决策缺乏量化对比**：`ENGINEERING_DECISION` 只给框架建议，没有多维度量化对比表（迁移成本/安全风险/兼容性/团队熟悉度），缺少 citation 支撑的评分矩阵。
+- **无组织级视图**：只能按项目查看健康状态，缺乏跨项目的共同风险识别、健康分布总览和趋势数据。
+
+### 调整过程
+
+**B1: 闭环动作执行**
+- Python Prompt 更新（`prompts.py` fallback `project_analysis`）：LLM 输出 JSON 新增 `actionProposals` 数组，支持 3 种类型：
+  - `CREATE_GITHUB_ISSUE`：为需要代码/文档修复的风险生成 Issue
+  - `UPDATE_PROJECT_CONFIG`：项目配置字段更新（如 currentMilestone、teamSize）
+  - `CREATE_GITHUB_MILESTONE`：为即将发布的版本创建 GitHub Milestone
+- `persistence.py` `_save_sync()` 改造：
+  - 解析 artifact 中的 `actionProposals` 数组，每个 proposal 创建一条 `PENDING_APPROVAL` action。
+  - action_type 合法性校验（白名单 3 种）。
+  - payload 包含结构化字段：description, priority, riskId, citationSourceId（通用），key/value（UPDATE_PROJECT_CONFIG），dueOn/labels（GitHub actions）。
+  - 无 actionProposals 时 fallback 到原有单 action 逻辑。
+- Java `GitHubIssueGateway` 新增 `createMilestone(repoUrl, title, description, dueOn)`。
+- `HttpGitHubIssueGateway` 实现 GitHub Milestones API（`POST /repos/{owner}/{repo}/milestones`，ISO 8601 due_on）。
+- `AgentProjectServiceImpl.executeAction()` 重构为 switch-action-type 模式：
+  - `CREATE_GITHUB_ISSUE` → 原有 Issue 创建逻辑
+  - `CREATE_GITHUB_MILESTONE` → 新 Milestone 创建逻辑
+  - `UPDATE_PROJECT_CONFIG` → 白名单校验后直接 UPDATE `agent_project` 表（允许 currentMilestone, releaseTarget, teamSize, businessScope）
+- 查询 action 时新增 `action_type` 字段读取。
+
+**B2: 决策量化对比**
+- `prompts.py` fallback `engineering_decision` prompt 增强：
+  - 新增 `comparisonMatrix` 数组：每个 criterion 下列出各 option 的 1-10 分 + rationale。
+  - options[] 新增 4 个定量维度：`migrationCost`、`safetyRisk`、`compatibility`、`teamFamiliarity`（均为 LOW/MEDIUM/HIGH）。
+  - 每个量化评分需要 citationSourceIds 支撑。
+  - 新增 actionProposals：至少 1 个可执行下一步。
+
+**B3: 跨项目洞察**
+- `AgentProjectService` 接口新增 `organizationOverview()`。
+- `AgentProjectServiceImpl` 实现：
+  - **健康分布**：`SELECT health_status, COUNT(*) FROM agent_project GROUP BY health_status`。
+  - **近期报告趋势**：最近 40 条 HEALTH_REPORT 含 project、score、status。
+  - **共同风险识别**：解析所有 reports 的 `risks_json`，统计同一 risk title 出现在 ≥2 个项目的 pattern（affectedProjects + affectedCount）。
+  - 活跃 Run 数 + 待审批动作数。
+- `AgentWorkbenchController` 新增 `GET /api/workspace/projects/organization/overview` 端点。
+- 新增 `parseJsonArray()` 辅助方法。
+
+### 调整结果
+
+- B1 Python 验证通过：`actionProposals` 出现在 `project_analysis` prompt 中，3 种 action type 白名单正确，`MySqlReportStore` 多 action 创建逻辑就绪。
+- B2 Prompt 验证通过：`comparisonMatrix` + 4 定量维度（migrationCost/safetyRisk/compatibility/teamFamiliarity）+ actionProposals 全部出现在 `engineering_decision` prompt 中。
+- Java 端需重启后生效：B3 组织总览端点、B1 多类型 action 执行。
+- 新增 `GitHubIssueGateway.createMilestone()` + 实现。
+- 影响文件：Java 4 个（GitHubIssueGateway, HttpGitHubIssueGateway, AgentProjectService, AgentProjectServiceImpl, AgentWorkbenchController），Python 2 个（prompts.py, persistence.py）。
+
+---
+
 ## Agent 智能增强：并发工具调用 + Prompt 版本管理 + 向量化记忆检索
 
 **日期**：2026-08-02

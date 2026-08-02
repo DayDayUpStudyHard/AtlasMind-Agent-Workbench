@@ -68,6 +68,79 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     }
 
     @Override
+    public Map<String, Object> organizationOverview() {
+        Map<String, Object> data = new HashMap<>();
+
+        // Health distribution across all projects
+        List<Map<String, Object>> healthDist = jdbcTemplate.queryForList("""
+                SELECT health_status AS status, COUNT(*) AS count
+                FROM agent_project WHERE deleted=0
+                GROUP BY health_status
+                """);
+        data.put("healthDistribution", healthDist);
+
+        // Trend: last 4 health reports with scores
+        List<Map<String, Object>> trends = jdbcTemplate.queryForList("""
+                SELECT p.id AS projectId, p.name, r.health_score AS healthScore,
+                       r.health_status AS healthStatus, r.create_time AS createTime
+                FROM agent_report r
+                JOIN agent_project p ON p.id=r.project_id AND p.deleted=0
+                WHERE r.report_type='HEALTH_REPORT'
+                ORDER BY r.create_time DESC
+                LIMIT 40
+                """);
+        data.put("recentReports", trends);
+
+        // Common risks across projects (same risk title appearing in >=2 projects)
+        List<Map<String, Object>> commonRisks = jdbcTemplate.queryForList("""
+                SELECT risks_json AS risksJson, p.name AS projectName, p.id AS projectId
+                FROM agent_report r
+                JOIN agent_project p ON p.id=r.project_id AND p.deleted=0
+                WHERE r.report_type='HEALTH_REPORT'
+                  AND r.risks_json IS NOT NULL
+                ORDER BY r.create_time DESC
+                LIMIT 100
+                """);
+
+        List<Map<String, Object>> commonRiskList = new ArrayList<>();
+        Map<String, List<String>> riskToProjects = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> row : commonRisks) {
+            List<Map<String, Object>> risks = parseJsonArray(text(row, "risksJson"));
+            String projectName = text(row, "projectName");
+            for (Map<String, Object> risk : risks) {
+                String title = text(risk, "title");
+                if (!title.isBlank()) {
+                    riskToProjects.computeIfAbsent(title, k -> new ArrayList<>()).add(projectName);
+                }
+            }
+        }
+        for (var entry : riskToProjects.entrySet()) {
+            List<String> projects = entry.getValue();
+            if (projects.size() >= 2) {
+                Map<String, Object> item = new HashMap<>();
+                item.put("riskTitle", entry.getKey());
+                item.put("affectedProjects", projects);
+                item.put("affectedCount", projects.size());
+                commonRiskList.add(item);
+            }
+        }
+        data.put("commonRisks", commonRiskList);
+
+        // Active runs count
+        data.put("activeRuns", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM agent_run WHERE status IN " +
+                "('CREATED','CONTEXT_BUILDING','ANALYZING','VERIFYING','PLANNING')",
+                Integer.class));
+
+        // Pending approvals count
+        data.put("pendingApprovals", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM agent_action WHERE status='PENDING_APPROVAL'",
+                Integer.class));
+
+        return data;
+    }
+
+    @Override
     public List<Map<String, Object>> listProjects() {
         List<Map<String, Object>> projects = jdbcTemplate.queryForList("""
                 SELECT id, name, project_key AS projectKey, description, repository_type AS repositoryType,
@@ -390,7 +463,8 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     @Transactional
     public Map<String, Object> executeAction(Long runId, Long actionId) {
         Map<String, Object> action = firstOrNull(jdbcTemplate.queryForList("""
-                SELECT a.id, a.project_id AS projectId, a.status, a.title, a.payload_json AS payloadJson,
+                SELECT a.id, a.project_id AS projectId, a.action_type AS actionType,
+                       a.status, a.title, a.payload_json AS payloadJson,
                        p.repository_url AS repositoryUrl
                 FROM agent_action a JOIN agent_project p ON p.id=a.project_id
                 WHERE a.id=? AND a.run_id=?
@@ -401,19 +475,68 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         if (!"APPROVED".equals(action.get("status"))) {
             throw new IllegalArgumentException("动作必须审批通过后才能执行");
         }
+        String actionType = text(action, "actionType");
         try {
             Map<String, Object> payload = parseJson(text(action, "payloadJson"));
-            Map<String, Object> result = gitHubIssueGateway.createIssue(
-                    text(action, "repositoryUrl"), text(action, "title"), text(payload, "body"));
-            String externalId = text(result, "number");
+            Map<String, Object> result = null;
+            String externalId = null;
+            String completedStep = "动作已执行";
+
+            switch (actionType) {
+                case "CREATE_GITHUB_ISSUE" -> {
+                    String body = text(payload, "body");
+                    if (body.isBlank()) {
+                        body = text(payload, "description");
+                    }
+                    result = gitHubIssueGateway.createIssue(
+                            text(action, "repositoryUrl"),
+                            text(action, "title"), body);
+                    externalId = text(result, "number");
+                    completedStep = "GitHub Issue 已创建";
+                }
+                case "CREATE_GITHUB_MILESTONE" -> {
+                    result = gitHubIssueGateway.createMilestone(
+                            text(action, "repositoryUrl"),
+                            text(action, "title"),
+                            text(payload, "description"),
+                            text(payload, "dueOn"));
+                    externalId = text(result, "number");
+                    completedStep = "GitHub Milestone 已创建";
+                }
+                case "UPDATE_PROJECT_CONFIG" -> {
+                    String key = text(payload, "key");
+                    String value = text(payload, "value");
+                    if (key.isBlank()) {
+                        throw new IllegalArgumentException("UPDATE_PROJECT_CONFIG 缺少 key");
+                    }
+                    // Whitelist of allowed config keys
+                    if (!java.util.Set.of("currentMilestone", "releaseTarget",
+                            "teamSize", "businessScope").contains(key)) {
+                        throw new IllegalArgumentException("不支持的配置项: " + key);
+                    }
+                    jdbcTemplate.update(
+                            "UPDATE agent_project SET " + key + "=? WHERE id=?",
+                            value, action.get("projectId"));
+                    result = Map.of("updated", true, "key", key, "value", value);
+                    completedStep = "项目配置已更新";
+                }
+                default -> throw new IllegalArgumentException(
+                        "不支持的动作类型: " + actionType);
+            }
+
             jdbcTemplate.update("""
-                    UPDATE agent_action SET status='EXECUTED', external_id=?, executed_at=NOW(),
-                    result_json=?, error_message=NULL WHERE id=? AND run_id=?
+                    UPDATE agent_action SET status='EXECUTED', external_id=?,
+                    executed_at=NOW(), result_json=?, error_message=NULL
+                    WHERE id=? AND run_id=?
                     """, externalId, json(result), actionId, runId);
-            jdbcTemplate.update("UPDATE agent_run SET status='COMPLETED', progress=100, current_step='Issue 已创建', finished_at=NOW() WHERE id=?", runId);
+            jdbcTemplate.update("""
+                    UPDATE agent_run SET status='COMPLETED', progress=100,
+                    current_step=?, finished_at=NOW() WHERE id=?
+                    """, completedStep, runId);
         } catch (Exception e) {
             jdbcTemplate.update("""
-                    UPDATE agent_action SET status='BLOCKED', error_message=? WHERE id=? AND run_id=?
+                    UPDATE agent_action SET status='BLOCKED', error_message=?
+                    WHERE id=? AND run_id=?
                     """, e.getMessage(), actionId, runId);
         }
         return getRun(runId);
@@ -716,6 +839,15 @@ public class AgentProjectServiceImpl implements AgentProjectService {
                 ? Map.of() : parseJsonMap(inputJson));
         payload.put("options", Map.of());
         return payload;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> parseJsonArray(String json) {
+        try {
+            return objectMapper.readValue(json, List.class);
+        } catch (Exception e) {
+            return List.of();
+        }
     }
 
     @SuppressWarnings("unchecked")

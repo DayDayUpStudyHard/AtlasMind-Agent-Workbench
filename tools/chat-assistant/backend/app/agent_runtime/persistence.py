@@ -798,23 +798,57 @@ class MySqlReportStore(ReportStore):
                 )
                 report_id = int(cur.lastrowid)
 
-                # Create PENDING_APPROVAL action proposal
-                cur.execute(
-                    """INSERT INTO agent_action
-                       (project_id, run_id, action_type, status, title, payload_json)
-                       VALUES (%s,%s,'CREATE_GITHUB_ISSUE','PENDING_APPROVAL',%s,%s)""",
-                    (
-                        project_id,
-                        run_id,
-                        artifact.get("issueTitle", artifact.get("title", "")),
-                        _json_dumps(
-                            {
-                                "body": artifact.get("issueBody", artifact.get("reportMarkdown", "")),
+                # ── B1: Action Proposals ────────────────────────────
+                # Parse actionProposals from the LLM artifact and create
+                # one PENDING_APPROVAL row per proposal.
+                proposals = artifact.get("actionProposals")
+                if isinstance(proposals, list) and proposals:
+                    for p in proposals:
+                        if not isinstance(p, dict):
+                            continue
+                        action_type = str(p.get("type", "CREATE_GITHUB_ISSUE"))
+                        if action_type not in ("CREATE_GITHUB_ISSUE",
+                                               "UPDATE_PROJECT_CONFIG",
+                                               "CREATE_GITHUB_MILESTONE"):
+                            action_type = "CREATE_GITHUB_ISSUE"
+                        cur.execute(
+                            """INSERT INTO agent_action
+                               (project_id, run_id, action_type, status, title, payload_json)
+                               VALUES (%s,%s,%s,'PENDING_APPROVAL',%s,%s)""",
+                            (
+                                project_id, run_id, action_type,
+                                str(p.get("title", artifact.get("title", ""))),
+                                _json_dumps({
+                                    "description": str(p.get("description", "")),
+                                    "priority": str(p.get("priority", "MEDIUM")),
+                                    "riskId": str(p.get("riskId", "")),
+                                    "citationSourceId": str(p.get("citationSourceId", "")),
+                                    # For UPDATE_PROJECT_CONFIG:
+                                    "key": str(p.get("key", "")),
+                                    "value": str(p.get("value", "")),
+                                    # For CREATE_GITHUB_MILESTONE:
+                                    "dueOn": str(p.get("dueOn", "")),
+                                    # For CREATE_GITHUB_ISSUE:
+                                    "labels": p.get("labels") if isinstance(p.get("labels"), list) else [],
+                                }),
+                            ),
+                        )
+                else:
+                    # Legacy fallback: single CREATE_GITHUB_ISSUE action
+                    cur.execute(
+                        """INSERT INTO agent_action
+                           (project_id, run_id, action_type, status, title, payload_json)
+                           VALUES (%s,%s,'CREATE_GITHUB_ISSUE','PENDING_APPROVAL',%s,%s)""",
+                        (
+                            project_id, run_id,
+                            artifact.get("issueTitle", artifact.get("title", "")),
+                            _json_dumps({
+                                "body": artifact.get("issueBody",
+                                                     artifact.get("reportMarkdown", "")),
                                 "source": artifact.get("reportType", ""),
-                            },
+                            }),
                         ),
-                    ),
-                )
+                    )
 
             conn.commit()
         return report_id
