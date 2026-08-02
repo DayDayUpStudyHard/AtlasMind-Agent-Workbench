@@ -764,9 +764,17 @@ class MySqlReportStore(ReportStore):
     ) -> int:
         return await _run_sync(self._save_sync, project_id, run_id, task_type, artifact)
 
+    _REPORT_TYPE_MAP = {
+        "HEALTH_ANALYSIS": "HEALTH_REPORT",
+        "PROJECT_ONBOARDING": "ONBOARDING_GUIDE",
+        "ENGINEERING_DECISION": "DECISION_MEMO",
+    }
+
     @staticmethod
     def _save_sync(project_id, run_id, task_type, artifact):
         is_health = task_type == "HEALTH_ANALYSIS"
+        report_type = artifact.get("reportType") or MySqlReportStore._REPORT_TYPE_MAP.get(
+            task_type, "HEALTH_REPORT")
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -779,7 +787,7 @@ class MySqlReportStore(ReportStore):
                     (
                         project_id,
                         run_id,
-                        artifact.get("reportType", "HEALTH_REPORT" if is_health else "ONBOARDING_GUIDE"),
+                        report_type,
                         artifact.get("title", ""),
                         artifact.get("summary", ""),
                         artifact.get("healthStatus") if is_health else None,
