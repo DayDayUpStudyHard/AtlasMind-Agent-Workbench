@@ -38,14 +38,20 @@ class StartRunRequest:
     """
 
     __slots__ = (
-        "request_id", "run_id", "project_id", "task_type", "question",
+        "request_id", "run_id", "subject_type", "subject_id",
+        "project_id", "task_type", "question",
         "actor", "project", "task_input", "options",
     )
 
     def __init__(self, payload: dict):
         self.request_id: str = str(payload.get("requestId") or "")
         self.run_id: int = int(payload.get("runId") or 0)
+        self.subject_type: str = str(payload.get("subjectType") or "PROJECT")
+        self.subject_id: int = int(payload.get("subjectId") or 0)
         self.project_id: int = int(payload.get("projectId") or 0)
+        # If subjectType is CONTRACT_CASE, treat subjectId as the primary entity id
+        if self.subject_type == "CONTRACT_CASE" and self.subject_id > 0:
+            self.project_id = self.subject_id  # compat: Runner uses project_id internally
         self.task_type: str = str(payload.get("taskType") or "HEALTH_ANALYSIS")
         self.question: str = str(payload.get("question") or "")
         self.actor: str = str(payload.get("actor") or "")

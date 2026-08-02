@@ -110,6 +110,14 @@ export function getRecentWorkspaceRuns() {
   return api.get('/api/workspace/runs/recent')
 }
 
+export function getContractPortfolio() { return api.get('/api/workspace/contracts/portfolio') }
+export function listContracts(params) { return api.get('/api/workspace/contracts', { params }) }
+export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
+export function createContractCase(data) { return api.post('/api/workspace/contracts', data) }
+export function startContractRun(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/runs`, data) }
+export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
+export function approveContractAction(runId, actionId, data) { return api.post(`/api/workspace/contracts/runs/${runId}/actions/${actionId}/approval`, data) }
+
 export function approveProjectAction(runId, actionId, data = {}) {
   return api.post(`/api/workspace/projects/runs/${runId}/actions/${actionId}/approval`, data)
 }
