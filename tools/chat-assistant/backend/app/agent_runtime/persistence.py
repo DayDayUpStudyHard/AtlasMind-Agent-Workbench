@@ -211,6 +211,13 @@ class EvidenceStore(ABC):
         ...
 
     @abstractmethod
+    async def semantic_memory_search(
+        self, project_id: int, query: str, arguments: dict
+    ) -> list[dict]:
+        """Return memory entries ranked by semantic similarity (vector index) + keyword filter."""
+        ...
+
+    @abstractmethod
     async def canonical_evidence(self, project_id: int) -> list[dict]:
         """Load up to 500 evidence rows for deterministic scoring."""
         ...
@@ -716,6 +723,20 @@ class MySqlEvidenceStore(EvidenceStore):
                     (project_id, current_run_id, limit),
                 )
                 return list(cur.fetchall())
+
+    async def semantic_memory_search(
+        self, project_id: int, query: str, arguments: dict
+    ) -> list[dict]:
+        """Semantic search over project memory via MemoryVectorIndex."""
+        limit = max(1, min(20, int(arguments.get("limit", 5))))
+        keyword = str(arguments.get("keyword", ""))
+
+        from .memory_index import get_memory_index
+        index = get_memory_index()
+        results = await index.search(
+            project_id, query, top_k=limit, keyword_filter=keyword,
+        )
+        return results
 
     async def canonical_evidence(self, project_id: int) -> list[dict]:
         def _load():

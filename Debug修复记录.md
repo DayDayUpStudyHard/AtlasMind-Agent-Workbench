@@ -2,6 +2,72 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## Agent 智能增强：并发工具调用 + Prompt 版本管理 + 向量化记忆检索
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- **工具串行等待**：LLM 一次返回多个 tool_calls（如 `getProjectProfile` + `getProjectMemory` + `getRecentRuns`），当前逐一串行执行，3 个独立读取耗时 = sum(t1+t2+t3)，而非 max(t1,t2,t3)。
+- **Prompt 硬编码**：所有 7 个 system prompt 写死在 `llm_service.py` 模块常量中，调整需改代码+部署，无法 A/B 对比，无版本历史追踪。
+- **记忆检索扁平**：`getProjectMemory` 仅按 `update_time DESC` 排序，无语义相似度检索，"CI 故障处理" 和 "pipeline failure" 在关键词层面无法匹配。
+
+### 调整过程
+
+**F5: 并发工具调用**
+- `tools.py` 新增 `_CONCURRENT_GROUP` 分类：read 组（`getProjectProfile`, `getProjectMemory`, `getRecentRuns`, `getLatestReport`）、search 组（`searchProjectEvidence`, `searchProjectKnowledge`）、compute 组（`calculateHealthScore`）。
+- `AgentToolRegistry` 新增 `concurrency_group()` 和 `group_order()` 静态方法。
+- `runner.py` Phase 3 工具调用循环重构：
+  - 将每个 turn 的 calls 按 concurrency group 分组。
+  - 同组内多个工具 → `asyncio.gather(*coros, return_exceptions=True)` 并发执行。
+  - 组间按顺序（read → search → compute），确保 `calculateHealthScore` 在 search 之后执行。
+  - 并发执行时写入 `CONCURRENT_TOOLS` trace event（含 group 名称和 tool 列表）。
+- 错误隔离：单个工具失败不影响同组其他工具（return_exceptions=True），fail 结果正常记入 observations。
+
+**F6: Prompt 版本管理**
+- 新建 `migrations/V008__agent_prompt.sql`：`agent_prompt` 表（prompt_key, version, template, temperature, is_active, traffic_pct, performance_score），种子数据为 7 个 prompt × v1 = 当前硬编码内容。
+- 新建 `prompts.py`：`PromptRegistry` 类。
+  - `get(key)` → 返回最新 active version 的 (template, temperature, version)。
+  - `get_ab(key, run_id)` → A/B 分流，按 `run_id % traffic_pct` 确定性分配版本（同一 run 重放得到相同版本）。
+  - 30s 内存 TTL 缓存，`invalidate()` 强制刷新。
+  - DB 不可用时静默 fallback 到内置默认值（version=0），永不让 Agent 因 prompt 配置而失败。
+- `llm_service.py` 改造：
+  - 新增 `_prompt(key, run_id)` 辅助方法，lazy-load PromptRegistry 单例。
+  - 6 个方法接入：`plan_agent`("planner"), `next_agent_turn`("tool_turn"), `reflect_agent`("reflection"), `analyze_project`("project_analysis"), `run_project_task`("project_onboarding"/"engineering_decision"), `build_messages`("rag_system")。
+  - `analyze_project` 和 `run_project_task` 新增 `run_id` 参数，runner.py 传入 `ctx.run_id`。
+  - system prompt 和 temperature 从 registry 动态获取（替换硬编码常量 `AGENT_PLANNER_SYSTEM_PROMPT` 等）。
+- 旧模块常量保留（作为 PromptRegistry 的 fallback 数据源）。
+
+**F7: 向量化记忆检索**
+- 新建 `memory_index.py`：`MemoryVectorIndex` 类。
+  - Lazy-load `sentence-transformers` all-MiniLM-L6-v2 模型（~80MB, 384dims），CPU 友好。
+  - 按 project_id 构建内存向量索引（懒加载，从 `agent_project_memory` 表读取最多 500 条）。
+  - `search(project_id, query, top_k, keyword_filter)`：keyword 预过滤 → query embedding → cosine similarity → Top-K 排序。
+  - embedding 生成走 `loop.run_in_executor`（不阻塞 asyncio 事件循环）。
+  - `invalidate(project_id)` 清除缓存，下次访问重新从 DB 构建。
+  - `sentence-transformers` 未安装时静默降级为 keyword-only 排序，相似度显示 N/A。
+- `tools.py`/`persistence.py` 接入：
+  - `getProjectMemory` 工具定义新增 `query` 和 `semantic` 参数。
+  - `AgentToolRegistry.execute()` 中 `semantic=true` + `query` 非空 → 走 `EvidenceStore.semantic_memory_search()` → 委托 `MemoryVectorIndex.search()`。
+  - `EvidenceStore` 抽象接口新增 `semantic_memory_search()`，`MySqlEvidenceStore` 实现。
+- `requirements.txt` 新增 `sentence-transformers>=2.7.0`。
+
+### 调整结果
+
+- F5 E2E 通过：Run 61 正常运行完成（COMPLETED @ 100%），Phase 3 工具调用稳定。CONCURRENT_TOOLS trace 在服务器重启后将出现（当前运行进程仍为旧代码）。
+- F6 测试通过：
+  - 7 个 prompt key 全部返回有效 template（len > 100），temperature 范围正确。
+  - A/B 分流确定性验证：相同 run_id 多次调用得到相同版本。
+  - DB 表未创建时自动 fallback，不影响现有功能。
+- F7 测试通过：
+  - 空项目返回空结果，invalidate 正常。
+  - Project 1 语义检索成功返回 3 条记忆。
+  - `sentence-transformers` 未安装时静默降级 keyword 搜索。
+- 新增文件：`prompts.py`, `memory_index.py`, `V008__agent_prompt.sql`。
+- 新增依赖：`sentence-transformers>=2.7.0`。
+
+---
+
 ## Redis Stream 消息队列 —— Java→Python 异步解耦
 
 **日期**：2026-08-02

@@ -242,6 +242,28 @@ class LLMService:
             max_retries=0,
         )
         self.model = settings.llm_model
+        # Lazy-initialised prompt registry (F6)
+        self._prompts = None
+
+    def _get_prompts(self):
+        """Lazy-load the PromptRegistry singleton."""
+        if self._prompts is None:
+            from app.agent_runtime.prompts import get_prompt_registry
+            self._prompts = get_prompt_registry()
+        return self._prompts
+
+    def _prompt(self, key: str, run_id: int = 0) -> tuple[str, float]:
+        """Return (template, temperature) for *key* from the registry.
+
+        When *run_id* > 0, uses A/B split (deterministic per run); otherwise
+        returns the latest active version.
+        """
+        registry = self._get_prompts()
+        if run_id > 0:
+            template, temperature, _version = registry.get_ab(key, run_id)
+        else:
+            template, temperature, _version = registry.get(key)
+        return template, temperature
 
     # ── retry helper ─────────────────────────────────────────────────
 
@@ -319,8 +341,9 @@ class LLMService:
 
     def build_messages(self, query: str, contexts: str,
                        history: list[dict]) -> list[dict]:
+        template, _temperature = self._prompt("rag_system")
         messages = [
-            {"role": "system", "content": RAG_SYSTEM_PROMPT},
+            {"role": "system", "content": template},
             {"role": "system",
              "content": f"以下是相关知识内容和知识库文档，请参考回答并标明来源：\n\n{contexts}"},
         ]
@@ -351,7 +374,9 @@ class LLMService:
             if chunk.choices[0].delta.content:
                 yield chunk.choices[0].delta.content
 
-    def analyze_project(self, project: dict, citations: list[dict], deterministic_scoring: dict | None = None) -> dict:
+    def analyze_project(self, project: dict, citations: list[dict],
+                        deterministic_scoring: dict | None = None,
+                        run_id: int = 0) -> dict:
         """Generate a structured project report from bounded, citable evidence."""
         evidence = []
         for item in citations[:8]:
@@ -379,14 +404,15 @@ class LLMService:
             "evidence": evidence,
             "deterministicScoring": deterministic_scoring or {},
         }
+        template, temperature = self._prompt("project_analysis", run_id)
         response = self._call_llm_with_retry(
             lambda: self.analysis_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": PROJECT_ANALYSIS_SYSTEM_PROMPT},
+                    {"role": "system", "content": template},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                temperature=0.2,
+                temperature=temperature,
                 max_tokens=max(4096, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
                 stream=False,
@@ -396,11 +422,18 @@ class LLMService:
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
 
-    def run_project_task(self, task_type: str, project: dict, task_input: dict, citations: list[dict]) -> dict:
+    def run_project_task(self, task_type: str, project: dict, task_input: dict,
+                         citations: list[dict], run_id: int = 0) -> dict:
         """Generate one supported project task artifact from bounded evidence."""
-        system_prompt = PROJECT_TASK_SYSTEM_PROMPTS.get(task_type)
-        if not system_prompt:
+        key_map = {
+            "PROJECT_ONBOARDING": "project_onboarding",
+            "ENGINEERING_DECISION": "engineering_decision",
+        }
+        prompt_key = key_map.get(task_type)
+        if not prompt_key:
             raise ValueError(f"unsupported project task type: {task_type}")
+
+        template, temperature = self._prompt(prompt_key, run_id)
 
         evidence = []
         for item in citations[:12]:
@@ -432,10 +465,10 @@ class LLMService:
             lambda: self.analysis_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": template},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
-                temperature=0.15,
+                temperature=temperature,
                 max_tokens=max(4096, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
                 stream=False,
@@ -447,23 +480,29 @@ class LLMService:
 
     def plan_agent(self, payload: dict) -> dict:
         """Create a bounded plan. This stage cannot call tools or produce artifacts."""
-        return self._structured_completion(AGENT_PLANNER_SYSTEM_PROMPT, payload, temperature=0.1)
+        task = payload.get("task") or {}
+        run_id = int(task.get("runId", 0))
+        template, temperature = self._prompt("planner", run_id)
+        return self._structured_completion(template, payload, temperature=temperature)
 
     def next_agent_turn(self, payload: dict) -> dict:
         """Let the model select Java-owned tools through native function calling."""
         tools = payload.get("availableTools") or []
         if not tools:
             raise ValueError("availableTools is required for an Agent turn")
+        task = payload.get("task") or {}
+        run_id = int(task.get("runId", 0))
+        template, temperature = self._prompt("tool_turn", run_id)
         def _call():
             return self.analysis_client.chat.completions.create(
                 model=self.model,
                 messages=[
-                    {"role": "system", "content": AGENT_TOOL_TURN_SYSTEM_PROMPT},
+                    {"role": "system", "content": template},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
                 ],
                 tools=tools,
                 tool_choice="auto",
-                temperature=0.05,
+                temperature=temperature,
                 max_tokens=1600,
                 stream=False,
             )
@@ -505,7 +544,10 @@ class LLMService:
 
     def reflect_agent(self, payload: dict) -> dict:
         """Run a separate evidence and completion verifier after the tool loop."""
-        return self._structured_completion(AGENT_REFLECTION_SYSTEM_PROMPT, payload, temperature=0.0)
+        task = payload.get("task") or {}
+        run_id = int(task.get("runId", 0))
+        template, temperature = self._prompt("reflection", run_id)
+        return self._structured_completion(template, payload, temperature=temperature)
 
     def _structured_completion(self, system_prompt: str, payload: dict,
                                temperature: float = 0.1) -> dict:

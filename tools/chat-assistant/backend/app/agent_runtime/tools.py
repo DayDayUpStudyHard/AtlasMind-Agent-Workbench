@@ -62,11 +62,13 @@ _TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "getProjectMemory",
-            "description": "读取当前项目已确认事实和历史 Agent 情节记忆",
+            "description": "读取当前项目已确认事实和历史 Agent 情节记忆，支持语义检索",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "limit": {"type": "integer", "description": "返回条数，1 到 20", "minimum": 1},
+                    "query": {"type": "string", "description": "语义检索词，按含义相似度排序；为空则按时间排序"},
+                    "semantic": {"type": "boolean", "description": "启用向量语义检索（默认 false 为关键词匹配）"},
                 },
                 "additionalProperties": False,
             },
@@ -117,6 +119,25 @@ _TOOL_NAMES = {t["function"]["name"] for t in _TOOL_DEFINITIONS}
 
 _CITATION_SOURCE_TOOLS = {"searchProjectEvidence", "searchProjectKnowledge"}
 
+# ── Concurrency groups for F5 concurrent tool execution ─────────────
+# Tools in the SAME group can execute concurrently within a single turn.
+# Tools in different groups execute sequentially (group order).
+_CONCURRENT_GROUP = {
+    # Pure reads — no mutual dependencies, always safe to parallelize
+    "getProjectProfile":    "read",
+    "getProjectMemory":     "read",
+    "getRecentRuns":        "read",
+    "getLatestReport":      "read",
+    # Searches — independent of each other, safe to parallelize
+    "searchProjectEvidence":   "search",
+    "searchProjectKnowledge":  "search",
+    # Compute — must run AFTER searches (sequential, solo group)
+    "calculateHealthScore": "compute",
+}
+
+# Group execution order (sequential between groups)
+_GROUP_ORDER = ["read", "search", "compute"]
+
 
 class AgentToolRegistry:
     """Registry of allowlisted tools. Executes against store interfaces."""
@@ -162,6 +183,11 @@ class AgentToolRegistry:
             return {"items": await self.evidence.search_knowledge(ctx.project_id, ctx.question, arguments)}
 
         if tool_name == "getProjectMemory":
+            semantic = bool(arguments.get("semantic", False))
+            query = str(arguments.get("query", ""))
+            if semantic and query:
+                return {"items": await self.evidence.semantic_memory_search(
+                    ctx.project_id, query, arguments)}
             return {"items": await self.evidence.project_memory(ctx.project_id, arguments)}
 
         if tool_name == "getRecentRuns":
@@ -178,6 +204,22 @@ class AgentToolRegistry:
             }
 
         raise ValueError(f"Tool is not allowlisted: {tool_name}")
+
+    # -- concurrency classification (F5) -----------------------------------
+
+    @staticmethod
+    def concurrency_group(tool_name: str) -> str:
+        """Return the concurrency group for *tool_name*.
+
+        Tools in the same group can run concurrently within a single turn.
+        Groups execute sequentially in order: read → search → compute.
+        """
+        return _CONCURRENT_GROUP.get(tool_name, "read")
+
+    @staticmethod
+    def group_order() -> list[str]:
+        """Return the execution order of concurrency groups."""
+        return list(_GROUP_ORDER)
 
     # -- citation / scoring extraction ------------------------------------
 

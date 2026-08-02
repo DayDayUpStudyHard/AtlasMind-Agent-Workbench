@@ -158,10 +158,11 @@ class AgentRunner:
                     break
                 continue
 
+            # ── F5: Concurrent tool execution ────────────────────────
+            # Group calls by concurrency group, run independent tools
+            # within each group via asyncio.gather().
+            valid_calls = []
             for call in calls:
-                await self._check_cancelled(ctx.run_id)
-                if policy.remaining_tool_calls() <= 2:
-                    break
                 tool_name = str(call.get("name", ""))
                 if not tool_name or not self.tools.supports(tool_name):
                     await self.trace_store.append_trace(
@@ -170,11 +171,51 @@ class AgentRunner:
                         {"toolName": tool_name, "reason": "not allowlisted"},
                     )
                     continue
-                await self._execute_tool(
-                    ctx, policy, observations,
-                    str(call.get("planStepId", f"turn-{turn_index + 1}")),
-                    tool_name, call.get("arguments") or {},
-                )
+                valid_calls.append(call)
+
+            if not valid_calls:
+                continue
+
+            grouped: dict[str, list[dict]] = {}
+            for call in valid_calls:
+                group = self.tools.concurrency_group(str(call.get("name", "")))
+                grouped.setdefault(group, []).append(call)
+
+            for group_name in self.tools.group_order():
+                group_calls = grouped.get(group_name, [])
+                if not group_calls:
+                    continue
+
+                await self._check_cancelled(ctx.run_id)
+                if policy.remaining_tool_calls() <= 2:
+                    break
+
+                if len(group_calls) == 1:
+                    # Single tool — execute directly
+                    call = group_calls[0]
+                    await self._execute_tool(
+                        ctx, policy, observations,
+                        str(call.get("planStepId", f"turn-{turn_index + 1}")),
+                        str(call.get("name", "")),
+                        call.get("arguments") or {},
+                    )
+                else:
+                    # Multiple independent tools — run concurrently
+                    await self.trace_store.append_trace(
+                        ctx.run_id, "CONCURRENT_TOOLS",
+                        f"并发执行 {len(group_calls)} 个 {group_name} 组工具",
+                        {"group": group_name, "tools": [str(c.get("name")) for c in group_calls]},
+                    )
+                    coros = [
+                        self._execute_tool(
+                            ctx, policy, observations,
+                            str(call.get("planStepId", f"turn-{turn_index + 1}")),
+                            str(call.get("name", "")),
+                            call.get("arguments") or {},
+                        )
+                        for call in group_calls
+                    ]
+                    await asyncio.gather(*coros, return_exceptions=True)
 
         # ── Phase 4: Evidence & Scoring Guarantee ───────────────────
         await self._check_cancelled(ctx.run_id)
@@ -498,9 +539,11 @@ class AgentRunner:
                 )
                 return self.llm.analyze_project(
                     ctx.project, citations, deterministic_scoring=effective_scoring,
+                    run_id=ctx.run_id,
                 )
             return self.llm.run_project_task(
                 ctx.task_type, ctx.project, ctx.task_input, citations,
+                run_id=ctx.run_id,
             )
         except Exception as exc:
             return {"artifactError": str(exc)}
