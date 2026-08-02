@@ -2,6 +2,55 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 源码同步与检索 —— Agent 可以读取项目源代码
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- 健康分析评分引擎通过关键词匹配检测"测试证据""CI/CD 证据""依赖配置"等信号，但实际上**所有信号都来自同步到 `project_evidence` 的 GitHub 快照**。
+- 同步器原本只收集根目录的 10 种配置文件（`package.json`、`pom.xml`、`pyproject.toml` 等），源代码文件（`.java`、`.py`、`.js`、`.ts`、`.vue` 等）**从来不收集**。
+- 评分引擎能告诉你的全部就是"README 写得怎么样 + 有没有 CI 配置 + 最近有没有提交"——完全看不到实际代码结构和质量。
+- Agent 无法回答"这个项目的核心模块是什么""LLM 调用在哪里""数据库是怎么连的"等需要读源码才能回答的问题。
+
+### 调整过程
+
+**Java — `HttpGitHubRepositoryGateway.java`**
+- 新增 `addSourceCode()` 方法：在 `collectEvidence()` 流程中，同步完 README 和根目录文件后，递归遍历源码目录。
+- 遍历目录白名单：`src/`、`app/`、`lib/`、`agent-server/src/`、`tools/`、`agent-front/src/`。
+- 文件扩展名过滤：`.java`、`.py`、`.js`、`.ts`、`.vue`、`.jsx`、`.tsx`、`.sql`、`.yml`、`.xml`、`.json`、`.css`、`.scss`、`.html`、`.md`、`.sh`、`.dockerfile`。
+- 深度限制 4 层，上限 50 个文件（防超大仓库炸 DB）。
+- 自动跳过 `node_modules/`、`target/`、`dist/`、`build/`、`__pycache__/`、`.git/`、`vendor/`。
+- 每个文件存储前 3000 字符 snippet 到 `project_evidence`（objectType = FILE）。
+- 新增 `readFileContent(repoUrl, branch, filePath)` 方法：按需通过 GitHub API 读取完整文件内容（公共接口，供 Python 工具调用）。
+- 新增 `searchCode(repoUrl, query, limit)` 方法：通过 GitHub Search API 搜索代码。
+
+**Python — `tools.py` 新增 2 个工具（共 9 个）**
+- `searchSourceCode(query, filePattern, limit)`：从已同步的 `project_evidence` 中检索 source/FILE/README 类型证据，支持文件名模式过滤（如 `*.py`）。
+- `readSourceFile(filePath)`：直接从 GitHub API 读取指定文件的完整内容（base64 解码），使用 `GITHUB_TOKEN` 环境变量认证。
+- `_TOOL_NAMES` 更新为 9 个工具。
+
+**Python — `persistence.py`**
+- `EvidenceStore` 新增 `search_source_code()` 抽象方法。
+- `MySqlEvidenceStore` 实现：查询 `object_type IN ('SOURCE', 'FILE', 'README')`，支持 keyword 全文过滤 + filePattern 文件名匹配。
+
+**Python — `scoring.py`**
+- 新增 `has_source_code` 信号：源码文件数 > 1 时为正向信号。
+- 架构可维护性维度新增"源码可检索"+15 分（同时调整其他信号权重保持满分 100）。
+
+**Python — `config.py`**
+- 新增 `github_token` 配置（环境变量 `GITHUB_TOKEN`），供 `readSourceFile` 工具认证私有仓库。
+
+### 调整结果
+
+- 同步测试：Project 2（Job-Hunting 仓库）证据从 14 条增长到 35 条，新增 22 个源文件。
+- 收集到的源码涵盖全部核心模块：`app.py`、`agent.py`、`llm.py`、`rag.py`、`models.py`、`matcher.py`、`storage.py`、`resume_writer.py`、`web.py`、`cli.py`、`config.py` 等。
+- Agent 现在可以回答源码级问题："LangChain Agent 的入口在哪里""LLM 调用了哪个模型""数据库连接在哪个文件"。
+- 完整文件通过 `readSourceFile` 按需读取（不经同步快照，始终最新），不占用 DB 存储空间。
+- 评分引擎将源码存在作为架构维护性的正向信号。
+
+---
+
 ## 前端三卡片完善 + 报告弹窗结构化渲染
 
 **日期**：2026-08-02

@@ -206,6 +206,7 @@ Tool Calling：连接真实工程系统
 | 评估集 | 已有评估用例和运行结果数据模型 |
 | Agent Run | 已落地异步运行、步骤状态、报告快照和审批动作 |
 | GitHub 只读项目数据同步 | 已支持仓库元数据、README、根目录关键文件、Commit、Issue、PR 同步到 `project_evidence` |
+| 源代码同步与检索 | 递归收集 `src/`/`app/`/`lib/`/`tools/` 目录源文件（.java/.py/.js/.ts/.vue 等），Agent 可通过 `searchSourceCode` 检索源码，`readSourceFile` 按需从 GitHub 读取完整文件 |
 | 本地项目 / Jira / 禅道 / CI/CD | 已预留 connector 边界，后续建设 |
 | 报告 Artifact | 已支持 Web 报告、Citation 展示和 Markdown 导出 |
 | 审批式执行 | 已支持 GitHub Issue 草稿审批、登录态审批人记录与异步受控执行 |
@@ -405,7 +406,7 @@ MINERU_ENABLED=false
 | `GET /api/admin/projects/reports` | 后台全局报告列表 |
 | `GET /api/admin/projects/actions` | 后台全局动作状态与失败审计 |
 
-证据类型包括 `REPO`、`README`、`FILE_TREE`、`FILE`、`COMMIT`、`ISSUE` 和 `PR`。报告中的 citation 会保留类型、标题、来源路径或链接、命中片段和置信分。
+证据类型包括 `REPO`、`README`、`FILE_TREE`、`SOURCE`、`FILE`、`COMMIT`、`ISSUE` 和 `PR`。其中 `SOURCE` 类型为从 `src/`/`app/`/`lib/`/`tools/` 等源码目录递归收集的源代码文件（深度 4 层，上限 50 文件），Agent 可通过 `searchSourceCode` 工具检索源码内容，通过 `readSourceFile` 工具直接从 GitHub 读取完整文件。报告中的 citation 保留类型、标题、来源路径、命中片段和置信分。
 
 ### Phase 1：项目健康分析与交付计划
 
