@@ -105,7 +105,10 @@ public class AgentProjectServiceImpl implements AgentProjectService {
         List<Map<String, Object>> commonRiskList = new ArrayList<>();
         Map<String, List<String>> riskToProjects = new java.util.LinkedHashMap<>();
         for (Map<String, Object> row : commonRisks) {
-            List<Map<String, Object>> risks = parseJsonArray(text(row, "risksJson"));
+            String risksJson = text(row, "risksJson");
+            if (risksJson.isEmpty()) continue;
+            List<Map<String, Object>> risks = parseJsonArray(risksJson);
+            if (risks == null || risks.isEmpty()) continue;
             String projectName = text(row, "projectName");
             for (Map<String, Object> risk : risks) {
                 String title = text(risk, "title");
