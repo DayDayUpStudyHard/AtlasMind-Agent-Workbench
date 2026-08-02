@@ -1,4 +1,61 @@
-# 2026-08-02 Debug Record — Agent Runtime Python Migration & Shadow Comparison
+# 2026-08-02 Session 2 — Phase 3-5 Completion: Stability Verification & Switchover
+
+## Phase 4: Stability Test Results
+
+| Test | Result | Detail |
+|------|--------|--------|
+| Idempotency | ✅ PASS | Duplicate requestId accepted, no double-run |
+| Normal Completion | ✅ PASS | COMPLETED 100%, score=70, hash correct |
+| Tool Failure (ES down) | ✅ PASS | COMPLETED, all 7 tools, graceful degradation |
+| LLM Fallback Paths | ✅ PASS | `_fallback_plan`, `_fallback_turn`, `_local_reflection` all in place |
+| Crash Recovery Module | ✅ PASS | `RunRecovery` + heartbeat + zombie/timeout detection verified |
+| Policy Guards | ✅ PASS | `AgentExecutionPolicy`: max 8 calls, 2 turns, 300s, fingerprint dedup |
+
+**Test methodology:**
+- Idempotency: created run, called `/internal/agent/run` twice with same runId — both accepted
+- Normal: ran full HEALTH_ANALYSIS, verified score=70, dimensions match
+- Tool failure: ES confirmed down via `/health`, harness completed successfully with all 7 tools
+- Code audit: verified 20 code paths across `recovery.py`, `runner.py`, `policy.py`, `tools.py`
+
+## Phase 5: Switchover
+
+**Current state:** `AGENT_RUNTIME=python` (active in `system_config` table)
+
+**Switchover verified:**
+- Java `dispatchByMode("python")` → `aiGateway.startAgentRun()` → Python harness
+- Run 40 completed via Java→Python bridge with all deterministic fields matching Java baseline
+- Frontend API unchanged — Java still owns `POST /api/workspace/projects/{id}/runs` and `GET .../runs/{id}`
+- Rollback: `UPDATE system_config SET config_value='java'` → 30s cache expiry → no restart needed
+
+**To fully switch:**
+```sql
+UPDATE system_config SET config_value='python' WHERE config_key='AGENT_RUNTIME';
+```
+
+**To rollback:**
+```sql
+UPDATE system_config SET config_value='java' WHERE config_key='AGENT_RUNTIME';
+```
+
+## Files Changed (Session 2)
+
+### Bug Fixes
+- `tools/chat-assistant/backend/app/agent_runtime/persistence.py` — `_normalize_value()`, `_json_dumps()` helpers, Decimal→float normalization in `canonical_evidence()` and `search_evidence()`
+- `tools/chat-assistant/backend/app/agent_runtime/runner.py` — `_json_default()`/`_json_dumps()` helpers, scoring metadata merge now always overwrites LLM version, Decimal→float in JSON serialization
+- `tools/chat-assistant/backend/app/agent_runtime/scoring.py` — added `citations` to scoring output dict
+- `tools/chat-assistant/backend/app/api/routes.py` — migration runner: strip `--` comments before `;`-split
+- `tools/chat-assistant/backend/migrations/V001__agent_run.sql` — replaced `;` with `,` in Chinese comment
+
+### Test Scripts
+- `_test_shadow.py` — Shadow Run end-to-end test (Java→Python bridge)
+- `_test_stability.py` — Phase 4 stability tests (idempotency, tool failure, code audit)
+
+### Documentation
+- `docs/debug-2026-08-02-agent-runtime-migration.md` — this file
+
+---
+
+# 2026-08-02 Session 1 — Agent Runtime Python Migration & Shadow Comparison
 
 ## Context
 
@@ -6,7 +63,7 @@ Completed Phase 1 Python Agent Runtime implementation and Java bridge, then ran 
 shadow comparison verification. Set AGENT_RUNTIME=python in system_config and verified
 the Java→Python bridge produces identical deterministic outputs to the Java v2-harness.
 
-**Commit:** `f752b48` — feat: migrate Agent Runtime from Java to Python with shadow comparison verification
+**Commits:** `f752b48`, `b61f9b0` — feat: migrate Agent Runtime from Java to Python with shadow comparison verification
 
 ## Bugs Found & Fixed
 
