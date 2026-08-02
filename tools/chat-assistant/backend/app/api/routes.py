@@ -38,11 +38,15 @@ _embedding_service: EmbeddingService | None = None
 _kb_service: KbService | None = None
 
 # ── Agent Runtime singletons ────────────────────────────────────────
-_agent_dispatcher = None   # RunDispatcher
+_agent_dispatcher = None   # RunDispatcher (project mode)
 _agent_recovery_task: asyncio.Task | None = None
 _agent_worker = None       # AgentRunWorker
 _agent_worker_task: asyncio.Task | None = None
 _active_runs: dict[str, asyncio.Task] = {}  # requestId → Task (idempotency)
+
+# Contract Agent runtime singletons
+_contract_dispatcher = None  # RunDispatcher (contract mode)
+_contract_initialized = False
 
 
 def _check_internal_token(token: str | None) -> None:
@@ -135,6 +139,46 @@ def _init_agent_runtime():
 def get_dispatcher():
     _init_agent_runtime()
     return _agent_dispatcher
+
+
+def _init_contract_runtime():
+    """Lazily initialise the Contract Agent Runtime."""
+    global _contract_dispatcher, _contract_initialized
+    if _contract_initialized:
+        return
+
+    from app.agent_runtime.persistence import MySqlRunStore, MySqlTraceStore, MySqlReportStore, MySqlMemoryStore
+    from app.agent_runtime.policy import AgentExecutionPolicy
+    from app.agent_runtime.recovery import RunRecovery
+    from app.agent_runtime.runner import AgentRunner, RunDispatcher
+    from app.agent_runtime.contract_tools import ContractToolRegistry
+    from app.agent_runtime.contract_store import ContractStore
+
+    run_store = MySqlRunStore()
+    trace_store = MySqlTraceStore()
+    report_store = MySqlReportStore()
+    memory_store = MySqlMemoryStore()
+    contract_store = ContractStore()
+    llm = get_llm()
+
+    tools = ContractToolRegistry(contract_store)
+
+    runner = AgentRunner(
+        llm=llm, tools=tools, scoring=None,  # Contract uses its own scoring via tools
+        run_store=run_store, trace_store=trace_store,
+        evidence_store=None, report_store=report_store, memory_store=memory_store,
+    )
+
+    _contract_dispatcher = RunDispatcher(runner, run_store, report_store)
+    runner.on_progress = _contract_dispatcher._publish_progress
+
+    _contract_initialized = True
+    logger.info("Contract Agent Runtime initialised")
+
+
+def get_contract_dispatcher():
+    _init_contract_runtime()
+    return _contract_dispatcher
 
 
 # ── Migration runner ────────────────────────────────────────────────
@@ -680,7 +724,12 @@ async def start_agent_run(
     request = StartRunRequest(payload)
     if not request.run_id:
         raise HTTPException(status_code=400, detail="runId is required")
-    dispatcher = get_dispatcher()
+
+    # Route to project or contract dispatcher based on subjectType
+    if request.subject_type == "CONTRACT_CASE":
+        dispatcher = get_contract_dispatcher()
+    else:
+        dispatcher = get_dispatcher()
 
     # Idempotency: same requestId → return existing run (no duplicate task)
     request_id = request.request_id or ""

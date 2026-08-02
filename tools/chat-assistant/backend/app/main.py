@@ -12,8 +12,9 @@ async def _lifespan(app: FastAPI):
     """Startup: run DB migrations, eagerly init Agent Runtime (worker + recovery)."""
     await run_migrations()
     # Eager init agent runtime — starts Stream worker + recovery loop
-    from app.api.routes import get_dispatcher
-    get_dispatcher()  # eager-init: starts recovery loop + Stream worker + prompts registry
+    from app.api.routes import get_dispatcher, get_contract_dispatcher
+    get_dispatcher()           # project mode
+    get_contract_dispatcher()  # contract mode
     yield
     # Shutdown: stop the Stream worker gracefully
     try:
