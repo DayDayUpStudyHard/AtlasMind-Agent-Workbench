@@ -2,6 +2,45 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 前端三卡片完善 + 报告弹窗结构化渲染
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- 之前优化 `getProject()` 时将 reports 查询中的 `content_json`、`risks_json`、`plan_json`、`citations_json` 全部移除以减小响应体。健康卡有 `healthScore`/`healthStatus` 仍可正常显示，但**接手卡和决策卡的所有结构化内容全部消失**——sections、recommendation、options、risks、plan 等字段均不可用，两张卡只显示一条日期线，显得"孤零零"。
+- `ReportArtifactModal` 查看报告弹窗只渲染 `reportMarkdown`，而接手手册和决策备忘录的 LLM 产物是 JSON 格式（非 Markdown），弹窗显示"该报告暂无详细内容"。
+
+### 调整过程
+
+**ProjectWorkbenchView.vue — 懒加载完整报告**
+- 新增 `reportLoading` 响应式状态（health/onboard/decision 三个 key）。
+- 新增 `fetchFullReports()` 函数：页面加载完成后，遍历 `project.runs`，为每个 run 并行调用 `getProjectRun(runId)`（已有端点），将返回的完整 report（含 `contentJson` 等 JSON 字段）合并回 `project.reports` 数组——已有 computed 属性无需修改。
+- 接手卡和决策卡模板新增 loading 状态：`<div v-if="reportLoading.onboard" class="card-loading"><span class="loader"/> 正在加载报告内容...</div>`。
+- 新增 `.card-loading` CSS：flex + 旋转动画 loader。
+
+**ReportArtifactModal.vue — 按类型结构化渲染**
+- 新增类型判断 computed：`isHealth`、`isOnboarding`、`isDecision`。
+- 新增 `modalContent` computed：安全解析 `report.contentJson`。
+- 新增 `modalDimensions`、`modalRisks`、`modalPlan` computed：解析对应的 JSON 字段。
+- 新增 `hasStructuredContent` computed：避免有结构化数据时仍显示空白占位。
+- 弹窗 body 按类型渲染：
+  - **健康分析**：分数 hero（48px 大字）+ 维度条 + 风险清单
+  - **接手手册**：角色标签（audience/level）+ 模块章节（sections/items）+ 上手风险
+  - **决策助手**：建议结论 + 置信度 badge + 方案对比卡片（含 migrationCost/safetyRisk/compatibility/teamFamiliarity 四维标签 + 优劣势列表）+ 决策标准 chips + 风险
+  - **通用**：执行计划列表 + Markdown 正文（如有）
+- 新增 ~200 行 CSS：`.modal-score-hero`、`.modal-dim-grid`、`.modal-options-table`、`.modal-option-card`、`.opt-dims`、`.modal-onboard-section`、`.rec-badge` 等。
+
+### 调整结果
+
+- `vite build` 编译通过，0 错误。
+- 首屏 `getProject()` 仍保持 ~15KB 轻量（不牺牲性能）。
+- 页面加载后自动并行请求三种报告的完整内容，卡片从"孤零零"变为完整结构化展示。
+- 弹窗支持三种类型的可视化渲染，不再依赖 LLM 输出 Markdown。
+- 后端零改动——`GET /runs/{runId}` 端点已返回完整数据。
+
+---
+
 ## 业务功能：闭环动作执行 + 决策量化对比 + 跨项目洞察
 
 **日期**：2026-08-02
