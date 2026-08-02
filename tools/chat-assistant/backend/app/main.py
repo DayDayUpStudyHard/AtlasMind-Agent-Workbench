@@ -1,9 +1,24 @@
-"""FastAPI 应用工厂 + CORS 中间件。"""
+"""FastAPI application factory + CORS middleware + lifespan (migrations)."""
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.api.routes import internal_router, kb_router, router
 
-app = FastAPI(title="AtlasMind AI Service API", version="1.0.0")
+from app.api.routes import internal_router, kb_router, router, run_migrations
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    """Startup: run DB migrations.  Shutdown: cleanup (reserved)."""
+    await run_migrations()
+    yield
+
+
+app = FastAPI(
+    title="AtlasMind AI Service API",
+    version="1.0.0",
+    lifespan=_lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,

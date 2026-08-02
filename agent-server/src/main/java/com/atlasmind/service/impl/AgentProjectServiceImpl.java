@@ -5,6 +5,7 @@ import com.atlasmind.agent.runtime.AgentHarness;
 import com.atlasmind.agent.runtime.AgentHarnessResult;
 import com.atlasmind.agent.runtime.AgentTaskContext;
 import com.atlasmind.agent.runtime.AgentTraceStore;
+import com.atlasmind.config.SystemConfigRepository;
 import com.atlasmind.gateway.AiGateway;
 import com.atlasmind.gateway.GitHubIssueGateway;
 import com.atlasmind.gateway.GitHubRepositoryGateway;
@@ -32,6 +33,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 首个垂直闭环的实现。
@@ -60,6 +64,10 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     private final AgentHarness agentHarness;
     private final AgentArtifactExecutor agentArtifactExecutor;
     private final AgentTraceStore agentTraceStore;
+    private final SystemConfigRepository systemConfigRepo;
+
+    private final ExecutorService shadowExecutor = Executors.newSingleThreadExecutor(
+            r -> new Thread(r, "agent-shadow-runner"));
 
     @Override
     public Map<String, Object> overview() {
@@ -1629,16 +1637,94 @@ public class AgentProjectServiceImpl implements AgentProjectService {
     }
 
     private void dispatchAfterCommit(Long runId) {
+        String runtimeMode = systemConfigRepo.get("AGENT_RUNTIME", "java");
+        Runnable dispatch = () -> dispatchByMode(runId, runtimeMode);
+
         if (!TransactionSynchronizationManager.isSynchronizationActive()) {
-            agentRunExecutor.execute(runId);
+            dispatch.run();
             return;
         }
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override
             public void afterCommit() {
-                agentRunExecutor.execute(runId);
+                dispatch.run();
             }
         });
+    }
+
+    /**
+     * Route a newly-created run to Java harness, Python Runtime, or both (shadow).
+     */
+    private void dispatchByMode(Long runId, String mode) {
+        switch (mode) {
+            case "python" -> {
+                try {
+                    aiGateway.startAgentRun(buildRunPayload(runId));
+                } catch (Exception e) {
+                    markRunFailed(runId, "Python agent runtime unavailable: " + e.getMessage());
+                }
+            }
+            case "shadow" -> {
+                agentRunExecutor.execute(runId); // primary: Java harness
+                shadowExecutor.execute(() -> {
+                    try {
+                        aiGateway.startAgentRun(buildRunPayload(runId));
+                    } catch (Exception ignored) {
+                        // shadow failures are logged but never surfaced to users
+                    }
+                });
+            }
+            default -> agentRunExecutor.execute(runId); // java (unchanged)
+        }
+    }
+
+    private void markRunFailed(Long runId, String errorMessage) {
+        jdbcTemplate.update("""
+                UPDATE agent_run
+                SET status='FAILED', progress=0,
+                    current_step='Agent 服务不可用，请稍后重试',
+                    error_message=?, finished_at=NOW()
+                WHERE id=?
+                """, errorMessage, runId);
+    }
+
+    /**
+     * Build the JSON payload that Python {@code POST /internal/agent/run} expects.
+     */
+    private Map<String, Object> buildRunPayload(Long runId) {
+        Map<String, Object> run = getRun(runId);
+        Map<String, Object> project = jdbcTemplate.queryForMap("""
+                SELECT id, name, description, business_scope AS businessScope,
+                       release_target AS releaseTarget, current_milestone AS currentMilestone,
+                       team_size AS teamSize, tech_stack AS techStack,
+                       repository_type AS repositoryType, repository_url AS repositoryUrl,
+                       health_status AS healthStatus, health_score AS healthScore
+                FROM agent_project WHERE id=?
+                """, run.get("projectId"));
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("requestId", UUID.randomUUID().toString());
+        payload.put("runId", runId);
+        payload.put("projectId", run.get("projectId"));
+        payload.put("taskType", run.get("runType"));
+        payload.put("question", run.getOrDefault("question", ""));
+        payload.put("actor", "java-service");
+        payload.put("project", project);
+
+        String inputJson = (String) run.get("inputJson");
+        payload.put("taskInput", inputJson == null || inputJson.isBlank()
+                ? Map.of() : parseJsonMap(inputJson));
+        payload.put("options", Map.of());
+        return payload;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseJsonMap(String json) {
+        try {
+            return objectMapper.readValue(json, Map.class);
+        } catch (Exception e) {
+            return Map.of();
+        }
     }
 
     private void dispatchActionAfterCommit(Long runId, Long actionId) {

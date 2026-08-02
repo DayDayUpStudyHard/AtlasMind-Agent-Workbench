@@ -28,5 +28,11 @@ public interface AiGateway {
 
     Map<String, Object> reflectAgent(Map<String, Object> payload);
 
+    Map<String, Object> startAgentRun(Map<String, Object> payload);
+
+    Map<String, Object> getAgentRun(Long runId);
+
+    Map<String, Object> cancelAgentRun(Long runId, Map<String, Object> payload);
+
     Map<String, Object> health();
 }

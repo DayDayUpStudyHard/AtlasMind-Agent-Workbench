@@ -84,6 +84,21 @@ public class HttpAiGateway implements AiGateway {
     }
 
     @Override
+    public Map<String, Object> startAgentRun(Map<String, Object> payload) {
+        return request("POST", "/internal/agent/run", payload, timeoutSeconds);
+    }
+
+    @Override
+    public Map<String, Object> getAgentRun(Long runId) {
+        return request("GET", "/internal/agent/run/" + runId, null, timeoutSeconds);
+    }
+
+    @Override
+    public Map<String, Object> cancelAgentRun(Long runId, Map<String, Object> payload) {
+        return request("POST", "/internal/agent/run/" + runId + "/cancel", payload, timeoutSeconds);
+    }
+
+    @Override
     public Map<String, Object> health() {
         return request("GET", "/api/chat/health?probe=true", null, timeoutSeconds);
     }

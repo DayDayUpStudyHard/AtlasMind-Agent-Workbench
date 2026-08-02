@@ -1,0 +1,26 @@
+-- Agent 产物报告表
+CREATE TABLE IF NOT EXISTS agent_report (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    project_id BIGINT NOT NULL,
+    run_id BIGINT NOT NULL,
+    report_type VARCHAR(40) NOT NULL DEFAULT 'HEALTH_REPORT',
+    title VARCHAR(240) NOT NULL,
+    summary TEXT,
+    health_status VARCHAR(30),
+    health_score INT DEFAULT 0,
+    dimensions_json LONGTEXT,
+    risks_json LONGTEXT,
+    plan_json LONGTEXT,
+    citations_json LONGTEXT,
+    scoring_version VARCHAR(30),
+    evidence_hash VARCHAR(64),
+    analysis_mode VARCHAR(80),
+    scoring_rationale_json LONGTEXT,
+    content_json LONGTEXT,
+    report_markdown LONGTEXT,
+    status VARCHAR(30) NOT NULL DEFAULT 'DRAFT',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_report_run (run_id),
+    KEY idx_project_report (project_id, create_time)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

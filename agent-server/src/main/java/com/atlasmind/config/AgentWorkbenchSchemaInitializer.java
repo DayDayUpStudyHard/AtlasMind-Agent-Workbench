@@ -252,6 +252,17 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_kb_document_project (document_id, project_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS system_config (
+                    config_key VARCHAR(64) PRIMARY KEY,
+                    config_value VARCHAR(256) NOT NULL,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO system_config (config_key, config_value)
+                VALUES ('AGENT_RUNTIME', 'java')
+                """);
         jdbcTemplate.update("""
                 DELETE m FROM agent_project_memory m
                 LEFT JOIN agent_run r ON r.id=CAST(m.source_id AS UNSIGNED)

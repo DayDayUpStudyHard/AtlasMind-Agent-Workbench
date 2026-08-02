@@ -1,0 +1,5 @@
+-- Migration 版本记录表
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version VARCHAR(16) PRIMARY KEY,
+    applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

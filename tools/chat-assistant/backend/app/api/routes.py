@@ -1,10 +1,13 @@
 """Chat, knowledge-base ingest, and retrieval debug routes."""
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import secrets
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -33,6 +36,10 @@ _es_service: ESService | None = None
 _llm_service: LLMService | None = None
 _embedding_service: EmbeddingService | None = None
 _kb_service: KbService | None = None
+
+# ── Agent Runtime singletons ────────────────────────────────────────
+_agent_dispatcher = None   # RunDispatcher
+_agent_recovery_task: asyncio.Task | None = None
 
 
 def _check_internal_token(token: str | None) -> None:
@@ -67,6 +74,139 @@ def get_kb() -> KbService:
     if _kb_service is None:
         _kb_service = KbService()
     return _kb_service
+
+
+# ── Agent Runtime factory ───────────────────────────────────────────
+
+def _init_agent_runtime():
+    """Lazily initialise the Agent Runtime singletons (dispatcher + recovery)."""
+    global _agent_dispatcher, _agent_recovery_task
+    if _agent_dispatcher is not None:
+        return
+
+    from app.agent_runtime.persistence import (
+        MySqlEvidenceStore,
+        MySqlMemoryStore,
+        MySqlReportStore,
+        MySqlRunStore,
+        MySqlTraceStore,
+    )
+    from app.agent_runtime.policy import AgentExecutionPolicy
+    from app.agent_runtime.recovery import RunRecovery
+    from app.agent_runtime.runner import AgentRunner, RunDispatcher
+    from app.agent_runtime.scoring import HealthScoringEngine
+    from app.agent_runtime.tools import AgentToolRegistry
+
+    run_store = MySqlRunStore()
+    trace_store = MySqlTraceStore()
+    evidence_store = MySqlEvidenceStore()
+    report_store = MySqlReportStore()
+    memory_store = MySqlMemoryStore()
+    scoring = HealthScoringEngine()
+    llm = get_llm()
+
+    tools = AgentToolRegistry(evidence_store, report_store, scoring)
+
+    runner = AgentRunner(
+        llm=llm, tools=tools, scoring=scoring,
+        run_store=run_store, trace_store=trace_store,
+        evidence_store=evidence_store, report_store=report_store,
+        memory_store=memory_store,
+    )
+
+    _agent_dispatcher = RunDispatcher(runner, run_store, report_store)
+
+    # Start recovery background task
+    recovery = RunRecovery(run_store)
+    _agent_recovery_task = asyncio.create_task(recovery.run_forever())
+
+    logger.info("Agent Runtime initialised (stores, runner, recovery)")
+
+
+def get_dispatcher():
+    _init_agent_runtime()
+    return _agent_dispatcher
+
+
+# ── Migration runner ────────────────────────────────────────────────
+
+_MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
+
+
+async def run_migrations() -> list[str]:
+    """Execute unapplied SQL migrations. Returns list of newly applied versions."""
+    if not _MIGRATIONS_DIR.exists():
+        logger.warning("Migrations directory not found: %s", _MIGRATIONS_DIR)
+        return []
+
+    sql_files = sorted(_MIGRATIONS_DIR.glob("V*.sql"))
+    if not sql_files:
+        return []
+
+    import pymysql
+    from pymysql.cursors import DictCursor
+
+    applied_versions: set[str] = set()
+    try:
+        conn = pymysql.connect(
+            host=settings.mysql_host, port=settings.mysql_port,
+            user=settings.mysql_user, password=settings.mysql_password,
+            database=settings.mysql_db, charset="utf8mb4",
+            cursorclass=DictCursor,
+        )
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """CREATE TABLE IF NOT EXISTS schema_migrations (
+                        version VARCHAR(16) PRIMARY KEY,
+                        applied_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"""
+                )
+                conn.commit()
+                cur.execute("SELECT version FROM schema_migrations ORDER BY version")
+                applied_versions = {row["version"] for row in cur.fetchall()}
+    except Exception:
+        logger.exception("Cannot read schema_migrations; skipping migrations")
+        return []
+
+    new_versions = []
+    for sql_file in sql_files:
+        version = sql_file.stem.split("__")[0]
+        if version in applied_versions:
+            continue
+        try:
+            with open(sql_file, encoding="utf-8") as fh:
+                sql = fh.read()
+            conn = pymysql.connect(
+                host=settings.mysql_host, port=settings.mysql_port,
+                user=settings.mysql_user, password=settings.mysql_password,
+                database=settings.mysql_db, charset="utf8mb4",
+                cursorclass=DictCursor,
+            )
+            with conn:
+                with conn.cursor() as cur:
+                    # Remove line comments before splitting to avoid
+                    # semicolons inside comments breaking the parser
+                    clean_lines = [
+                        line for line in sql.splitlines()
+                        if not line.strip().startswith("--")
+                    ]
+                    clean_sql = "\n".join(clean_lines)
+                    for statement in clean_sql.split(";"):
+                        stmt = statement.strip()
+                        if stmt:
+                            cur.execute(stmt)
+                    cur.execute(
+                        "INSERT INTO schema_migrations (version) VALUES (%s)",
+                        (version,),
+                    )
+                conn.commit()
+            new_versions.append(version)
+            logger.info("Applied migration %s", version)
+        except Exception:
+            logger.exception("Migration %s failed", version)
+
+    return new_versions
 
 
 DEFAULT_SUGGESTIONS = [
@@ -511,6 +651,70 @@ async def delete_document_index(
     _check_internal_token(x_internal_token)
     ok = get_es().delete_kb_document(document_id)
     return {"ok": ok}
+
+
+# ── Agent Runtime endpoints ──────────────────────────────────────────
+
+@internal_router.post("/agent/run")
+async def start_agent_run(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Start a full Agent harness run asynchronously.
+
+    Java creates the agent_run row (CREATED) before calling this endpoint.
+    The harness loop executes in a background asyncio task with heartbeat.
+    """
+    _check_internal_token(x_internal_token)
+    from app.agent_runtime.api_models import RunStatus, StartRunRequest, StartRunResponse
+
+    request = StartRunRequest(payload)
+    if not request.run_id:
+        raise HTTPException(status_code=400, detail="runId is required")
+    dispatcher = get_dispatcher()
+
+    # Idempotency: same requestId → no-op (Java handles dedup at its layer)
+    asyncio.create_task(dispatcher.dispatch(request.run_id, request))
+
+    return StartRunResponse(
+        run_id=request.run_id,
+        status=RunStatus.CREATED,
+        progress=0,
+        current_step="已接收，等待 Agent 调度",
+    ).to_dict()
+
+
+@internal_router.get("/agent/run/{run_id}")
+async def get_agent_run(
+    run_id: int,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Query a run's status, traces, tool calls, report, actions, and memories."""
+    _check_internal_token(x_internal_token)
+    from app.agent_runtime.persistence import MySqlRunStore
+
+    store = MySqlRunStore()
+    detail = await store.get_run_detail(run_id)
+    if not detail.get("run"):
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+    return detail
+
+
+@internal_router.post("/agent/run/{run_id}/cancel")
+async def cancel_agent_run(
+    run_id: int,
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Cancel a running Agent run. The harness policy checks for CANCELLED status
+    before each turn and tool call."""
+    _check_internal_token(x_internal_token)
+    from app.agent_runtime.persistence import MySqlRunStore
+
+    store = MySqlRunStore()
+    reason = str(payload.get("reason", "用户手动取消"))
+    await store.update_run(run_id, status="CANCELLED", error_message=reason)
+    return {"runId": run_id, "status": "CANCELLED"}
 
 
 @kb_router.post("/qa/test")
