@@ -39,6 +39,9 @@ class Settings:
     mysql_password: str = os.getenv("MYSQL_PASSWORD", "123456")
     mysql_db: str = os.getenv("MYSQL_DB", "atlasmind_agent")
 
+    # ====== Redis ======
+    redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
     # ====== Chat ======
     chat_max_tokens: int = int(os.getenv("CHAT_MAX_TOKENS", "2048"))
     chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))

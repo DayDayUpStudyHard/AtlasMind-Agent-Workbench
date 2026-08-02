@@ -40,6 +40,8 @@ _kb_service: KbService | None = None
 # ── Agent Runtime singletons ────────────────────────────────────────
 _agent_dispatcher = None   # RunDispatcher
 _agent_recovery_task: asyncio.Task | None = None
+_agent_worker = None       # AgentRunWorker
+_agent_worker_task: asyncio.Task | None = None
 _active_runs: dict[str, asyncio.Task] = {}  # requestId → Task (idempotency)
 
 
@@ -80,8 +82,8 @@ def get_kb() -> KbService:
 # ── Agent Runtime factory ───────────────────────────────────────────
 
 def _init_agent_runtime():
-    """Lazily initialise the Agent Runtime singletons (dispatcher + recovery)."""
-    global _agent_dispatcher, _agent_recovery_task
+    """Lazily initialise the Agent Runtime singletons (dispatcher + recovery + worker)."""
+    global _agent_dispatcher, _agent_recovery_task, _agent_worker, _agent_worker_task
     if _agent_dispatcher is not None:
         return
 
@@ -97,6 +99,7 @@ def _init_agent_runtime():
     from app.agent_runtime.runner import AgentRunner, RunDispatcher
     from app.agent_runtime.scoring import HealthScoringEngine
     from app.agent_runtime.tools import AgentToolRegistry
+    from app.agent_runtime.worker import AgentRunWorker
 
     run_store = MySqlRunStore()
     trace_store = MySqlTraceStore()
@@ -122,7 +125,11 @@ def _init_agent_runtime():
     recovery = RunRecovery(run_store)
     _agent_recovery_task = asyncio.create_task(recovery.run_forever())
 
-    logger.info("Agent Runtime initialised (stores, runner, recovery)")
+    # Start Redis Stream consumer worker (fire-and-forget dispatch from Java)
+    _agent_worker = AgentRunWorker(_agent_dispatcher, redis_url=settings.redis_url)
+    _agent_worker_task = asyncio.create_task(_agent_worker.run_forever())
+
+    logger.info("Agent Runtime initialised (stores, runner, recovery, stream-worker)")
 
 
 def get_dispatcher():

@@ -2,6 +2,67 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## Redis Stream 消息队列 —— Java→Python 异步解耦
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- **Java HTTP 直连 Python 无交付保证**：`HttpAiGateway.startAgentRun()` 通过 HTTP POST `/internal/agent/run` 同步调用 Python，网络抖动或 Python 临时不可用立即标记 Run 为 FAILED，无重试/无缓冲。
+- **同步等待**：Java 调用线程阻塞等待 HTTP 响应（timeout 12s），耦合了 Web 请求线程和 Agent 调度延迟。
+- **单点依赖**：Python 进程不可用时所有新 Run 直接失败，无削峰填谷能力。
+
+### 调整过程
+
+**Java 侧 — `HttpAiGateway.java`**
+- 注入 `StringRedisTemplate`（项目已有 Redis 配置）。
+- `startAgentRun()` 改为 **Stream-first + HTTP fallback** 双重策略：
+  1. 首选 `XADD agent:run:stream` 写入 Redis Stream（fire-and-forget），Java 立即返回 `{"queued": true, "transport": "redis-stream"}`。
+  2. Redis Stream 不可用时自动降级为 HTTP POST `/internal/agent/run`（保留原有同步路径）。
+  3. 两次均失败才抛出异常，由 `AgentProjectServiceImpl.dispatchToPython()` 标记 Run 为 FAILED。
+- 已编译通过，无需修改 `AiGateway` 接口签名。
+
+**Python 侧 — 新建 `worker.py`**
+- 新增 `AgentRunWorker` 类，消费 `agent:run:stream`（consumer group `agent-runners`）。
+- 启动时：
+  - `XGROUP CREATE` 创建消费者组（`mkstream=true`，自动创建 Stream）。
+  - `XAUTOCLAIM min_idle_ms=0` 认领所有 PEL 未确认消息（崩溃恢复 — 前一个 worker 实例崩溃后消息不丢）。
+- 主循环：
+  - `XREADGROUP` 阻塞读取新消息（`count=3, block=2000ms`）。
+  - 每条消息 `asyncio.create_task` 异步派发 `RunDispatcher.dispatch()`，worker 循环不阻塞，支持并发 Run。
+  - 只有 harness 执行完毕后 `XACK`（at-least-once 语义 — 崩溃前未 ACK 的消息留在 PEL）。
+- 定期 `XAUTOCLAIM min_idle_ms=120_000`，认领闲置超过 2 分钟的 PEL 消息（crash 恢复 + 防重复派发）。
+- `stop()` 优雅关闭：等待活跃任务完成（max 30s），关闭 Redis 连接。
+
+**`routes.py` — Worker 生命周期**
+- `_init_agent_runtime()` 在初始化 dispatcher + recovery 的同时创建 `AgentRunWorker` 并启动为后台 `asyncio.Task`。
+- HTTP 端点 `POST /internal/agent/run` 保持不变，作为 Stream 的 fallback 接收路径。
+
+**`config.py` — Redis URL 配置**
+- 新增 `redis_url: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")`，供 worker 和 runner 共用。
+
+**`runner.py` — 使用统一 Redis 配置**
+- `RunDispatcher._get_redis_sync()` 从 `redis.Redis(host=..., port=...)` 改为 `redis.Redis.from_url(settings.redis_url)`，消除硬编码。
+
+### 调整结果
+
+- Stream 管道验证通过：XADD → XREADGROUP（consumer group 正确路由）→ payload 反序列化 → `StartRunRequest` 字段全部匹配 → XACK。
+- HTTP fallback 端点 `POST /internal/agent/run` 正常工作（直接 curl 返回 `{"status":"CREATED"}`）。
+- Consumer group `agent-runners` 创建成功，PEL 认领机制就绪。
+- 架构变更：
+  ```
+  之前：Java ──HTTP POST──→ Python (同步, 12s 超时)
+  之后：Java ──XADD──→ Redis Stream `agent:run:stream`  (fire-and-forget)
+                          ↓
+              Python Worker (consumer group) ──→ RunDispatcher
+                          ↓ (fallback)
+              HTTP POST /internal/agent/run (保留)
+  ```
+- 待生效：Java 和 Python 服务重启后，新 Run 将自动走 Stream 路径，Redis 不可用时透明降级 HTTP。
+- 新增文件：`tools/chat-assistant/backend/app/agent_runtime/worker.py`。
+
+---
+
 ## Agent Runtime 连接池 + SSE 流式进度推送
 
 **日期**：2026-08-02

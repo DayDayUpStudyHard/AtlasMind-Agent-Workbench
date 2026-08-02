@@ -575,8 +575,9 @@ class RunDispatcher:
 
     def _get_redis_sync(self) -> redis.Redis:
         if self._redis is None:
-            self._redis = redis.Redis(
-                host="localhost", port=6379, db=0,
+            from app.config import settings
+            self._redis = redis.Redis.from_url(
+                settings.redis_url,
                 decode_responses=True,
                 socket_connect_timeout=2,
                 socket_timeout=2,

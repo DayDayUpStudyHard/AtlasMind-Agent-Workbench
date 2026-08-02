@@ -3,7 +3,10 @@ package com.atlasmind.gateway;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
@@ -20,7 +23,11 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class HttpAiGateway implements AiGateway {
 
+    private static final Logger log = LoggerFactory.getLogger(HttpAiGateway.class);
+    private static final String AGENT_RUN_STREAM = "agent:run:stream";
+
     private final ObjectMapper objectMapper;
+    private final StringRedisTemplate redisTemplate;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
@@ -85,7 +92,21 @@ public class HttpAiGateway implements AiGateway {
 
     @Override
     public Map<String, Object> startAgentRun(Map<String, Object> payload) {
-        return request("POST", "/internal/agent/run", payload, timeoutSeconds);
+        // Redis Stream fire-and-forget: XADD → Python worker picks up via consumer group.
+        // If Redis is unavailable, falls back to synchronous HTTP POST.
+        try {
+            String json = objectMapper.writeValueAsString(payload);
+            redisTemplate.opsForStream().add(AGENT_RUN_STREAM,
+                    Map.of("payload", json));
+            log.info("Agent run {} dispatched via Redis Stream", payload.get("runId"));
+            return Map.of("queued", true,
+                    "runId", payload.get("runId"),
+                    "transport", "redis-stream");
+        } catch (Exception streamError) {
+            log.warn("Redis Stream dispatch failed, falling back to HTTP: {}",
+                    streamError.getMessage());
+            return request("POST", "/internal/agent/run", payload, timeoutSeconds);
+        }
     }
 
     @Override
