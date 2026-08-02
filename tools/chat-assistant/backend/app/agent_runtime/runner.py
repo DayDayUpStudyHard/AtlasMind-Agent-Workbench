@@ -533,14 +533,39 @@ class AgentRunner:
         scoring: dict[str, Any],
     ) -> dict[str, Any]:
         try:
+            # ── Project tasks ──────────────────────────────────
             if ctx.task_type == "HEALTH_ANALYSIS":
-                effective_scoring = scoring or self.scoring.score(
-                    ctx.project, citations,
-                )
+                effective_scoring = scoring or (self.scoring.score(
+                    ctx.project, citations) if self.scoring else {})
                 return self.llm.analyze_project(
                     ctx.project, citations, deterministic_scoring=effective_scoring,
                     run_id=ctx.run_id,
                 )
+            if ctx.task_type in ("PROJECT_ONBOARDING", "ENGINEERING_DECISION"):
+                return self.llm.run_project_task(
+                    ctx.task_type, ctx.project, ctx.task_input, citations,
+                    run_id=ctx.run_id,
+                )
+
+            # ── Contract tasks ─────────────────────────────────
+            if ctx.task_type == "CONTRACT_REVIEW":
+                findings = self.tools.citations_from(observations=[]) if hasattr(self.tools, 'citations_from') else []
+                return self.llm.contract_review(
+                    ctx.project, findings, citations, scoring or {},
+                    run_id=ctx.run_id,
+                )
+            if ctx.task_type == "CONTRACT_INTAKE":
+                return self.llm.contract_intake(
+                    ctx.project, run_id=ctx.run_id,
+                )
+            if ctx.task_type == "APPROVAL_DECISION":
+                findings = []
+                return self.llm.contract_approval(
+                    ctx.project, findings, scoring or {},
+                    run_id=ctx.run_id,
+                )
+
+            # Fallback
             return self.llm.run_project_task(
                 ctx.task_type, ctx.project, ctx.task_input, citations,
                 run_id=ctx.run_id,

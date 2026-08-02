@@ -549,6 +549,98 @@ class LLMService:
         template, temperature = self._prompt("reflection", run_id)
         return self._structured_completion(template, payload, temperature=temperature)
 
+    # ── Contract task methods (Phase 5) ────────────────────────────
+
+    def contract_review(self, case: dict, findings: list[dict],
+                        citations: list[dict], scoring: dict,
+                        run_id: int = 0) -> dict:
+        """Generate structured contract review report with findings and action proposals."""
+        template, temperature = self._prompt("contract_review", run_id)
+        payload = {
+            "case": {
+                "caseKey": case.get("caseKey", ""),
+                "title": case.get("title", ""),
+                "counterparty": case.get("counterparty", ""),
+                "amount": case.get("amount"),
+                "contractType": case.get("contractType", ""),
+            },
+            "findings": findings[:15],
+            "citations": citations[:8],
+            "deterministicScoring": scoring,
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": template},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=temperature,
+                max_tokens=max(8192, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=3, backoff_base=2.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
+    def contract_intake(self, case: dict, run_id: int = 0) -> dict:
+        """Generate material checklist, template recommendation, and approval route."""
+        template, temperature = self._prompt("contract_intake", run_id)
+        payload = {
+            "case": {
+                "title": case.get("title", ""),
+                "contractType": case.get("contractType", ""),
+                "amount": case.get("amount"),
+                "department": case.get("department", ""),
+                "description": case.get("description", ""),
+            },
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": template},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=temperature,
+                max_tokens=max(4096, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=2, backoff_base=2.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
+    def contract_approval(self, case: dict, findings: list[dict],
+                          scoring: dict, run_id: int = 0) -> dict:
+        """Generate approval memo with recommendation and conditions."""
+        template, temperature = self._prompt("contract_approval", run_id)
+        payload = {
+            "case": {"caseKey": case.get("caseKey", ""), "title": case.get("title", ""),
+                     "counterparty": case.get("counterparty", ""), "amount": case.get("amount")},
+            "findings": findings[:10],
+            "scoring": scoring,
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": template},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=temperature,
+                max_tokens=max(4096, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=2, backoff_base=2.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
     def _structured_completion(self, system_prompt: str, payload: dict,
                                temperature: float = 0.1) -> dict:
         def _call():
