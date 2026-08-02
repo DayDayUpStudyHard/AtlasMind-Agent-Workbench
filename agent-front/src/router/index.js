@@ -2,7 +2,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 
 const routes = [
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
-  { path: '/', name: 'Home', component: () => import('../views/ProjectOverviewView.vue') },
+  { path: '/', name: 'Home', component: () => import('../views/ContractPortfolioView.vue') },
   { path: '/projects/:id', name: 'ProjectWorkbench', component: () => import('../views/ProjectWorkbenchView.vue') },
   { path: '/contracts', name: 'ContractPortfolio', component: () => import('../views/ContractPortfolioView.vue') },
   { path: '/contracts/new', name: 'ContractCreate', component: () => import('../views/ContractCaseView.vue') },
