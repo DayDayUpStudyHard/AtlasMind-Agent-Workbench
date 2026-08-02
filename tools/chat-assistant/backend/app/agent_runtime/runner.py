@@ -22,6 +22,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
+import redis
+
 from .api_models import AgentTaskContext, StartRunRequest
 
 
@@ -72,6 +74,7 @@ class AgentRunner:
         evidence_store: EvidenceStore,
         report_store: ReportStore,
         memory_store: MemoryStore,
+        on_progress=None,  # async callable(run_id, phase, progress, status, step)
     ):
         self.llm = llm
         self.tools = tools
@@ -81,6 +84,23 @@ class AgentRunner:
         self.evidence_store = evidence_store
         self.report_store = report_store
         self.memory_store = memory_store
+        self.on_progress = on_progress
+
+    async def _update_progress(self, ctx: AgentTaskContext, status: str,
+                               progress: int, current_step: str = "") -> None:
+        """Update run status in DB and optionally publish a progress event."""
+        await self.run_store.update_run(
+            ctx.run_id, status=status, progress=progress,
+            current_step=current_step or f"Harness → {status}",
+        )
+        if self.on_progress:
+            try:
+                await self.on_progress(
+                    ctx.run_id, status, progress, status,
+                    current_step or f"Harness → {status}",
+                )
+            except Exception:
+                pass  # best-effort
 
     # -- public entry point ------------------------------------------------
 
@@ -92,10 +112,8 @@ class AgentRunner:
 
         # ── Phase 1: Context Building ───────────────────────────────
         await self._check_cancelled(ctx.run_id)
-        await self.run_store.update_run(
-            ctx.run_id, status="CONTEXT_BUILDING", progress=8,
-            current_step="Harness 正在加载项目记忆",
-        )
+        await self._update_progress(ctx, "CONTEXT_BUILDING", 8,
+                                    "Harness 正在加载项目记忆")
         await self._execute_tool(
             ctx, policy, observations, "bootstrap-memory",
             "getProjectMemory", {"limit": 12},
@@ -111,10 +129,8 @@ class AgentRunner:
         await self.trace_store.append_trace(
             ctx.run_id, "PLAN_CREATED", "Planner 已生成有界执行计划", plan,
         )
-        await self.run_store.update_run(
-            ctx.run_id, status="PLANNING", progress=18,
-            current_step="Planner 已生成执行计划",
-        )
+        await self._update_progress(ctx, "PLANNING", 18,
+                                    "Planner 已生成执行计划")
 
         # ── Phase 3: Tool-Calling Turn Loop ─────────────────────────
         planner_finished = False
@@ -130,11 +146,9 @@ class AgentRunner:
                 )
                 break
 
-            await self.run_store.update_run(
-                ctx.run_id, status="ANALYZING",
-                progress=min(62, 25 + turn_index * 9),
-                current_step="Agent 正在选择并调用工具",
-            )
+            await self._update_progress(
+                ctx, "ANALYZING", min(62, 25 + turn_index * 9),
+                "Agent 正在选择并调用工具")
 
             turn = await self._tool_turn(ctx, plan, observations, policy, turn_index)
             calls = turn.get("toolCalls") or []
@@ -171,10 +185,8 @@ class AgentRunner:
         citations = self.tools.citations_from(observations)
         scoring = self.tools.scoring_from(observations)
 
-        await self.run_store.update_run(
-            ctx.run_id, status="VERIFYING", progress=72,
-            current_step="Reflection 正在核验证据覆盖与引用",
-        )
+        await self._update_progress(ctx, "VERIFYING", 72,
+                                    "Reflection 正在核验证据覆盖与引用")
         await self.trace_store.append_trace(
             ctx.run_id, "REFLECTION_STARTED",
             "开始检查证据覆盖、引用和任务完成度",
@@ -219,10 +231,8 @@ class AgentRunner:
 
         # ── Phase 6: Artifact Generation ────────────────────────────
         await self._check_cancelled(ctx.run_id)
-        await self.run_store.update_run(
-            ctx.run_id, status="PLANNING", progress=86,
-            current_step="执行器正在生成结构化产物",
-        )
+        await self._update_progress(ctx, "PLANNING", 86,
+                                    "执行器正在生成结构化产物")
         raw_artifact = await self._generate_artifact(ctx, citations, scoring)
         if "artifactError" in raw_artifact:
             await self.trace_store.append_trace(
@@ -546,7 +556,11 @@ class AgentRunner:
 # ══════════════════════════════════════════════════════════════════════
 
 class RunDispatcher:
-    """Wraps AgentRunner with asyncio task scheduling and heartbeat."""
+    """Wraps AgentRunner with asyncio task scheduling and heartbeat.
+
+    Publishes progress events to Redis PubSub (channel ``run:{id}:progress``)
+    so that the Java SSE endpoint can stream live updates to the frontend.
+    """
 
     def __init__(
         self,
@@ -557,6 +571,37 @@ class RunDispatcher:
         self.runner = runner
         self.run_store = run_store
         self.report_store = report_store
+        self._redis: redis.Redis | None = None
+
+    def _get_redis_sync(self) -> redis.Redis:
+        if self._redis is None:
+            self._redis = redis.Redis(
+                host="localhost", port=6379, db=0,
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+        return self._redis
+
+    async def _publish_progress(self, run_id: int, phase: str, progress: int,
+                                status: str, current_step: str) -> None:
+        """Publish a progress event to Redis PubSub (best-effort)."""
+        try:
+            redis_conn = self._get_redis_sync()
+            event = json.dumps({
+                "runId": run_id,
+                "phase": phase,
+                "progress": progress,
+                "status": status,
+                "currentStep": current_step,
+                "timestamp": int(time.time()),
+            }, ensure_ascii=False)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(
+                None, redis_conn.publish, f"run:{run_id}:progress", event,
+            )
+        except Exception:
+            pass  # progress publishing is best-effort; never fail the run
 
     async def dispatch(self, run_id: int, request: StartRunRequest) -> None:
         """Launch a harness run as a background asyncio task with heartbeat."""
@@ -567,6 +612,8 @@ class RunDispatcher:
                 run_id, status="CONTEXT_BUILDING", progress=0,
                 current_step="Harness 开始执行",
             )
+            await self._publish_progress(run_id, "CONTEXT_BUILDING", 0,
+                                         "CONTEXT_BUILDING", "Harness 开始执行")
             result = await self.runner.execute(ctx)
             raw = result.get("rawArtifact", {})
             # Merge deterministic scoring metadata into the artifact.
@@ -587,7 +634,11 @@ class RunDispatcher:
                 run_id, status="COMPLETED", progress=100,
                 current_step="产物已生成",
             )
+            await self._publish_progress(run_id, "COMPLETED", 100,
+                                         "COMPLETED", "产物已生成")
         except RunCancelled:
+            await self._publish_progress(run_id, "CANCELLED", 0,
+                                         "CANCELLED", "任务已取消")
             logger.info("Harness run %s cancelled by external request", run_id)
             # Status is already CANCELLED in DB (set by cancel endpoint);
             # just ensure progress and heartbeat stop.
@@ -597,6 +648,8 @@ class RunDispatcher:
                 run_id, status="FAILED", progress=0,
                 error_message=str(exc)[:500],
             )
+            await self._publish_progress(run_id, "FAILED", 0,
+                                         "FAILED", f"执行失败: {str(exc)[:100]}")
         finally:
             heartbeat_task.cancel()
             try:

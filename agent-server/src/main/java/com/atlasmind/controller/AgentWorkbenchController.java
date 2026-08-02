@@ -6,10 +6,18 @@ import com.atlasmind.entity.User;
 import com.atlasmind.service.AgentProjectService;
 import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 项目总览、Agent Run、报告和审批入口。
@@ -21,6 +29,10 @@ public class AgentWorkbenchController {
 
     private final AgentProjectService agentProjectService;
     private final UserService userService;
+    private final StringRedisTemplate redisTemplate;
+
+    private final ExecutorService sseExecutor = Executors.newCachedThreadPool(
+            r -> new Thread(r, "sse-run-progress"));
 
     @GetMapping("/overview")
     public Result<Map<String, Object>> overview() {
@@ -82,6 +94,51 @@ public class AgentWorkbenchController {
             @PathVariable Long actionId,
             @RequestBody(required = false) Map<String, Object> request) {
         return Result.ok(agentProjectService.approveAction(runId, actionId, request == null ? Map.of() : request, currentActor()));
+    }
+
+    /**
+     * SSE endpoint that streams live Agent run progress to the frontend.
+     * Subscribes to Redis PubSub channel {@code run:{runId}:progress} and
+     * forwards every event as an SSE {@code progress} event.
+     */
+    @GetMapping(value = "/runs/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamRun(@PathVariable Long runId) {
+        SseEmitter emitter = new SseEmitter(300_000L); // 5-minute timeout
+        String channel = "run:" + runId + ":progress";
+
+        sseExecutor.execute(() -> {
+            final RedisConnection[] holder = new RedisConnection[1];
+            try {
+                holder[0] = redisTemplate.getConnectionFactory().getConnection();
+                RedisConnection conn = holder[0];
+
+                conn.subscribe((message, pattern) -> {
+                    try {
+                        String body = new String(message.getBody(), StandardCharsets.UTF_8);
+                        emitter.send(SseEmitter.event()
+                                .name("progress")
+                                .data(body));
+                    } catch (IOException e) {
+                        // Client disconnected — close from inside the listener
+                        try { holder[0].close(); } catch (Exception ignored) {}
+                    }
+                }, channel.getBytes(StandardCharsets.UTF_8));
+
+                emitter.onCompletion(() -> {
+                    try { holder[0].close(); } catch (Exception ignored) {}
+                });
+                emitter.onTimeout(() -> {
+                    try { holder[0].close(); } catch (Exception ignored) {}
+                });
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+                if (holder[0] != null) {
+                    try { holder[0].close(); } catch (Exception ignored) {}
+                }
+            }
+        });
+
+        return emitter;
     }
 
     private String currentActor() {

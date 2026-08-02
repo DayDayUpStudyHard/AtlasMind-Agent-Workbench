@@ -12,6 +12,7 @@ import logging
 from abc import ABC, abstractmethod
 
 import pymysql
+from dbutils.pooled_db import PooledDB
 from pymysql.cursors import DictCursor
 
 from app.config import settings
@@ -24,17 +25,35 @@ logger = logging.getLogger(__name__)
 from decimal import Decimal
 from datetime import date, datetime
 
+_pool: PooledDB | None = None
+
+
+def _get_pool() -> PooledDB:
+    """Return the module-level connection pool (lazy initialisation)."""
+    global _pool
+    if _pool is None:
+        _pool = PooledDB(
+            creator=pymysql,
+            maxconnections=12,
+            mincached=2,
+            maxcached=6,
+            blocking=True,
+            ping=1,  # ping MySQL before using connection
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password,
+            database=settings.mysql_db,
+            charset="utf8mb4",
+            cursorclass=DictCursor,
+            autocommit=False,
+        )
+    return _pool
+
+
 def _conn():
-    return pymysql.connect(
-        host=settings.mysql_host,
-        port=settings.mysql_port,
-        user=settings.mysql_user,
-        password=settings.mysql_password,
-        database=settings.mysql_db,
-        charset="utf8mb4",
-        cursorclass=DictCursor,
-        autocommit=False,
-    )
+    """Borrow a connection from the pool (drop-in replacement for direct pymysql.connect)."""
+    return _get_pool().connection()
 
 
 def _normalize_value(obj):

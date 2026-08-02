@@ -2,6 +2,42 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## Agent Runtime 连接池 + SSE 流式进度推送
+
+**日期**：2026-08-02
+
+### 调整原因
+
+- **Python 无连接池**：每次 DB 调用 `_conn()` 新建 `pymysql` 连接，5 个并发 Run × 每 Run ~20 次 DB 调用 = 100+ 瞬时连接，可能耗尽 MySQL `max_connections`。
+- **前端轮询延迟**：前端每 3 秒 poll `GET /api/workspace/projects/runs/{id}`，无法实时感知 Agent 进度。
+- **`last_heartbeat_at` 列缺失**：Python 迁移 V001 添加心跳列的逻辑在 MySQL 5.7 上因 `IF NOT EXISTS` 不支持而静默失败，导致恢复扫描报 `Unknown column 'last_heartbeat_at'`。
+
+### 调整过程
+
+**F8: 连接池**
+- `persistence.py` 新增 `_get_pool()`，使用 `DBUtils.PooledDB` 管理 pymysql 连接池（maxconnections=12, mincached=2, maxcached=6, ping=1）。
+- `_conn()` 改为从池中借用连接，对外接口不变。
+
+**F3: SSE 流式进度**
+- Python `runner.py` RunDispatcher 新增 `_publish_progress()` 方法，通过同步 `redis` 客户端（兼容 Redis 5.0）发布到 Redis PubSub 频道 `run:{runId}:progress`。
+- `AgentRunner` 新增 `_update_progress()` 辅助方法，替代 `execute()` 中所有 `run_store.update_run()` 调用，同时写入 DB 和发布 SSE 事件。
+- Java `AgentWorkbenchController` 新增 SSE 端点 `GET /api/workspace/projects/runs/{runId}/stream`，使用 `SseEmitter` + `RedisConnection.subscribe()` 将 PubSub 消息实时转发给前端。
+- 8 个进度事件：CONTEXT_BUILDING(0%) → CONTEXT_BUILDING(8%) → PLANNING(18%) → ANALYZING(25%) → ANALYZING(34%) → VERIFYING(72%) → PLANNING(86%) → COMPLETED(100%)。
+- `redis-py` 从 8.1.0 降级到 4.6.0，兼容 Redis 5.0（RESP2 协议，无 HELLO 命令）。
+
+**修复 `last_heartbeat_at` 列缺失**
+- 在 `agent_run` 表上执行 `ALTER TABLE ADD COLUMN last_heartbeat_at DATETIME`。
+
+### 调整结果
+
+- DB 连接池正常工作：并发 Run 时 MySQL 连接数 ≤ 12。
+- SSE 测试通过：Run 57 订阅到 6 个实时进度事件，Run 58 验证 COMPLETED(100%) 事件。
+- E2E 通过：Run 57 score=70, hash=9ac3b8e4..., 5 维分数全部正确。
+- 恢复扫描不再报 `Unknown column 'last_heartbeat_at'` 错误。
+- 新增依赖：`redis>=4.0,<5.0`、`DBUtils`。
+
+---
+
 ## Agent Runtime 可靠性增强：取消可观测 + 幂等去重 + LLM 重试熔断
 
 **日期**：2026-08-02

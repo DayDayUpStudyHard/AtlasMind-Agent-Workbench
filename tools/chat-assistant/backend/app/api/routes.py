@@ -116,6 +116,7 @@ def _init_agent_runtime():
     )
 
     _agent_dispatcher = RunDispatcher(runner, run_store, report_store)
+    runner.on_progress = _agent_dispatcher._publish_progress  # wire SSE progress
 
     # Start recovery background task
     recovery = RunRecovery(run_store)
