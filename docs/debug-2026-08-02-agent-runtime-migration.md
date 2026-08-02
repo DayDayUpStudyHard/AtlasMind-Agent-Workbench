@@ -1,3 +1,46 @@
+# 2026-08-02 Session 3 — Phase 5 Final: Switchover & Java Cleanup
+
+## Summary
+
+正式切换到 Python Agent Runtime 并清理 Java 旧 harness 代码。
+
+### Actions
+1. **`AGENT_RUNTIME` = `python`** — 正式切换，不再用 `java`/`shadow` 分支
+2. **删除 `agent/runtime/` 包** — 10 个 Java 文件全部删除：
+   - `AgentHarness.java`, `DefaultAgentHarness.java`, `AgentHarnessResult.java`
+   - `AgentTaskContext.java`, `AgentExecutionPolicy.java`
+   - `AgentToolRegistry.java`, `AgentTraceStore.java`
+   - `AgentArtifactExecutor.java`, `JdbcAgentArtifactExecutor.java`
+   - `DeterministicHealthScoringEngine.java`
+3. **删除 `AgentRunExecutor.java`** — 旧 harness 异步调度器
+4. **清理 `AgentProjectServiceImpl.java`** — 从 1892 行减至 ~900 行：
+   - 删除旧 harness 调度逻辑（`executeRun`, `completeRunSteps`, `advance`）
+   - 删除上报/Notification 代码（`createRunNotification`, `runTypeLabel`, `safeMessage`）
+   - 删除旧评分/报告生成链路（`scoreProject`, `buildReport`, `normalizeAiReport`, 等 30+ 方法）
+   - 简化为 `dispatchToPython()` — 单一 Python 调度路径
+   - `dispatchAfterCommit()` 不再读取 `AGENT_RUNTIME` 配置，直接委托 Python
+5. **清理 `AgentProjectService.java` 接口** — 移除 `executeRun(Long)` 方法声明
+6. **清理 `AgentWorkbenchSchemaInitializer.java`** — 移除 Python 拥有的表 DDL：
+   - `agent_project_memory`, `agent_run`, `agent_run_step`, `agent_report`
+   - `agent_run_trace`, `agent_tool_call`
+   - 移除 `addColumnIfMissing` 方法（不再需要）
+   - 移除孤立的 `agent_project_memory` 清理 SQL
+7. **E2E 验证** — Run 48 通过 Java→Python 桥接完成：score=70, hash=9ac3b8e4..., 5 维分数全部正确
+
+### Rollback
+
+```sql
+UPDATE system_config SET config_value='java' WHERE config_key='AGENT_RUNTIME';
+```
+需同时 revert 本 commit 恢复 `agent/runtime/` 包（旧 harness 已删除，无法直接回退到 java 模式）。
+
+### Files Changed
+- **Deleted:** `agent/runtime/` 包 (10 files), `AgentRunExecutor.java`
+- **Modified:** `AgentProjectServiceImpl.java`, `AgentProjectService.java`, `AgentWorkbenchSchemaInitializer.java`
+- **Test:** `_test_cleanup_e2e.py`
+
+---
+
 # 2026-08-02 Session 2 — Phase 3-5 Completion: Stability Verification & Switchover
 
 ## Phase 4: Stability Test Results

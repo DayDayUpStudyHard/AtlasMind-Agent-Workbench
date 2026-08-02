@@ -43,6 +43,4 @@ public interface AgentProjectService {
     void deleteReport(Long reportId);
 
     void deleteAction(Long actionId);
-
-    void executeRun(Long runId);
 }
