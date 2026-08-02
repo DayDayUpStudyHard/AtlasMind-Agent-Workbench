@@ -157,7 +157,10 @@
           <h3>生成项目接手手册</h3>
           <p>面向具体角色梳理项目定位、模块入口、启动方式、工程规范和信息缺口。</p>
 
-          <template v-if="latestOnboardingReport">
+          <div v-if="reportLoading.onboard" class="card-loading">
+            <span class="loader"></span> 正在加载报告内容...
+          </div>
+          <template v-else-if="latestOnboardingReport">
             <!-- 目标角色 -->
             <div v-if="onboardingRoles.audience" class="card-role-badge">
               <span>目标角色</span>
@@ -232,7 +235,10 @@
           <h3>研发决策助手</h3>
           <p>比较候选方案、显式列出假设与代价，并设计可回滚的验证步骤。</p>
 
-          <template v-if="latestDecisionReport">
+          <div v-if="reportLoading.decision" class="card-loading">
+            <span class="loader"></span> 正在加载报告内容...
+          </div>
+          <template v-else-if="latestDecisionReport">
             <!-- 建议结论 -->
             <div v-if="decisionRec" class="card-recommendation">
               <div class="rec-head">
@@ -468,6 +474,7 @@ const tooltipOpen = ref('')
 const onboardingHover = ref(-1)
 const artifactModal = ref({ visible: false, report: null, taskType: 'HEALTH_ANALYSIS' })
 const taskForm = ref({ runType:'HEALTH_ANALYSIS', question:'', audience:'后端研发', experienceLevel:'FAMILIAR_WITH_STACK', focusAreas:'', options:'', constraints:'' })
+const reportLoading = ref({ health: false, onboard: false, decision: false })
 
 const taskDefs = [
   { type:'HEALTH_ANALYSIS', eyebrow:'健康与交付', title:'项目健康分析', formIntro:'补充本次分析目标。健康分由规则引擎计算。', placeholder:'分析项目健康状态、关键风险和下一阶段交付计划', submitLabel:'开始健康分析' },
@@ -532,8 +539,43 @@ async function loadProject() {
     const res = await getProject(route.params.id); project.value = res.data.data
     await loadEvidence()
     if (project.value?.runs?.[0]) await selectRun(project.value.runs[0].id)
+    // Lazy-fetch full report content for structured card rendering
+    fetchFullReports()
   } catch (e) { message.error(e.response?.data?.message || '项目加载失败') }
   finally { loading.value = false }
+}
+
+/** Fetch full report (with contentJson) for each card and merge into project.reports. */
+async function fetchFullReports() {
+  if (!project.value?.runs) return
+  const reportTypeToRunType = { HEALTH_REPORT: 'HEALTH_ANALYSIS', ONBOARDING_GUIDE: 'PROJECT_ONBOARDING', DECISION_MEMO: 'ENGINEERING_DECISION' }
+  const promises = []
+  for (const run of project.value.runs) {
+    const reportType = run.runType === 'HEALTH_ANALYSIS' ? 'HEALTH_REPORT'
+      : run.runType === 'PROJECT_ONBOARDING' ? 'ONBOARDING_GUIDE'
+      : run.runType === 'ENGINEERING_DECISION' ? 'DECISION_MEMO' : null
+    if (!reportType) continue
+    const existing = project.value.reports?.find(r => (r.reportType || 'HEALTH_REPORT') === reportType)
+    if (existing?.contentJson) continue // already has full data
+    const loadingKey = reportType === 'HEALTH_REPORT' ? 'health' : reportType === 'ONBOARDING_GUIDE' ? 'onboard' : 'decision'
+    reportLoading.value[loadingKey] = true
+    promises.push(
+      getProjectRun(run.id).then(res => {
+        const fullRun = res.data.data
+        const fullReport = fullRun.report
+        if (fullReport && project.value) {
+          // Merge full report into project.reports
+          const idx = project.value.reports.findIndex(r => (r.reportType || 'HEALTH_REPORT') === reportType)
+          if (idx >= 0) {
+            project.value.reports[idx] = { ...project.value.reports[idx], ...fullReport }
+          } else if (fullReport.id) {
+            project.value.reports.push(fullReport)
+          }
+        }
+      }).catch(() => {}).finally(() => { reportLoading.value[loadingKey] = false })
+    )
+  }
+  await Promise.all(promises)
 }
 async function loadEvidence() { const r = await getProjectEvidence(route.params.id, { limit: 50 }); evidence.value = r.data.data || [] }
 async function syncEvidence() {
@@ -692,8 +734,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .card-cite-row span{padding:2px 5px;color:var(--atlas-primary);background:var(--atlas-surface-soft);font-size:9px;font-weight:800}
 .card-cite-row strong{color:var(--atlas-text);font-size:11px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
-/* Card empty / preview */
+/* Card empty / preview / loading */
 .card-empty{padding:20px 0 4px}.card-empty p{color:var(--atlas-muted);font-size:13px;line-height:1.6;margin:0 0 14px}
+.card-loading{display:flex;align-items:center;gap:9px;padding:18px 0 10px;color:var(--atlas-muted);font-size:12px}
+.card-loading .loader{width:16px;height:16px;border:2px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite;flex:0 0 auto}
 .card-report-preview{padding-top:14px}.card-preview-summary{color:var(--atlas-muted);font-size:13px;line-height:1.7;margin:0}
 
 /* ── Onboarding card ── */
