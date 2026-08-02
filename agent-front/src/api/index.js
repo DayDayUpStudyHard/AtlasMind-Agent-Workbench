@@ -54,38 +54,6 @@ export function getKbDocumentChunks(id) {
   return api.get(`/api/kb/documents/${id}/chunks`)
 }
 
-export function getProjectOverview() {
-  return api.get('/api/workspace/projects/overview')
-}
-
-export function getProject(id) {
-  return api.get(`/api/workspace/projects/${id}`)
-}
-
-export function createProject(data) {
-  return api.post('/api/workspace/projects', data)
-}
-
-export function syncProjectEvidence(projectId) {
-  return api.post(`/api/workspace/projects/${projectId}/sync`, null, { timeout: 120000 })
-}
-
-export function getProjectEvidence(projectId, params = {}) {
-  return api.get(`/api/workspace/projects/${projectId}/evidence`, { params })
-}
-
-export function getProjectSyncJobs(projectId) {
-  return api.get(`/api/workspace/projects/${projectId}/sync-jobs`)
-}
-
-export function startProjectRun(projectId, data = {}) {
-  return api.post(`/api/workspace/projects/${projectId}/runs`, data, { timeout: 120000 })
-}
-
-export function getProjectRun(runId) {
-  return api.get(`/api/workspace/projects/runs/${runId}`)
-}
-
 export function getWorkspaceNotifications(params = {}) {
   return api.get('/api/workspace/notifications', { params })
 }
@@ -117,10 +85,6 @@ export function createContractCase(data) { return api.post('/api/workspace/contr
 export function startContractRun(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/runs`, data) }
 export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
 export function approveContractAction(runId, actionId, data) { return api.post(`/api/workspace/contracts/runs/${runId}/actions/${actionId}/approval`, data) }
-
-export function approveProjectAction(runId, actionId, data = {}) {
-  return api.post(`/api/workspace/projects/runs/${runId}/actions/${actionId}/approval`, data)
-}
 
 export function createAiSession(data = {}) {
   return api.post('/api/ai/sessions', data)

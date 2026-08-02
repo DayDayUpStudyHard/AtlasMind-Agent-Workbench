@@ -363,10 +363,10 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Override
     public List<Map<String, Object>> listObligations(Long caseId) {
         return jdbcTemplate.queryForList(
-                """SELECT id, title, obligation_type AS obligationType, responsible_user_id AS responsibleUserId,
-                          due_date AS dueDate, trigger_condition AS triggerCondition, status,
-                          evidence_required AS evidenceRequired, completed_at AS completedAt
-                   FROM contract_obligation WHERE case_id=? ORDER BY due_date ASC""", caseId);
+                "SELECT id, title, obligation_type AS obligationType, responsible_user_id AS responsibleUserId,"
+                + " due_date AS dueDate, trigger_condition AS triggerCondition, status,"
+                + " evidence_required AS evidenceRequired, completed_at AS completedAt"
+                + " FROM contract_obligation WHERE case_id=? ORDER BY due_date ASC", caseId);
     }
 
     @Override

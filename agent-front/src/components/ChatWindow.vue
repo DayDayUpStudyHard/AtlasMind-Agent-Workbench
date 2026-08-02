@@ -125,7 +125,7 @@
 import { computed, ref, nextTick, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
-import { createAiSession, getAiSessionMessages, getProjectOverview } from '../api/index.js'
+import { createAiSession, getAiSessionMessages, listContracts } from '../api/index.js'
 
 const panelOpen = ref(false)
 const route = useRoute()
@@ -208,8 +208,9 @@ async function handleOpenChat(event) {
 async function loadProjects() {
   projectsLoading.value = true
   try {
-    const response = await getProjectOverview()
-    projects.value = response.data.data?.projects || []
+    const response = await listContracts()
+    const cases = response.data.data || []
+    projects.value = cases.map(c => ({ id: c.id, name: c.title || c.caseKey }))
   } catch {
     projects.value = []
   } finally {

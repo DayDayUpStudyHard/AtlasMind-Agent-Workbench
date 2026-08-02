@@ -9,10 +9,10 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class AgentActionExecutor {
 
-    private final ObjectProvider<AgentProjectService> agentProjectService;
+    private final ObjectProvider<ContractCaseService> contractCaseService;
 
     @Async("agentTaskExecutor")
     public void execute(Long runId, Long actionId) {
-        agentProjectService.getObject().executeAction(runId, actionId);
+        contractCaseService.getObject().executeAction(runId, actionId);
     }
 }

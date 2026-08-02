@@ -129,7 +129,7 @@ async function refreshRuns() {
 
 function navigateToRun(run) {
   if (run.projectId) {
-    router.push({ path: `/projects/${run.projectId}`, query: { runId: String(run.id) } })
+    router.push({ path: `/contracts/${run.subjectId || run.projectId}`, query: { runId: String(run.id) } })
   }
 }
 

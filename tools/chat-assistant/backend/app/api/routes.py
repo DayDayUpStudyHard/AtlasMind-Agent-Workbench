@@ -725,11 +725,11 @@ async def start_agent_run(
     if not request.run_id:
         raise HTTPException(status_code=400, detail="runId is required")
 
-    # Route to project or contract dispatcher based on subjectType
+    # Route to contract dispatcher (default) or project dispatcher (legacy)
     if request.subject_type == "CONTRACT_CASE":
         dispatcher = get_contract_dispatcher()
     else:
-        dispatcher = get_dispatcher()
+        dispatcher = get_contract_dispatcher()  # default to contract
 
     # Idempotency: same requestId → return existing run (no duplicate task)
     request_id = request.request_id or ""

@@ -3,23 +3,23 @@ package com.atlasmind.controller;
 import com.atlasmind.common.Result;
 import com.atlasmind.entity.KbNotification;
 import com.atlasmind.gateway.AiGateway;
-import com.atlasmind.service.AgentProjectService;
 import com.atlasmind.service.KnowledgeBaseService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-/** 工作台消息、外部模型状态和最近 Agent 轨迹。 */
+/** Workspace status: notifications, AI health, recent runs. */
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/workspace")
 public class WorkspaceStatusController {
 
     private final KnowledgeBaseService knowledgeBaseService;
-    private final AgentProjectService agentProjectService;
+    private final JdbcTemplate jdbcTemplate;
     private final AiGateway aiGateway;
 
     @GetMapping("/notifications")
@@ -66,7 +66,8 @@ public class WorkspaceStatusController {
 
     @GetMapping("/runs/recent")
     public Result<List<Map<String, Object>>> recentRuns() {
-        return Result.ok(agentProjectService.listAllRuns().stream().limit(20).toList());
+        return Result.ok(jdbcTemplate.queryForList(
+                "SELECT id, subject_type AS subjectType, run_type AS runType, status, progress, create_time AS createTime FROM agent_run ORDER BY id DESC LIMIT 20"));
     }
 
     private String safeMessage(Exception exception) {

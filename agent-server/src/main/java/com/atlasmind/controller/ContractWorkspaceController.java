@@ -6,10 +6,19 @@ import com.atlasmind.entity.User;
 import com.atlasmind.service.ContractCaseService;
 import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.data.redis.connection.RedisConnection;
+import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.MediaType;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * ContractOps workspace API — contract lifecycle management.
@@ -24,6 +33,11 @@ public class ContractWorkspaceController {
 
     private final ContractCaseService contractCaseService;
     private final UserService userService;
+    private final StringRedisTemplate redisTemplate;
+    private final JdbcTemplate jdbcTemplate;
+
+    private final ExecutorService sseExecutor = Executors.newCachedThreadPool(
+            r -> new Thread(r, "sse-contract-progress"));
 
     @GetMapping("/portfolio")
     public Result<Map<String, Object>> portfolio() {
@@ -107,6 +121,40 @@ public class ContractWorkspaceController {
     @GetMapping("/reminders")
     public Result<List<Map<String, Object>>> reminders() {
         return Result.ok(contractCaseService.listReminders());
+    }
+
+    @SuppressWarnings("unchecked")
+    @GetMapping("/memories/{memoryId}")
+    public Result<Map<String, Object>> memory(@PathVariable Long memoryId) {
+        Map<String, Object> row = jdbcTemplate.queryForMap(
+                "SELECT id, memory_type AS memoryType, title, content FROM agent_project_memory WHERE id=?", memoryId);
+        return Result.ok(row);
+    }
+
+    @GetMapping(value = "/runs/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter streamRun(@PathVariable Long runId) {
+        SseEmitter emitter = new SseEmitter(300_000L);
+        String channel = "run:" + runId + ":progress";
+        sseExecutor.execute(() -> {
+            final RedisConnection[] holder = new RedisConnection[1];
+            try {
+                holder[0] = redisTemplate.getConnectionFactory().getConnection();
+                holder[0].subscribe((message, pattern) -> {
+                    try {
+                        String body = new String(message.getBody(), StandardCharsets.UTF_8);
+                        emitter.send(SseEmitter.event().name("progress").data(body));
+                    } catch (IOException e) {
+                        try { holder[0].close(); } catch (Exception ignored) {}
+                    }
+                }, channel.getBytes(StandardCharsets.UTF_8));
+                emitter.onCompletion(() -> { try { holder[0].close(); } catch (Exception ignored) {} });
+                emitter.onTimeout(() -> { try { holder[0].close(); } catch (Exception ignored) {} });
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+                if (holder[0] != null) { try { holder[0].close(); } catch (Exception ignored) {} }
+            }
+        });
+        return emitter;
     }
 
     private String currentActor() {

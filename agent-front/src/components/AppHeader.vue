@@ -134,8 +134,9 @@ function closeNotificationPanel() { notificationOpen.value = false }
 
 function onRunStatusChange({ run }) {
   const label = { HEALTH_ANALYSIS:'健康分析', PROJECT_ONBOARDING:'项目接手', ENGINEERING_DECISION:'研发决策' }[run.runType] || 'Agent 任务'
-  if (run.status === 'COMPLETED') message.success(`${label}已完成 — ${run.projectName || ('项目 #'+run.projectId)}`)
-  else if (run.status === 'FAILED') message.error(`${label}失败 — ${run.projectName || ('项目 #'+run.projectId)}`)
+  const runLabel = run.subjectType === 'CONTRACT_CASE' ? '合同' : '项目'
+  if (run.status === 'COMPLETED') message.success(`${label}已完成 — ${runLabel} #${run.subjectId || run.projectId}`)
+  else if (run.status === 'FAILED') message.error(`${label}失败 — ${runLabel} #${run.subjectId || run.projectId}`)
 }
 
 function formatTime(v) { if (!v) return '刚刚'; const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('zh-CN',{hour12:false}) }
