@@ -88,13 +88,13 @@
                 <path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
               </svg>
             </button>
-            <a :href="portalFrontUrl" target="_blank" class="action-btn" title="打开项目工作台">
+            <a :href="portalFrontUrl" target="_blank" class="action-btn" title="打开合同工作台">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                 <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
                 <path d="M15 3h6v6" />
                 <path d="M10 14 21 3" />
               </svg>
-              <span>项目工作台</span>
+              <span>合同工作台</span>
             </a>
             <button class="icon-button logout-btn" @click="logout" title="退出登录">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
@@ -142,12 +142,12 @@ const icons = {
 }
 
 const menuItems = [
-  { path: '/', label: 'Agent 控制台', icon: icons.console },
-  { path: '/projects', label: '项目目录', icon: icons.project },
+  { path: '/', label: '合同驾驶舱', icon: icons.console },
+  { path: '/contracts', label: '合同案件管理', icon: icons.project },
   { path: '/knowledge', label: '知识来源', icon: icons.knowledge },
-  { path: '/evidence-sync', label: '项目数据同步', icon: icons.sync },
+  { path: '/evidence-sync', label: '文件解析任务', icon: icons.sync },
   { path: '/agent-runs', label: 'Agent 运行记录', icon: icons.run },
-  { path: '/reports', label: '报告与动作', icon: icons.report },
+  { path: '/reports', label: '报告与审批', icon: icons.report },
   { path: '/ai-observability', label: '可观测性', icon: icons.observe },
   { path: '/logs', label: '系统日志', icon: icons.log },
   { path: '/settings', label: '系统设置', icon: icons.settings }

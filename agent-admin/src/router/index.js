@@ -8,9 +8,9 @@ const routes = [
     component: AdminLayout,
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
-      { path: 'projects', name: 'Projects', component: () => import('../views/ProjectManage.vue') },
+      { path: 'contracts', name: 'ContractCases', component: () => import('../views/ContractCaseManage.vue') },
       { path: 'knowledge', name: 'KnowledgeBase', component: () => import('../views/KnowledgeBase.vue') },
-      { path: 'evidence-sync', name: 'EvidenceSync', component: () => import('../views/EvidenceSync.vue') },
+      { path: 'evidence-sync', name: 'EvidenceSync', component: () => import('../views/DocumentParseJobs.vue') },
       { path: 'agent-runs', name: 'AgentRuns', component: () => import('../views/AgentRuns.vue') },
       { path: 'reports', name: 'ReportsApproval', component: () => import('../views/ReportsApproval.vue') },
       { path: 'ai-observability', name: 'AiObservability', component: () => import('../views/AiObservability.vue') },

@@ -303,7 +303,7 @@ import {
   getKbDocumentChunks,
   getKbDocuments,
   getKbSpaces,
-  getProjects,
+  getContracts,
   importDebugRecord,
   permanentDeleteKbDocument,
   reindexKbDocument,
@@ -382,7 +382,7 @@ async function fetchRuntimeSettings() {
 }
 
 async function fetchProjects() {
-  const res = await getProjects()
+  const res = await getContracts()
   projects.value = res.data.data || []
 }
 

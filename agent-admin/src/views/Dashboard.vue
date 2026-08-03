@@ -2,12 +2,12 @@
   <div class="dashboard">
     <section class="page-hero">
       <div>
-        <span class="eyebrow">Agent Operations</span>
-        <h2>研发项目 Agent 控制台</h2>
-        <p>集中查看项目、证据、Agent Run、同步任务和审批状态，让后台从内容管理变成可追踪的企业 Agent 运维面板。</p>
+        <span class="eyebrow">ContractOps</span>
+        <h2>合同 Agent 控制台</h2>
+        <p>集中查看合同案件、审查发现、Agent Run、履约义务和审批状态。</p>
       </div>
       <div class="hero-actions">
-        <el-button @click="$router.push('/projects')">项目管理</el-button>
+        <el-button @click="$router.push('/contracts')">合同管理</el-button>
         <el-button type="primary" @click="$router.push('/agent-runs')">查看 Run</el-button>
       </div>
     </section>

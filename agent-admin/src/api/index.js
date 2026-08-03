@@ -43,14 +43,11 @@ export function uploadFile(file) {
 
 export function getOperationLogs(params) { return api.get('/api/admin/logs', { params }) }
 
-export function getProjects() { return api.get('/api/admin/projects') }
-export function getProject(id) { return api.get(`/api/admin/projects/${id}`) }
-export function getProjectEvidence(projectId, params = {}) {
-  return api.get(`/api/admin/projects/${projectId}/evidence`, { params })
-}
-export function getProjectSyncJobs(projectId) { return api.get(`/api/admin/projects/${projectId}/sync-jobs`) }
-export function getProjectRun(runId) { return api.get(`/api/admin/projects/runs/${runId}`) }
-export function getAgentRuns() { return api.get('/api/admin/projects/runs') }
+export function getContracts() { return api.get('/api/workspace/contracts') }
+export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
+export function getContractPortfolio() { return api.get('/api/workspace/contracts/portfolio') }
+export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
+export function getAgentRuns() { return api.get('/api/workspace/runs/recent') }
 export function getAgentReports() { return api.get('/api/admin/projects/reports') }
 export function getAgentActions(params = {}) { return api.get('/api/admin/projects/actions', { params }) }
 export function deleteAgentRun(id) { return api.delete(`/api/admin/projects/runs/${id}`) }

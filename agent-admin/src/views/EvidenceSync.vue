@@ -38,7 +38,7 @@
 
 <script setup>
 import { onMounted, ref } from 'vue'
-import { getProjects } from '../api/index.js'
+import { getContracts } from '../api/index.js'
 
 const loading = ref(false)
 const projects = ref([])
@@ -54,7 +54,7 @@ onMounted(fetchProjects)
 async function fetchProjects() {
   loading.value = true
   try {
-    projects.value = (await getProjects()).data.data || []
+    projects.value = (await getContracts()).data.data || []
   } finally {
     loading.value = false
   }
