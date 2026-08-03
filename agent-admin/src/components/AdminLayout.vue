@@ -143,9 +143,9 @@ const icons = {
 
 const menuItems = [
   { path: '/', label: '合同驾驶舱', icon: icons.console },
-  { path: '/contracts', label: '合同案件管理', icon: icons.project },
-  { path: '/knowledge', label: '知识来源', icon: icons.knowledge },
-  { path: '/evidence-sync', label: '文件解析任务', icon: icons.sync },
+  { path: '/rules', label: '审查规则管理', icon: icons.project },
+  { path: '/clauses', label: '标准条款库', icon: icons.knowledge },
+  { path: '/knowledge', label: '知识来源', icon: icons.sync },
   { path: '/agent-runs', label: 'Agent 运行记录', icon: icons.run },
   { path: '/reports', label: '报告与审批', icon: icons.report },
   { path: '/ai-observability', label: '可观测性', icon: icons.observe },

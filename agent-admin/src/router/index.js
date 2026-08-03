@@ -8,7 +8,8 @@ const routes = [
     component: AdminLayout,
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
-      { path: 'contracts', name: 'ContractCases', component: () => import('../views/ContractCaseManage.vue') },
+      { path: 'rules', name: 'ReviewRules', component: () => import('../views/RuleManage.vue') },
+      { path: 'clauses', name: 'StandardClauses', component: () => import('../views/ClauseLibrary.vue') },
       { path: 'knowledge', name: 'KnowledgeBase', component: () => import('../views/KnowledgeBase.vue') },
       { path: 'evidence-sync', name: 'EvidenceSync', component: () => import('../views/DocumentParseJobs.vue') },
       { path: 'agent-runs', name: 'AgentRuns', component: () => import('../views/AgentRuns.vue') },
