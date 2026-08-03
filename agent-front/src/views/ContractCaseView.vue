@@ -36,14 +36,29 @@
 
     <!-- Documents -->
     <section class="side-section">
-      <h3>合同文件 · {{ c.documents?.length || 0 }} 份</h3>
+      <div class="section-header">
+        <h3>合同文件 · {{ c.documents?.length || 0 }} 份</h3>
+        <button class="quiet-button small" @click="showUpload = !showUpload">{{ showUpload ? '取消' : '+ 上传文件' }}</button>
+      </div>
+
+      <!-- Upload form -->
+      <div v-if="showUpload" class="upload-form">
+        <div class="upload-row">
+          <select v-model="upload.docType"><option value="MAIN">主合同</option><option value="ATTACHMENT">附件</option><option value="PRICING">报价单</option><option value="CERTIFICATE">资质证明</option></select>
+          <input v-model.trim="upload.fileName" placeholder="文件名（如：服务采购合同 v3.pdf）" />
+          <input v-model.trim="upload.filePath" placeholder="文件路径或 URL" />
+          <button class="quiet-button small" @click="doUpload" :disabled="!upload.fileName">上传</button>
+        </div>
+        <small class="upload-hint">MVP 阶段：填写文件名和路径即可登记。完整文件解析（PDF/OCR/条款抽取）在 Phase 2。</small>
+      </div>
+
       <div v-if="c.documents?.length">
         <div v-for="d in c.documents" :key="d.id" class="doc-row">
           <span>{{ docTypeLabel(d.documentType) }}</span><strong>{{ d.fileName }}</strong>
           <small>v{{ d.version }} · {{ d.parseStatus }}</small>
         </div>
       </div>
-      <div v-else class="blank-state">尚未上传合同文件。</div>
+      <div v-else-if="!showUpload" class="blank-state">尚未上传合同文件。</div>
     </section>
 
     <!-- Runs -->
@@ -87,6 +102,8 @@ import api from '../api/index.js'
 
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const running = ref(false)
+const showUpload = ref(false)
+const upload = ref({ docType: 'MAIN', fileName: '', filePath: '' })
 
 onMounted(async () => {
   try {
@@ -96,12 +113,28 @@ onMounted(async () => {
   finally { loading.value = false }
 })
 
+async function doUpload() {
+  if (!upload.value.fileName) return
+  try {
+    await api.post(`/api/workspace/contracts/${route.params.id}/documents`, {
+      documentType: upload.value.docType,
+      fileName: upload.value.fileName,
+      filePath: upload.value.filePath || `uploads/${upload.value.fileName}`
+    })
+    message.success('文件已登记')
+    upload.value = { docType: 'MAIN', fileName: '', filePath: '' }
+    showUpload.value = false
+    // Refresh
+    const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
+    c.value = r.data.data
+  } catch (e) { message.error('上传失败') }
+}
+
 async function startRun(taskType) {
   running.value = true
   try {
-    const r = await api.post(`/api/workspace/contracts/${route.params.id}/runs`, { taskType, triggerType: 'MANUAL', question: taskType === 'CONTRACT_REVIEW' ? '审查当前合同版本' : '发起合同材料准备' })
+    await api.post(`/api/workspace/contracts/${route.params.id}/runs`, { taskType, triggerType: 'MANUAL', question: taskType === 'CONTRACT_REVIEW' ? '审查当前合同版本' : '发起合同材料准备' })
     message.success('Agent 任务已创建')
-    // Refresh in a moment
     setTimeout(async () => { const r2 = await api.get(`/api/workspace/contracts/${route.params.id}`); c.value = r2.data.data }, 2000)
   } catch (e) { message.error('启动失败') }
   finally { running.value = false }
@@ -161,6 +194,13 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .finding-sev.sev-medium{color:var(--atlas-warning);background:rgba(167,121,61,.08)}
 .finding-sev.sev-low{color:#7d9a87;background:rgba(125,154,135,.08)}
 .run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
+.section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.section-header h3{margin:0!important}
+.upload-form{margin:12px 0;padding:14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
+.upload-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.upload-row select,.upload-row input{min-height:34px;padding:4px 8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-text);font-size:12px}
+.upload-row input{flex:1;min-width:150px}
+.upload-hint{display:block;margin-top:8px;color:var(--atlas-subtle);font-size:10px}
 .blank-state{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px}
 .loading-block{display:flex;align-items:center;justify-content:center;gap:9px;min-height:50vh;color:var(--atlas-muted)}
 .loader{width:20px;height:20px;border:3px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite}
