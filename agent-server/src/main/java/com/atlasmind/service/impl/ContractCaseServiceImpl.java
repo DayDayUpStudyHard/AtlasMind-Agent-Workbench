@@ -218,8 +218,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if (taskType.isBlank()) taskType = "CONTRACT_REVIEW";
 
         Long runId = insert("""
-                INSERT INTO agent_run (subject_type, subject_id, run_type, trigger_type, question, input_json, status, progress, current_step)
-                VALUES (?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
+                INSERT INTO agent_run (subject_type, subject_id, project_id, run_type, trigger_type, question, input_json, status, progress, current_step)
+                VALUES (?,?,0,?,?,?,?,'CREATED',0,'等待 Agent 调度')
                 """, SUBJECT_TYPE, caseId, taskType,
                 str(request, "triggerType"), str(request, "question"),
                 json(request.get("inputJson")));

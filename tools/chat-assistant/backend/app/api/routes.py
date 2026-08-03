@@ -153,6 +153,9 @@ def _init_contract_runtime():
     from app.agent_runtime.runner import AgentRunner, RunDispatcher
     from app.agent_runtime.contract_tools import ContractToolRegistry
     from app.agent_runtime.contract_store import ContractStore
+    from app.agent_runtime.recovery import RunRecovery
+    from app.agent_runtime.worker import AgentRunWorker
+    from app.config import settings
 
     run_store = MySqlRunStore()
     trace_store = MySqlTraceStore()
@@ -172,8 +175,15 @@ def _init_contract_runtime():
     _contract_dispatcher = RunDispatcher(runner, run_store, report_store)
     runner.on_progress = _contract_dispatcher._publish_progress
 
+    # Start recovery + stream worker (same infrastructure as project mode)
+    recovery = RunRecovery(run_store)
+    global _agent_recovery_task, _agent_worker, _agent_worker_task
+    _agent_recovery_task = asyncio.create_task(recovery.run_forever())
+    _agent_worker = AgentRunWorker(_contract_dispatcher, redis_url=settings.redis_url)
+    _agent_worker_task = asyncio.create_task(_agent_worker.run_forever())
+
     _contract_initialized = True
-    logger.info("Contract Agent Runtime initialised")
+    logger.info("Contract Agent Runtime initialised (stores, runner, recovery, stream-worker)")
 
 
 def get_contract_dispatcher():
