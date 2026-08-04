@@ -453,7 +453,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Transactional
     public Map<String, Object> confirmIntake(
             Long intakeId, Map<String, Object> request, Long userId) {
-        Map<String, Object> intake = lockIntake(intakeId, userId);
+        Map<String, Object> intake = lockIntakeForConfirmation(intakeId, userId);
         String status = str(intake, "status");
         if ("CONFIRMED".equals(status)) {
             Long existingCaseId = numberAsLong(intake.get("caseId"));
@@ -541,8 +541,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         jdbcTemplate.update("""
                 UPDATE contract_intake
                 SET status='CONFIRMED', confirmed_json=?, case_id=?, error_message=NULL
-                WHERE id=? AND created_by=?
-                """, json(caseRequest), caseId, intakeId, userId);
+                WHERE id=?
+                """, json(caseRequest), caseId, intakeId);
 
         return Map.of("intakeId", intakeId, "status", "CONFIRMED", "case", getCase(caseId));
     }
@@ -1207,6 +1207,23 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        case_id AS caseId
                 FROM contract_intake WHERE id=? AND created_by=? FOR UPDATE
                 """, intakeId, userId));
+        if (intake == null) throw new IllegalArgumentException("合同识别任务不存在");
+        return intake;
+    }
+
+    private Map<String, Object> lockIntakeForConfirmation(Long intakeId, Long userId) {
+        Map<String, Object> intake = first(jdbcTemplate.queryForList("""
+                SELECT i.id, i.status, i.file_name AS fileName, i.content_text AS contentText,
+                       i.case_id AS caseId
+                FROM contract_intake i
+                LEFT JOIN contract_case c ON c.id=i.case_id AND c.deleted=0
+                WHERE i.id=?
+                  AND (
+                    i.created_by=?
+                    OR (i.case_id IS NOT NULL AND (c.owner_id=? OR i.created_by IS NULL))
+                  )
+                FOR UPDATE
+                """, intakeId, userId, userId));
         if (intake == null) throw new IllegalArgumentException("合同识别任务不存在");
         return intake;
     }

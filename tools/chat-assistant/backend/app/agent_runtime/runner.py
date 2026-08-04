@@ -855,6 +855,12 @@ class AgentRunner:
                 with _conn() as conn:
                     with conn.cursor() as cur:
                         cur.execute(
+                            "SELECT owner_id FROM contract_case WHERE id=%s",
+                            (case_id,),
+                        )
+                        case_row = cur.fetchone() or {}
+                        owner_id = case_row.get("owner_id")
+                        cur.execute(
                             """SELECT id FROM contract_intake
                                WHERE case_id=%s AND source_type='FILE' AND status='NEEDS_CONFIRMATION'
                                ORDER BY id DESC LIMIT 1""",
@@ -863,19 +869,20 @@ class AgentRunner:
                         existing = cur.fetchone()
                         if existing:
                             cur.execute(
-                                """UPDATE contract_intake SET validated_json=%s, error_message=NULL
+                                """UPDATE contract_intake
+                                   SET validated_json=%s, created_by=COALESCE(created_by, %s), error_message=NULL
                                    WHERE id=%s""",
-                                (_json.dumps(validated, ensure_ascii=False), existing["id"]),
+                                (_json.dumps(validated, ensure_ascii=False), owner_id, existing["id"]),
                             )
                         else:
                             cur.execute(
                                 """INSERT INTO contract_intake
                                    (status, source_type, file_name, content_text, content_hash,
-                                    validated_json, schema_version, prompt_version, case_id)
-                                   VALUES ('NEEDS_CONFIRMATION','FILE',%s,%s,%s,%s,%s,%s,%s)""",
+                                    validated_json, schema_version, prompt_version, case_id, created_by)
+                                   VALUES ('NEEDS_CONFIRMATION','FILE',%s,%s,%s,%s,%s,%s,%s,%s)""",
                                 (file_name, text, content_hash,
                                  _json.dumps(validated, ensure_ascii=False),
-                                 "contract-intake-v1", "contract-intake-v1", case_id),
+                                 "contract-intake-v1", "contract-intake-v1", case_id, owner_id),
                             )
                     conn.commit()
             await _run_sync(_upsert_intake)
