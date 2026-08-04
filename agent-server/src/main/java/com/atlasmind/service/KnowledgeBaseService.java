@@ -41,6 +41,10 @@ public interface KnowledgeBaseService {
 
     void bindDocumentProjects(Long documentId, List<Long> projectIds);
 
+    void updateDocumentContractUsage(Long documentId, String scope, List<Long> caseIds);
+
+    List<Map<String, Object>> listContractKnowledge(Long caseId);
+
     Map<String, Object> importDebugRecord() throws IOException;
 
     void softDeleteDocument(Long id);

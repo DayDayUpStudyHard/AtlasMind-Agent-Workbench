@@ -32,6 +32,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Stream;
 
 /**
@@ -114,6 +115,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         Page<KbDocument> result = documentMapper.selectPage(new Page<>(page, size), query);
         fillLatestJobs(result.getRecords());
         fillBoundProjects(result.getRecords());
+        fillBoundContracts(result.getRecords());
         return result;
     }
 
@@ -218,9 +220,17 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         document.setEmbeddingModel(embeddingModel);
         document.setEmbeddingDim(embeddingDim);
         document.setIndexName("kb_chunks");
+        document.setContractUsageScope(projectIds == null || projectIds.isEmpty() ? "DISABLED" : "SPECIFIC_CASES");
+        document.setContractUsageSummary(projectIds == null || projectIds.isEmpty()
+                ? "不用于合同 Agent"
+                : "仅用于指定合同");
+        document.setContractUsageUpdatedAt(LocalDateTime.now());
         document.setDeleted(0);
         documentMapper.insert(document);
         bindDocumentProjects(document.getId(), projectIds == null ? List.of() : projectIds);
+        if (projectIds != null && !projectIds.isEmpty()) {
+            updateDocumentContractUsage(document.getId(), "SPECIFIC_CASES", projectIds);
+        }
 
         KbIngestJob job = createJob(document.getId(), jobType);
         triggerIngest(document, job);
@@ -256,6 +266,9 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
             document.setEmbeddingModel(embeddingModel);
             document.setEmbeddingDim(embeddingDim);
             document.setIndexName("kb_chunks");
+            document.setContractUsageScope("DISABLED");
+            document.setContractUsageSummary("不用于合同 Agent");
+            document.setContractUsageUpdatedAt(LocalDateTime.now());
             document.setDeleted(0);
             documentMapper.insert(document);
         } else {
@@ -281,6 +294,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         document.setStatus("DISABLED");
         documentMapper.updateById(document);
         jdbcTemplate.update("DELETE FROM project_kb_document WHERE document_id=?", id);
+        jdbcTemplate.update("DELETE FROM contract_kb_document WHERE document_id=?", id);
         try {
             aiGateway.deleteDocumentIndex(id);
         } catch (Exception e) {
@@ -331,6 +345,7 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
             createFailureNotification(Map.of("documentId", id), e.getMessage());
         }
         jdbcTemplate.update("DELETE FROM project_kb_document WHERE document_id=?", id);
+        jdbcTemplate.update("DELETE FROM contract_kb_document WHERE document_id=?", id);
         chunkMapper.hardDeleteByDocumentId(id);
         documentMapper.hardDeleteById(id);
         if (document.getFilePath() != null) {
@@ -366,6 +381,73 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
                     ON DUPLICATE KEY UPDATE usage_type=VALUES(usage_type)
                     """, projectId, documentId);
         }
+    }
+
+    @Override
+    @Transactional
+    public void updateDocumentContractUsage(Long documentId, String scope, List<Long> caseIds) {
+        requireDocument(documentId);
+        String normalizedScope = normalizeContractUsageScope(scope);
+        jdbcTemplate.update("DELETE FROM contract_kb_document WHERE document_id=?", documentId);
+        if ("SPECIFIC_CASES".equals(normalizedScope)) {
+            List<Long> ids = caseIds == null ? List.of() : caseIds.stream()
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .toList();
+            for (Long caseId : ids) {
+                Integer exists = jdbcTemplate.queryForObject(
+                        "SELECT COUNT(*) FROM contract_case WHERE id=? AND deleted=0",
+                        Integer.class,
+                        caseId
+                );
+                if (exists == null || exists == 0) continue;
+                jdbcTemplate.update("""
+                        INSERT INTO contract_kb_document (case_id, document_id, usage_type)
+                        VALUES (?, ?, 'CONTRACT_AGENT_CONTEXT')
+                        ON DUPLICATE KEY UPDATE usage_type=VALUES(usage_type)
+                        """, caseId, documentId);
+            }
+        }
+        String summary = switch (normalizedScope) {
+            case "GLOBAL" -> "全部合同可用";
+            case "SPECIFIC_CASES" -> "仅用于指定合同";
+            default -> "不用于合同 Agent";
+        };
+        jdbcTemplate.update("""
+                UPDATE kb_document
+                SET contract_usage_scope=?,
+                    contract_usage_summary=?,
+                    contract_usage_updated_at=NOW()
+                WHERE id=?
+                """, normalizedScope, summary, documentId);
+    }
+
+    @Override
+    public List<Map<String, Object>> listContractKnowledge(Long caseId) {
+        if (caseId == null) return List.of();
+        return jdbcTemplate.queryForList("""
+                SELECT d.id, d.title, d.file_name AS fileName, d.file_type AS fileType,
+                       d.status, d.chunk_count AS chunkCount, d.contract_usage_scope AS contractUsageScope,
+                       d.contract_usage_summary AS contractUsageSummary,
+                       d.contract_usage_updated_at AS contractUsageUpdatedAt,
+                       s.name AS spaceName
+                FROM kb_document d
+                LEFT JOIN kb_space s ON s.id=d.space_id
+                WHERE COALESCE(d.deleted,0)=0
+                  AND d.status='READY'
+                  AND (
+                    d.contract_usage_scope='GLOBAL'
+                    OR (
+                      d.contract_usage_scope='SPECIFIC_CASES'
+                      AND EXISTS (
+                        SELECT 1 FROM contract_kb_document ckd
+                        WHERE ckd.document_id=d.id AND ckd.case_id=?
+                      )
+                    )
+                  )
+                ORDER BY FIELD(d.contract_usage_scope,'SPECIFIC_CASES','GLOBAL'), d.update_time DESC
+                LIMIT 30
+                """, caseId);
     }
 
     @Override
@@ -539,6 +621,36 @@ public class KnowledgeBaseServiceImpl implements KnowledgeBaseService {
         for (KbDocument document : documents) {
             document.setBoundProjects(byDocument.getOrDefault(document.getId(), List.of()));
         }
+    }
+
+    private void fillBoundContracts(List<KbDocument> documents) {
+        if (documents == null || documents.isEmpty()) return;
+        List<Long> documentIds = documents.stream().map(KbDocument::getId).toList();
+        List<Map<String, Object>> rows = jdbcTemplate.queryForList("""
+                SELECT ckd.document_id AS documentId, c.id AS caseId, c.case_key AS caseKey, c.title AS caseTitle
+                FROM contract_kb_document ckd
+                JOIN contract_case c ON c.id=ckd.case_id
+                WHERE ckd.document_id IN (%s) AND c.deleted=0
+                ORDER BY c.update_time DESC
+                """.formatted(documentIds.stream().map(id -> "?").reduce((a, b) -> a + "," + b).orElse("NULL")),
+                documentIds.toArray());
+        Map<Long, List<Map<String, Object>>> byDocument = new HashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long documentId = row.get("documentId") instanceof Number number ? number.longValue() : null;
+            if (documentId == null) continue;
+            byDocument.computeIfAbsent(documentId, ignored -> new java.util.ArrayList<>()).add(row);
+        }
+        for (KbDocument document : documents) {
+            document.setBoundContracts(byDocument.getOrDefault(document.getId(), List.of()));
+        }
+    }
+
+    private String normalizeContractUsageScope(String scope) {
+        String value = scope == null ? "" : scope.trim().toUpperCase(Locale.ROOT);
+        if (value.equals("GLOBAL") || value.equals("SPECIFIC_CASES") || value.equals("DISABLED")) {
+            return value;
+        }
+        return "DISABLED";
     }
 
     private KbSpace requireSpace(Long spaceId) {

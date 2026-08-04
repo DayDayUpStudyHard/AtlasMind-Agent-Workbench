@@ -4,6 +4,7 @@ import com.atlasmind.gateway.AiGateway;
 import com.atlasmind.gateway.GitHubIssueGateway;
 import com.atlasmind.service.AgentActionExecutor;
 import com.atlasmind.service.ContractCaseService;
+import com.atlasmind.service.KnowledgeBaseService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,6 +59,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private final AiGateway aiGateway;
     private final GitHubIssueGateway gitHubIssueGateway;
     private final AgentActionExecutor agentActionExecutor;
+    private final KnowledgeBaseService knowledgeBaseService;
 
     // ── Portfolio ──────────────────────────────────────────────────
 
@@ -247,7 +249,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 + " parse_error AS parseError, page_count AS pageCount,"
                 + " content_text IS NOT NULL AS hasInlineText,"
                 + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime"
-                + " FROM contract_document WHERE case_id=? ORDER BY version DESC", caseId));
+                + " FROM contract_document WHERE case_id=? AND COALESCE(deleted,0)=0 ORDER BY version DESC", caseId));
         List<Map<String, Object>> findings = jdbcTemplate.queryForList("""
                 SELECT f.id, f.rule_id AS ruleId,
                        COALESCE(f.rule_key, r.rule_key) AS ruleKey,
@@ -271,6 +273,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         c.put("obligations", jdbcTemplate.queryForList(
                 "SELECT id, title, obligation_type AS obligationType, responsible_user_id AS responsibleUserId, due_date AS dueDate, status FROM contract_obligation WHERE case_id=? ORDER BY due_date ASC", caseId));
         c.put("timelineNodes", buildTimelineNodes(c));
+        c.put("availableKnowledge", knowledgeBaseService.listContractKnowledge(caseId));
         c.put("runs", jdbcTemplate.queryForList(
                 "SELECT id, run_type AS runType, status, progress, current_step AS currentStep, create_time AS createTime FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
         List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
@@ -630,7 +633,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 + " parse_error AS parseError, page_count AS pageCount,"
                 + " content_text IS NOT NULL AS hasInlineText,"
                 + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime"
-                + " FROM contract_document WHERE case_id=? ORDER BY version DESC", caseId);
+                + " FROM contract_document WHERE case_id=? AND COALESCE(deleted,0)=0 ORDER BY version DESC", caseId);
     }
 
     // ── Agent Run delegation ───────────────────────────────────────
@@ -1288,7 +1291,15 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        fc.confirmed_by AS confirmedBy, fc.confirmed_at AS confirmedAt,
                        fc.create_time AS createTime, fc.update_time AS updateTime,
                        r.status AS runStatus, r.progress AS runProgress,
-                       r.current_step AS runCurrentStep
+                       r.current_step AS runCurrentStep,
+                       EXISTS (
+                         SELECT 1 FROM contract_document d
+                         WHERE d.case_id=fc.case_id
+                           AND d.document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                           AND COALESCE(d.deleted,0)=0
+                           AND d.parse_status <> 'FAILED'
+                           AND d.update_time > COALESCE(fc.update_time, fc.create_time)
+                       ) AS needsRecheck
                 FROM contract_fulfillment_check fc
                 LEFT JOIN agent_run r ON r.id=fc.run_id
                 WHERE fc.case_id=?

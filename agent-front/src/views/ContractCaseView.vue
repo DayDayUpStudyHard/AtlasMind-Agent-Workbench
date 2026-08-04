@@ -60,14 +60,37 @@
               <small v-if="node.responsibleParty"> · {{ timelinePartyLabel(node.responsibleParty) }}</small>
               <small v-if="node.confidence != null"> · 置信度 {{ confidenceLabel(node.confidence) }}</small>
             </div>
+            <div v-if="timelineCondition(node)" class="timeline-date-resolution">
+              <strong>{{ relativeDateResult(node).label }}</strong>
+              <select
+                v-if="relativeDateResult(node).needsChoice"
+                v-model="timelineBaseSelection[timelineKey(node)]"
+              >
+                <option value="">选择基准日期</option>
+                <option v-for="candidate in relativeDateResult(node).candidates" :key="candidate.key" :value="candidate.value">
+                  {{ candidate.label }} · {{ candidate.value }}
+                </option>
+              </select>
+              <small>{{ relativeDateResult(node).hint }}</small>
+            </div>
             <details v-if="timelineQuote(node) || timelineCondition(node)" class="timeline-evidence">
-              <summary>查看证据与复核</summary>
+              <summary>原文依据与复核</summary>
               <blockquote v-if="timelineQuote(node)">“{{ timelineQuote(node) }}”</blockquote>
               <p v-if="timelineCondition(node)" class="timeline-condition">触发条件：{{ timelineCondition(node) }}</p>
               <p v-if="timelineEnrichmentReason(node)" class="timeline-review-note">
                 Agent 复核：{{ timelineEnrichmentReason(node) }}
               </p>
             </details>
+            <div v-if="timelineConsequence(node).explicit || timelineConsequence(node).ai" class="timeline-consequence">
+              <div v-if="timelineConsequence(node).explicit">
+                <span>合同原文明确约定</span>
+                <p>{{ timelineConsequence(node).explicit }}</p>
+              </div>
+              <div v-if="timelineConsequence(node).ai">
+                <span>AI 推断，仅供参考，不代表合同约定</span>
+                <p>{{ timelineConsequence(node).ai }}</p>
+              </div>
+            </div>
             <div v-if="canFulfillmentCheck(node)" class="fulfillment-box">
               <div class="fulfillment-head">
                 <div>
@@ -88,10 +111,29 @@
                   <span>风险 {{ levelLabel(latestFulfillmentCheck(node).riskLevel) }}</span>
                   <span>可信度 {{ levelLabel(latestFulfillmentCheck(node).confidenceLevel) }}</span>
                   <span v-if="latestFulfillmentCheck(node).manualResult">人工：{{ manualResultLabel(latestFulfillmentCheck(node).manualResult) }}</span>
+                  <span v-if="latestFulfillmentCheck(node).needsRecheck">新证据待重新核验</span>
+                </div>
+                <div v-if="latestFulfillmentCheck(node).explicitConsequence || latestFulfillmentCheck(node).aiRisk" class="timeline-consequence">
+                  <div v-if="latestFulfillmentCheck(node).explicitConsequence">
+                    <span>合同原文明确约定</span>
+                    <p>{{ latestFulfillmentCheck(node).explicitConsequence }}</p>
+                  </div>
+                  <div v-if="latestFulfillmentCheck(node).aiRisk">
+                    <span>AI 推断，仅供参考，不代表合同约定</span>
+                    <p>{{ latestFulfillmentCheck(node).aiRisk }}</p>
+                  </div>
                 </div>
                 <div v-if="arrayField(latestFulfillmentCheck(node).missingEvidenceJson).length" class="fulfillment-list">
                   <small>缺失证据</small>
                   <ul><li v-for="item in arrayField(latestFulfillmentCheck(node).missingEvidenceJson)" :key="item">{{ item }}</li></ul>
+                </div>
+                <div v-if="arrayField(latestFulfillmentCheck(node).evidenceSnapshotJson).length" class="fulfillment-list evidence-snapshot">
+                  <small>证据快照</small>
+                  <ul>
+                    <li v-for="item in arrayField(latestFulfillmentCheck(node).evidenceSnapshotJson)" :key="item.documentId || item.fileName || item.snippet">
+                      {{ evidenceSnapshotLabel(item) }}
+                    </li>
+                  </ul>
                 </div>
                 <details class="fulfillment-history">
                   <summary>查看 {{ fulfillmentHistory(node).length }} 次核验历史</summary>
@@ -113,6 +155,15 @@
         </article>
       </div>
       <div v-else class="timeline-empty">{{ timelineEmptyText() }}</div>
+    </section>
+
+    <section class="side-section" v-if="availableKnowledge.length">
+      <h3>本合同可用知识 · {{ availableKnowledge.length }} 份</h3>
+      <div v-for="doc in availableKnowledge" :key="doc.id" class="knowledge-row">
+        <span :class="'knowledge-scope ' + scopeClass(doc.contractUsageScope)">{{ knowledgeScopeLabel(doc.contractUsageScope) }}</span>
+        <strong>{{ doc.title }}</strong>
+        <small>{{ doc.contractUsageSummary || '用于合同风险审查与履约核验' }}</small>
+      </div>
     </section>
 
     <!-- Review overview -->
@@ -371,7 +422,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import api from '../api/index.js'
@@ -386,7 +437,9 @@ const showIntakeModal = ref(false)
 const intakeFields = ref(null)
 const confirming = ref(false)
 const selectedTask = ref('VERSION_REVIEW')
+const timelineBaseSelection = reactive({})
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
+const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 
 const primaryAction = computed(() => {
   const status = c.value.status
@@ -680,8 +733,9 @@ function timelineKey(node) { return `${node.id || ''}-${node.label || ''}-${time
 function timelineDateValue(node) { return node.nodeDate || node.date || '' }
 function timelineCondition(node) { return node.conditionText || node.condition || '' }
 function timelineDateLabel(node) {
+  const result = relativeDateResult(node)
+  if (result.display) return result.display
   if (timelineDateValue(node)) return timelineDateValue(node)
-  if (timelineCondition(node)) return timelineCondition(node)
   return '待确认'
 }
 function timelineMeaning(node) {
@@ -701,6 +755,106 @@ function timelineQuote(node) {
 function timelineEnrichmentReason(node) {
   const citation = timelineCitation(node)
   return citation?.timelineEnrichment?.reason || ''
+}
+function timelineConsequence(node) {
+  const check = latestFulfillmentCheck(node) || {}
+  return {
+    explicit: check.explicitConsequence || '',
+    ai: check.aiRisk || '',
+  }
+}
+function relativeDateResult(node) {
+  const condition = timelineCondition(node)
+  const raw = String(condition || '').replace(/\s+/g, '')
+  if (!raw) return { display: '', hint: '', candidates: [], needsChoice: false }
+  const amountMatch = raw.match(/(\d{1,3})/)
+  const amount = amountMatch ? Number(amountMatch[1]) : null
+  const candidates = []
+  const addCandidate = (key, label, value, direction = 'after') => {
+    if (!value) return
+    candidates.push({ key, label, value, direction })
+  }
+  if (raw.includes('期满前') || raw.includes('到期前') || raw.includes('合同期满前')) {
+    addCandidate('expiryDate', '合同到期/期满日', c.value?.expiryDate)
+  }
+  if (raw.includes('生效后') || raw.includes('生效日起') || raw.includes('自生效')) {
+    addCandidate('effectiveDate', '合同生效日', c.value?.effectiveDate)
+  }
+  if (raw.includes('签订合同后') || raw.includes('签署后') || raw.includes('签订后')) {
+    if (c.value?.signedAt) addCandidate('signedAt', '合同签订日', c.value.signedAt)
+  }
+  if (raw.includes('合同期内') || raw.includes('有效期内')) {
+    if (c.value?.effectiveDate) addCandidate('effectiveDate', '合同生效日', c.value.effectiveDate)
+    if (c.value?.expiryDate) addCandidate('expiryDate', '合同到期/期满日', c.value.expiryDate)
+  }
+  const selected = timelineBaseSelection[timelineKey(node)] || (candidates.length === 1 ? candidates[0].value : '')
+  const resolved = selected ? resolveRelativeDate(raw, selected) : null
+  if (resolved) {
+    return {
+      display: `计算结果：${resolved}`,
+      hint: `基准日期：${selected}`,
+      candidates,
+      needsChoice: candidates.length > 1,
+    }
+  }
+  if (candidates.length > 1) {
+    return {
+      display: `相对期限：${condition}`,
+      hint: '存在多个基准日期候选，请先选择后再计算。AI 不会替你猜。',
+      candidates,
+      needsChoice: true,
+    }
+  }
+  const missing = raw.includes('签订合同后') || raw.includes('签署后') || raw.includes('签订后')
+    ? '缺少合同签订日期'
+    : raw.includes('期满前') || raw.includes('到期前') || raw.includes('合同期满前')
+      ? '缺少合同到期/期满日期'
+      : raw.includes('生效后') || raw.includes('生效日起') || raw.includes('自生效')
+        ? '缺少合同生效日期'
+        : '缺少可计算的基准日期'
+  return {
+    display: `相对期限：${condition}`,
+    hint: `${missing}，暂不自动计算。`,
+    candidates,
+    needsChoice: false,
+  }
+}
+function resolveRelativeDate(condition, baseValue) {
+  const amountMatch = String(condition || '').match(/(\d{1,3})/)
+  if (!amountMatch) return ''
+  const amount = Number(amountMatch[1])
+  const sign = /前/.test(condition) ? -1 : 1
+  const base = new Date(`${String(baseValue).slice(0, 10)}T00:00:00`)
+  if (Number.isNaN(base.getTime())) return ''
+  if (/(月|个月)/.test(condition)) {
+    base.setMonth(base.getMonth() + sign * amount)
+  } else if (/(年)/.test(condition)) {
+    base.setFullYear(base.getFullYear() + sign * amount)
+  } else {
+    base.setDate(base.getDate() + sign * amount)
+  }
+  return formatYmd(base)
+}
+function formatYmd(date) {
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  const d = String(date.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+function evidenceSnapshotLabel(item) {
+  if (!item) return '未命中快照'
+  const parts = [
+    item.fileName || item.title || `文档#${item.documentId || ''}`,
+    item.version != null ? `v${item.version}` : '',
+    item.snippet || '',
+  ].filter(Boolean)
+  return parts.join(' · ')
+}
+function knowledgeScopeLabel(scope) {
+  return { GLOBAL:'全部合同', SPECIFIC_CASES:'指定合同', DISABLED:'不用于合同' }[scope] || '不用于合同'
+}
+function scopeClass(scope) {
+  return String(scope || 'DISABLED').toLowerCase().replace(/_/g, '-')
 }
 function timelineSourceLabel(node) {
   const source = node.source || node.sourceType || ''
@@ -834,6 +988,25 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .timeline-evidence p{margin:7px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .timeline-condition{font-weight:700}
 .timeline-review-note{color:var(--atlas-subtle)}
+.timeline-date-resolution,
+.timeline-consequence,
+.knowledge-row{margin-top:8px;padding:8px 10px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
+.timeline-date-resolution strong,
+.timeline-consequence span,
+.knowledge-row span{display:block;margin-bottom:4px;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.timeline-date-resolution small,
+.timeline-consequence p,
+.knowledge-row small{display:block;color:var(--atlas-muted);font-size:11px;line-height:1.5}
+.timeline-date-resolution select{margin-top:6px;min-height:30px;padding:0 8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-bg);font-size:11px}
+.timeline-consequence{display:grid;gap:8px}
+.timeline-consequence p{margin:0}
+.evidence-snapshot{background:rgba(66,111,166,.05);border-color:rgba(66,111,166,.14)}
+.knowledge-row strong{display:block;color:var(--atlas-text);font-size:12px;line-height:1.5}
+.knowledge-row small{margin-top:2px}
+.knowledge-scope{display:inline-flex;width:fit-content;padding:2px 6px;border-radius:3px;font-size:9px;font-weight:900;margin-bottom:5px}
+.knowledge-scope.global{color:#166534;background:#dcfce7}
+.knowledge-scope.specific-cases{color:#1d4ed8;background:#dbeafe}
+.knowledge-scope.disabled{color:#64748b;background:#f1f5f9}
 .detail-timeline-node.warn i{background:var(--atlas-warning)}
 .detail-timeline-node.danger i{background:#b35c56}
 .detail-timeline-node.done i{background:#3f7f5d}

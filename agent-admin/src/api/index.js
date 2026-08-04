@@ -116,6 +116,9 @@ export function reindexKbDocument(id) { return api.post(`/api/admin/kb/documents
 export function bindKbDocumentProjects(id, projectIds = []) {
   return api.put(`/api/admin/kb/documents/${id}/projects`, { projectIds })
 }
+export function updateKbDocumentContractUsage(id, scope = 'DISABLED', caseIds = []) {
+  return api.put(`/api/admin/kb/documents/${id}/contract-usage`, { scope, caseIds })
+}
 export function testKbQa(data) { return api.post('/api/admin/kb/qa/test', data) }
 
 export function getAiObservabilityTraces(params) {

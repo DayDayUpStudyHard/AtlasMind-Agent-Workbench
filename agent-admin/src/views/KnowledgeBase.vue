@@ -58,8 +58,11 @@
           <el-form-item label="标题">
             <el-input v-model="uploadForm.title" placeholder="不填则使用文件名" />
           </el-form-item>
-          <el-form-item label="关联合同">
-            <el-select v-model="uploadForm.projectIds" multiple clearable collapse-tags placeholder="选择关联的合同案件">
+          <el-form-item label="合同 Agent 使用范围">
+            <el-segmented v-model="uploadForm.contractUsageScope" :options="contractUsageOptions" />
+          </el-form-item>
+          <el-form-item v-if="uploadForm.contractUsageScope === 'SPECIFIC_CASES'" label="指定合同">
+            <el-select v-model="uploadForm.projectIds" multiple clearable collapse-tags filterable placeholder="选择可使用该知识的合同案件">
               <el-option v-for="project in projects" :key="project.id" :label="project.title || project.name" :value="project.id" />
             </el-select>
           </el-form-item>
@@ -174,10 +177,14 @@
         </el-table-column>
         <el-table-column label="关联合同" min-width="170">
           <template #default="{ row }">
-            <div v-if="row.boundProjects?.length" class="bound-projects">
-              <span v-for="project in row.boundProjects" :key="project.projectId">{{ project.projectName }}</span>
+            <div class="contract-usage-cell">
+              <span class="usage-badge" :class="usageScopeClass(row.contractUsageScope)">{{ contractUsageLabel(row.contractUsageScope) }}</span>
+              <small>{{ row.contractUsageSummary || usageSummary(row) }}</small>
             </div>
-            <span v-else class="muted">未绑定</span>
+            <div v-if="row.boundContracts?.length" class="bound-projects">
+              <span v-for="item in row.boundContracts" :key="item.caseId">{{ item.caseKey || item.caseTitle }}</span>
+            </div>
+            <span v-else-if="row.contractUsageScope === 'SPECIFIC_CASES'" class="muted">未指定合同</span>
           </template>
         </el-table-column>
         <el-table-column prop="fileType" label="类型" width="80" align="center" />
@@ -217,7 +224,7 @@
           <template #default="{ row }">
             <div class="actions">
               <button class="action-btn preview" @click="openChunks(row)">切片</button>
-              <button class="action-btn bind" @click="openBindDialog(row)">关联合同</button>
+              <button class="action-btn bind" @click="openBindDialog(row)">合同范围</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReparse(row)">重解析</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReindex(row)">重索引</button>
               <button v-if="row.deleted === 1" class="action-btn restore" @click="doRestore(row)">恢复</button>
@@ -274,13 +281,21 @@
       </div>
     </el-dialog>
 
-    <el-dialog v-model="bindDialogVisible" :title="bindDialogTitle" width="520px">
+    <el-dialog v-model="bindDialogVisible" :title="bindDialogTitle" width="560px">
       <el-form label-position="top">
-        <el-form-item label="关联合同">
-          <el-select v-model="bindProjectIds" multiple clearable filterable placeholder="选择关联的合同案件">
+        <el-form-item label="合同 Agent 使用范围">
+          <el-radio-group v-model="bindScope">
+            <el-radio-button label="DISABLED">不用于合同</el-radio-button>
+            <el-radio-button label="GLOBAL">全部合同</el-radio-button>
+            <el-radio-button label="SPECIFIC_CASES">指定合同</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="bindScope === 'SPECIFIC_CASES'" label="指定合同">
+          <el-select v-model="bindProjectIds" multiple clearable filterable placeholder="选择可使用该知识的合同案件">
             <el-option v-for="project in projects" :key="project.id" :label="project.title || project.name" :value="project.id" />
           </el-select>
         </el-form-item>
+        <p class="scope-hint">历史报告会保留当时引用快照；新 Agent 运行按这里的最新范围检索。</p>
       </el-form>
       <template #footer>
         <el-button @click="bindDialogVisible = false">取消</el-button>
@@ -296,7 +311,6 @@ import { ElMessage } from 'element-plus'
 import { InfoFilled, Plus, Refresh, Search, Upload, UploadFilled } from '@element-plus/icons-vue'
 import {
   completeKbDocumentUpload,
-  bindKbDocumentProjects,
   createKbSpace,
   deleteKbDocument,
   getRuntimeSettings,
@@ -310,6 +324,7 @@ import {
   reparseKbDocument,
   restoreKbDocument,
   testKbQa,
+  updateKbDocumentContractUsage,
   uploadKbDocumentChunk
 } from '../api/index.js'
 
@@ -339,14 +354,20 @@ const bindDialogVisible = ref(false)
 const bindDialogTitle = ref('关联合同')
 const bindingDocument = ref(null)
 const bindProjectIds = ref([])
+const bindScope = ref('DISABLED')
 const spaceDialogVisible = ref(false)
 const editingSpace = ref(null)
 const spaceForm = ref({ name: '', description: '', icon: 'book', color: '#426fa6', sort: 0, enabled: 1 })
-const uploadForm = ref({ spaceId: null, title: '', parseMode: 'OCR', projectIds: [] })
+const uploadForm = ref({ spaceId: null, title: '', parseMode: 'OCR', contractUsageScope: 'DISABLED', projectIds: [] })
 const parseModeOptions = [
   { label: '快速', value: 'FAST' },
   { label: 'OCR', value: 'OCR' },
   { label: 'MinerU', value: 'MINERU' }
+]
+const contractUsageOptions = [
+  { label: '不用于合同', value: 'DISABLED' },
+  { label: '全部合同', value: 'GLOBAL' },
+  { label: '指定合同', value: 'SPECIFIC_CASES' }
 ]
 const qaForm = ref({ message: '', documentId: null, topK: 5 })
 const maxTopK = ref(10)
@@ -499,7 +520,7 @@ async function doUpload() {
       })
       uploadProgress.value = Math.min(90, Math.round(((chunkIndex + 1) / totalChunks) * 90))
     }
-    await completeKbDocumentUpload({
+    const completeRes = await completeKbDocumentUpload({
       spaceId: uploadForm.value.spaceId,
       uploadId,
       fileName: file.name,
@@ -507,12 +528,21 @@ async function doUpload() {
       totalChunks,
       title: uploadForm.value.title,
       parseMode: uploadForm.value.parseMode,
-      projectIds: uploadForm.value.projectIds
+      projectIds: []
     })
+    const documentId = completeRes.data.data?.document?.id
+    if (documentId) {
+      await updateKbDocumentContractUsage(
+        documentId,
+        uploadForm.value.contractUsageScope,
+        uploadForm.value.contractUsageScope === 'SPECIFIC_CASES' ? uploadForm.value.projectIds : []
+      )
+    }
     uploadProgress.value = 100
     ElMessage.success('导入任务已创建，完成后会在消息中心提醒')
     uploadForm.value.title = ''
     uploadForm.value.parseMode = 'OCR'
+    uploadForm.value.contractUsageScope = 'DISABLED'
     uploadForm.value.projectIds = []
     selectedFile.value = null
     uploadRef.value?.clearFiles()
@@ -527,15 +557,20 @@ async function doUpload() {
 
 function openBindDialog(row) {
   bindingDocument.value = row
-  bindDialogTitle.value = `关联合同 - ${row.title}`
-  bindProjectIds.value = (row.boundProjects || []).map(project => Number(project.projectId))
+  bindDialogTitle.value = `合同知识范围 - ${row.title}`
+  bindScope.value = row.contractUsageScope || 'DISABLED'
+  bindProjectIds.value = (row.boundContracts || []).map(item => Number(item.caseId))
   bindDialogVisible.value = true
 }
 
 async function saveDocumentProjects() {
   if (!bindingDocument.value) return
-  await bindKbDocumentProjects(bindingDocument.value.id, bindProjectIds.value)
-  ElMessage.success('关联合同已更新')
+  await updateKbDocumentContractUsage(
+    bindingDocument.value.id,
+    bindScope.value,
+    bindScope.value === 'SPECIFIC_CASES' ? bindProjectIds.value : []
+  )
+  ElMessage.success('合同知识范围已更新')
   bindDialogVisible.value = false
   await fetchDocuments()
 }
@@ -686,6 +721,24 @@ function parseModeLabel(mode) {
     MINERU: 'MinerU'
   }
   return labels[String(mode || 'OCR').toUpperCase()] || mode || 'OCR'
+}
+
+function contractUsageLabel(scope) {
+  return {
+    GLOBAL: '全部合同',
+    SPECIFIC_CASES: '指定合同',
+    DISABLED: '不用于合同'
+  }[scope] || '不用于合同'
+}
+
+function usageScopeClass(scope) {
+  return String(scope || 'DISABLED').toLowerCase().replace('_', '-')
+}
+
+function usageSummary(row) {
+  if (row.contractUsageScope === 'GLOBAL') return '所有合同 Agent 可检索'
+  if (row.contractUsageScope === 'SPECIFIC_CASES') return '仅绑定合同可检索'
+  return '不会进入合同审查和履约核验'
 }
 
 function errorMessage(error, fallback) {
@@ -1088,6 +1141,43 @@ function formatScore(value) {
   border-radius: 999px;
   font-size: 12px;
   padding: 3px 8px;
+}
+
+.contract-usage-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+
+.contract-usage-cell small,
+.scope-hint {
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.usage-badge {
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.usage-badge.global {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.usage-badge.specific-cases {
+  color: #1d4ed8;
+  background: #dbeafe;
+}
+
+.usage-badge.disabled {
+  color: #64748b;
+  background: #f1f5f9;
 }
 
 @media (max-width: 1100px) {

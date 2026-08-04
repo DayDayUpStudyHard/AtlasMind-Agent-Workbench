@@ -1044,6 +1044,47 @@ class MySqlReportStore(ReportStore):
                                     timeline_node_id,
                                 ),
                             )
+                            cur.execute(
+                                """SELECT id FROM contract_fulfillment_check
+                                   WHERE run_id=%s AND case_id=%s AND timeline_node_id=%s
+                                   ORDER BY id DESC LIMIT 1""",
+                                (run_id, subject_id, timeline_node_id),
+                            )
+                            check_row = cur.fetchone() or {}
+                            check_id = int(check_row.get("id") or 0)
+                            evidence_snapshot = artifact.get("evidenceSnapshot")
+                            if check_id and isinstance(evidence_snapshot, list):
+                                cur.execute(
+                                    "DELETE FROM contract_timeline_evidence_link WHERE check_id=%s",
+                                    (check_id,),
+                                )
+                                for evidence in evidence_snapshot:
+                                    if not isinstance(evidence, dict):
+                                        continue
+                                    document_id = int(evidence.get("documentId") or evidence.get("id") or 0)
+                                    if not document_id:
+                                        continue
+                                    cur.execute(
+                                        """INSERT INTO contract_timeline_evidence_link
+                                           (case_id, timeline_node_id, document_id, check_id,
+                                            link_source, relation_type, evidence_version,
+                                            evidence_hash, snippet)
+                                           VALUES (%s,%s,%s,%s,'AGENT','FULFILLMENT_EVIDENCE',%s,%s,%s)
+                                           ON DUPLICATE KEY UPDATE
+                                             evidence_version=VALUES(evidence_version),
+                                             evidence_hash=VALUES(evidence_hash),
+                                             snippet=VALUES(snippet),
+                                             deleted=0""",
+                                        (
+                                            subject_id,
+                                            timeline_node_id,
+                                            document_id,
+                                            check_id,
+                                            evidence.get("version"),
+                                            str(evidence.get("contentHash") or evidence.get("hash") or "") or None,
+                                            str(evidence.get("snippet") or "")[:1000] or None,
+                                        ),
+                                    )
 
                 # ── B1: Action Proposals ────────────────────────────
                 # Parse actionProposals from the LLM artifact and create

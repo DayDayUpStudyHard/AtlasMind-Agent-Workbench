@@ -29,6 +29,9 @@ public class KbDocument {
     private String indexName;
     private LocalDateTime lastIndexTime;
     private String errorMessage;
+    private String contractUsageScope;
+    private String contractUsageSummary;
+    private LocalDateTime contractUsageUpdatedAt;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)
@@ -48,4 +51,7 @@ public class KbDocument {
 
     @TableField(exist = false)
     private List<Map<String, Object>> boundProjects;
+
+    @TableField(exist = false)
+    private List<Map<String, Object>> boundContracts;
 }

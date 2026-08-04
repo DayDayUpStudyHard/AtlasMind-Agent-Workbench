@@ -33,11 +33,24 @@ CREATE TABLE IF NOT EXISTS kb_document (
     index_name VARCHAR(100) DEFAULT 'kb_chunks',
     last_index_time DATETIME NULL,
     error_message TEXT,
+    contract_usage_scope VARCHAR(32) NOT NULL DEFAULT 'DISABLED',
+    contract_usage_summary VARCHAR(256),
+    contract_usage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     deleted TINYINT DEFAULT 0,
     INDEX idx_space_status (space_id, status),
     INDEX idx_deleted (deleted)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS contract_kb_document (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    case_id BIGINT NOT NULL,
+    document_id BIGINT NOT NULL,
+    usage_type VARCHAR(40) NOT NULL DEFAULT 'CONTRACT_AGENT_CONTEXT',
+    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_contract_kb_document (case_id, document_id),
+    INDEX idx_contract_kb_document (document_id, case_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS kb_document_chunk (

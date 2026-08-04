@@ -382,11 +382,62 @@ class ContractStore:
                         "sourceId": hit.get("sourceId") or hit.get("documentId"),
                         "retrievalType": retrieval_type,
                     }
-                    for hit in hits[:kb_limit]
+                    for hit in await _filter_allowed_kb_hits(hits, case_id, kb_limit)
                 ]
             except Exception as exc:
                 logger.warning("policy KB ES search failed, fallback to MySQL: %s", exc)
                 return []
+
+        async def _filter_allowed_kb_hits(hits: list[dict], current_case_id: int, max_items: int) -> list[dict]:
+            document_ids = []
+            for hit in hits:
+                doc_id = hit.get("sourceId") or hit.get("documentId")
+                if doc_id is None:
+                    continue
+                try:
+                    document_ids.append(int(doc_id))
+                except Exception:
+                    continue
+            document_ids = list(dict.fromkeys(document_ids))
+            if not document_ids:
+                return []
+
+            def _allowed_ids() -> set[int]:
+                placeholders = ",".join(["%s"] * len(document_ids))
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""SELECT d.id
+                                FROM kb_document d
+                                WHERE d.id IN ({placeholders})
+                                  AND COALESCE(d.deleted,0)=0
+                                  AND d.status='READY'
+                                  AND (
+                                    d.contract_usage_scope='GLOBAL'
+                                    OR (
+                                      d.contract_usage_scope='SPECIFIC_CASES'
+                                      AND EXISTS (
+                                        SELECT 1 FROM contract_kb_document ckd
+                                        WHERE ckd.document_id=d.id AND ckd.case_id=%s
+                                      )
+                                    )
+                                  )""",
+                            document_ids + [current_case_id],
+                        )
+                        return {int(row["id"]) for row in cur.fetchall()}
+            allowed = await _run_sync(_allowed_ids)
+            result = []
+            for hit in hits:
+                doc_id = hit.get("sourceId") or hit.get("documentId")
+                try:
+                    normalized = int(doc_id)
+                except Exception:
+                    continue
+                if normalized in allowed:
+                    result.append(hit)
+                if len(result) >= max_items:
+                    break
+            return result
 
         def _kb_mysql_fallback() -> list[dict]:
             if not query:
@@ -411,10 +462,20 @@ class ContractStore:
                            WHERE COALESCE(c.deleted,0)=0
                              AND COALESCE(d.deleted,0)=0
                              AND d.status='READY'
+                             AND (
+                               d.contract_usage_scope='GLOBAL'
+                               OR (
+                                 d.contract_usage_scope='SPECIFIC_CASES'
+                                 AND EXISTS (
+                                   SELECT 1 FROM contract_kb_document ckd
+                                   WHERE ckd.document_id=d.id AND ckd.case_id=%s
+                                 )
+                               )
+                             )
                              AND ({conditions})
                            ORDER BY c.document_id DESC, c.chunk_index ASC
                            LIMIT %s""",
-                        [like for like in likes for _ in range(3)] + [kb_limit],
+                        [case_id] + [like for like in likes for _ in range(3)] + [kb_limit],
                     )
                     rows = [_normalize_value(r) for r in cur.fetchall()]
             return [
@@ -700,6 +761,7 @@ class ContractStore:
                                FROM contract_document
                                WHERE case_id=%s
                                  AND document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                                 AND COALESCE(deleted,0)=0
                                  AND parse_status <> 'FAILED'
                                ORDER BY FIELD(document_type,'FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING'),
                                         version DESC, id DESC

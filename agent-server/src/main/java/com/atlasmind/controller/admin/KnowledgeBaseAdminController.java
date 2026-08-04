@@ -129,6 +129,20 @@ public class KnowledgeBaseAdminController {
         return Result.ok();
     }
 
+    @OperationLog(value = "设置知识库合同使用范围", type = "UPDATE")
+    @PutMapping("/documents/{id}/contract-usage")
+    public Result<?> updateContractUsage(@PathVariable Long id, @RequestBody Map<String, Object> request) {
+        Object value = request.get("caseIds");
+        List<Long> caseIds = value instanceof List<?> list
+                ? list.stream()
+                    .filter(item -> item instanceof Number || item instanceof String)
+                    .map(item -> item instanceof Number number ? number.longValue() : Long.valueOf(String.valueOf(item)))
+                    .toList()
+                : List.of();
+        knowledgeBaseService.updateDocumentContractUsage(id, String.valueOf(request.getOrDefault("scope", "DISABLED")), caseIds);
+        return Result.ok();
+    }
+
     @OperationLog(value = "导入 Debug 修复记录", type = "CREATE")
     @PostMapping("/documents/import-debug-record")
     public Result<Map<String, Object>> importDebugRecord() throws IOException {
