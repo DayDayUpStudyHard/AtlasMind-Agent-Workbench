@@ -67,7 +67,15 @@ public class WorkspaceStatusController {
     @GetMapping("/runs/recent")
     public Result<List<Map<String, Object>>> recentRuns() {
         return Result.ok(jdbcTemplate.queryForList(
-                "SELECT id, subject_type AS subjectType, run_type AS runType, status, progress, create_time AS createTime FROM agent_run ORDER BY id DESC LIMIT 20"));
+                "SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId,"
+                + " r.run_type AS runType, r.question, r.status, r.progress,"
+                + " r.current_step AS currentStep, r.error_message AS errorMessage,"
+                + " r.create_time AS createTime,"
+                + " COALESCE(c.title, c.case_key, CONCAT('Run #', r.id)) AS projectName,"
+                + " c.case_key AS caseKey"
+                + " FROM agent_run r"
+                + " LEFT JOIN contract_case c ON r.subject_type='CONTRACT_CASE' AND c.id=r.subject_id AND c.deleted=0"
+                + " ORDER BY r.id DESC LIMIT 20"));
     }
 
     private String safeMessage(Exception exception) {

@@ -49,6 +49,7 @@ class UserServiceImplTest {
 
         assertNotNull(result);
         assertEquals("admin", result.getUsername());
+        assertNull(result.getPassword());
         verify(userMapper).selectOne(any());
     }
 

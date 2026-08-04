@@ -16,6 +16,10 @@ public interface AiGateway {
 
     void deleteDocumentIndex(Long documentId);
 
+    void parseContractDocument(Long documentId);
+
+    void extractContractIntake(Long intakeId);
+
     Map<String, Object> testRetrieval(Map<String, Object> payload);
 
     Map<String, Object> analyzeProject(Map<String, Object> payload);

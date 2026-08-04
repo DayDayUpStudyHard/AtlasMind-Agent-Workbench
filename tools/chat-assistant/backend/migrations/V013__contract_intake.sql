@@ -1,0 +1,25 @@
+-- Contract intake staging. Model output stays here until a user confirms it.
+CREATE TABLE IF NOT EXISTS contract_intake (
+    id                  BIGINT AUTO_INCREMENT PRIMARY KEY,
+    status              VARCHAR(32)     NOT NULL DEFAULT 'PENDING' COMMENT 'PENDING|EXTRACTING|NEEDS_CONFIRMATION|CONFIRMED|FAILED',
+    source_type         VARCHAR(16)     NOT NULL DEFAULT 'TEXT',
+    file_name           VARCHAR(512)    NOT NULL,
+    content_text        LONGTEXT        NOT NULL,
+    content_hash        CHAR(64)        NOT NULL,
+    extracted_json      JSON            NULL COMMENT 'Raw LLM output',
+    validated_json      JSON            NULL COMMENT 'Normalized fields with verified citations',
+    confirmed_json      JSON            NULL COMMENT 'User-confirmed values written to the case',
+    schema_version      VARCHAR(32)     NOT NULL DEFAULT 'contract-intake-v1',
+    prompt_version      VARCHAR(32)     NULL,
+    model               VARCHAR(128)    NULL,
+    retry_count         INT             NOT NULL DEFAULT 0,
+    error_message       TEXT            NULL,
+    case_id             BIGINT          NULL,
+    created_by          BIGINT          NULL,
+    create_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    update_time         DATETIME        NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_intake_status (status),
+    INDEX idx_intake_hash (content_hash),
+    INDEX idx_intake_case (case_id),
+    INDEX idx_intake_creator (created_by)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Unconfirmed contract metadata extraction';

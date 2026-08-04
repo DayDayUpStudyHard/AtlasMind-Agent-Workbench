@@ -4,7 +4,7 @@ const routes = [
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
   { path: '/', name: 'Home', component: () => import('../views/ContractPortfolioView.vue') },
   { path: '/contracts', name: 'ContractPortfolio', component: () => import('../views/ContractPortfolioView.vue') },
-  { path: '/contracts/new', name: 'ContractCreate', component: () => import('../views/ContractCaseView.vue') },
+  { path: '/contracts/new', name: 'ContractCreate', component: () => import('../views/ContractCreateView.vue') },
   { path: '/contracts/:id', name: 'ContractCase', component: () => import('../views/ContractCaseView.vue') },
   { path: '/knowledge', name: 'Knowledge', component: () => import('../views/KnowledgeView.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/' }

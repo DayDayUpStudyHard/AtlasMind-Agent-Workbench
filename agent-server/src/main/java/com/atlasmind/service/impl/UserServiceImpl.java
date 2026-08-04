@@ -27,6 +27,7 @@ public class UserServiceImpl implements UserService {
         if (user == null || !BCrypt.checkpw(password, user.getPassword())) {
             throw new IllegalArgumentException("用户名或密码错误");
         }
+        user.setPassword(null);
         return user;
     }
 

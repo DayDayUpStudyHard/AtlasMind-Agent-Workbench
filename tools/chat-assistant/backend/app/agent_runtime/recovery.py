@@ -15,7 +15,8 @@ from .persistence import RunStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL = 30   # seconds between recovery scans
-DEFAULT_TIMEOUT = 300   # seconds before a run is considered timed out
+DEFAULT_TIMEOUT = 300   # seconds before an active run is considered timed out
+CREATED_TIMEOUT = 120   # seconds before a CREATED (unclaimed) run is marked FAILED
 
 
 class RunRecovery:
@@ -57,19 +58,36 @@ class RunRecovery:
             logger.exception("Startup recovery scan failed")
 
     async def _recover(self) -> None:
-        """Periodic scan for timed-out and heartbeat-lost runs."""
+        """Periodic scan for timed-out, stuck-CREATED, and heartbeat-lost runs."""
+        # 1. Stuck CREATED runs — worker never picked them up
         try:
-            timed_out = await self._run_store.find_timed_out_runs(self._timeout)
-            for run_id in timed_out:
-                logger.warning("Recovery: marking run %s as FAILED (timeout)", run_id)
+            stuck = await self._run_store.find_timed_out_runs(CREATED_TIMEOUT)
+            for run_id in stuck:
+                logger.warning("Recovery: marking run %s as FAILED (stuck CREATED for %ss)",
+                              run_id, CREATED_TIMEOUT)
                 await self._run_store.update_run(
                     run_id,
                     status="FAILED",
-                    error_message=f"Agent execution timed out after {self._timeout}s",
+                    error_message=f"Agent worker 未在 {CREATED_TIMEOUT}s 内接取任务 — 请检查 Python 服务是否正常运行",
+                )
+        except Exception:
+            logger.exception("Stuck-CREATED recovery scan failed")
+
+        # 2. Timed-out active runs
+        try:
+            timed_out = await self._run_store.find_timed_out_runs(self._timeout)
+            for run_id in timed_out:
+                logger.warning("Recovery: marking run %s as FAILED (timeout %ss)",
+                              run_id, self._timeout)
+                await self._run_store.update_run(
+                    run_id,
+                    status="FAILED",
+                    error_message=f"Agent 执行超时（{self._timeout}s）— 可能因 LLM 不可达或任务过于复杂",
                 )
         except Exception:
             logger.exception("Timeout recovery scan failed")
 
+        # 3. Heartbeat-lost zombie runs
         try:
             zombies = await self._run_store.find_zombie_runs(self._interval * 2)
             for run_id in zombies:
@@ -77,7 +95,7 @@ class RunRecovery:
                 await self._run_store.update_run(
                     run_id,
                     status="FAILED",
-                    error_message="Agent worker heartbeat lost — possible crash",
+                    error_message="Agent worker 心跳丢失 — 进程可能已崩溃",
                 )
         except Exception:
             logger.exception("Zombie recovery scan failed")

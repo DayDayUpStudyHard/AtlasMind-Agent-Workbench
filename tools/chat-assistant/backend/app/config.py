@@ -31,6 +31,7 @@ class Settings:
     es_host: str = os.getenv("ES_HOST", "http://localhost:9200")
     es_index: str = os.getenv("ES_INDEX", "agent_contents")
     kb_index: str = os.getenv("KB_INDEX", "kb_chunks")
+    contract_index: str = os.getenv("CONTRACT_INDEX", "contract_chunks")
 
     # ====== MySQL（知识库事实源） ======
     mysql_host: str = os.getenv("MYSQL_HOST", "localhost")

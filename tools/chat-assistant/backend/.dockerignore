@@ -1,0 +1,11 @@
+.env
+.venv/
+.venv-ocr/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.mineru-output/
+logs/
+tests/
+test_*.py

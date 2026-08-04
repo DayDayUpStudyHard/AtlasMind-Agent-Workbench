@@ -78,6 +78,35 @@ KB_INDEX_MAPPING = {
     },
 }
 
+CONTRACT_INDEX_MAPPING = {
+    "settings": {
+        "number_of_shards": 1,
+        "number_of_replicas": 0,
+        "refresh_interval": "5s",
+    },
+    "mappings": {
+        "properties": {
+            "chunk_id": {"type": "long"},
+            "case_id": {"type": "long"},
+            "document_id": {"type": "long"},
+            "clause_id": {"type": "long"},
+            "clause_number": {"type": "keyword"},
+            "title": {"type": "text", "analyzer": "standard", "fields": {"keyword": {"type": "keyword"}}},
+            "content": {"type": "text", "analyzer": "standard"},
+            "clause_type": {"type": "keyword"},
+            "source_page": {"type": "integer"},
+            "status": {"type": "keyword"},
+            "embedding_model": {"type": "keyword"},
+            "embedding": {
+                "type": "dense_vector",
+                "dims": settings.embedding_dim,
+                "similarity": "cosine",
+                "index": True,
+            },
+        }
+    },
+}
+
 
 def _tcp_port_open(host: str, port: int, timeout: float = 1.0) -> bool:
     """快速检测 TCP 端口是否可达。"""
@@ -106,6 +135,7 @@ class ESService:
         )
         self.index = settings.es_index
         self.kb_index = settings.kb_index
+        self.contract_index = settings.contract_index
 
     # ==================== 基础健康检查 ====================
 
@@ -486,6 +516,154 @@ class ESService:
             logger.warning("kb keyword search failed: %s", e)
             return []
 
+    # ==================== 合同私有 chunk 索引 ====================
+
+    def ensure_contract_index(self) -> bool:
+        """确保合同私有 chunk 索引存在且 dense_vector 维度匹配当前配置。"""
+        if not _tcp_port_open(self._host, self._port):
+            return False
+        try:
+            exists = self.client.indices.exists(index=self.contract_index)
+            if exists:
+                actual_dim = self._embedding_dims(self.contract_index)
+                expected_dim = settings.embedding_dim
+                if actual_dim == expected_dim:
+                    return True
+                count = self.client.count(index=self.contract_index).get("count", 0)
+                message = (
+                    "Contract index '%s' embedding dims mismatch: mapping=%s, config=%s, docs=%s"
+                    % (self.contract_index, actual_dim, expected_dim, count)
+                )
+                if count == 0:
+                    logger.warning("%s. Recreating empty index.", message)
+                    self.client.indices.delete(index=self.contract_index)
+                else:
+                    logger.warning("%s. Please rebuild the index before ingesting.", message)
+                    return False
+
+            self.client.indices.create(index=self.contract_index, body=CONTRACT_INDEX_MAPPING)
+            logger.info(
+                "Contract index '%s' created with %sd dense_vector mapping.",
+                self.contract_index,
+                settings.embedding_dim,
+            )
+            return True
+        except BadRequestError as e:
+            if "resource_already_exists_exception" in str(e):
+                return True
+            logger.warning("ensure_contract_index failed: %s", e)
+            return False
+        except Exception as e:
+            logger.warning("ensure_contract_index failed: %s", e)
+            return False
+
+    def index_contract_chunk(self, row: dict, embedding: list[float] | None = None) -> bool:
+        """写入合同私有 chunk 到 ES。"""
+        if not _tcp_port_open(self._host, self._port):
+            return False
+        doc = {
+            "chunk_id": row["id"],
+            "case_id": row["case_id"],
+            "document_id": row["document_id"],
+            "clause_id": row.get("clause_id"),
+            "clause_number": row.get("clause_number") or "",
+            "title": row.get("title") or "",
+            "content": row.get("chunk_text") or "",
+            "clause_type": row.get("clause_type") or "OTHER",
+            "source_page": row.get("source_page"),
+            "status": "READY",
+            "embedding_model": settings.embedding_model,
+        }
+        if embedding:
+            doc["embedding"] = embedding
+        try:
+            self.client.index(index=self.contract_index, id=row["id"], body=doc)
+            return True
+        except Exception as e:
+            logger.warning("index contract chunk %s failed: %s", row.get("id"), e)
+            return False
+
+    def delete_contract_document(self, document_id: int) -> bool:
+        """删除某个合同文档在 ES 中的全部 chunk。"""
+        if not _tcp_port_open(self._host, self._port):
+            return False
+        try:
+            self.client.delete_by_query(
+                index=self.contract_index,
+                body={"query": {"term": {"document_id": document_id}}},
+                conflicts="proceed",
+                ignore=[404],
+            )
+            return True
+        except Exception as e:
+            logger.warning("delete contract document %s index failed: %s", document_id, e)
+            return False
+
+    def search_contract_by_embedding(
+        self,
+        query_vector: list[float],
+        case_id: int,
+        top_k: int = None,
+    ) -> list[dict]:
+        """合同私有向量检索，强制按 case_id 隔离。"""
+        if top_k is None:
+            top_k = settings.retrieval_top_k
+        if not query_vector or not _tcp_port_open(self._host, self._port):
+            return []
+        body = {
+            "knn": {
+                "field": "embedding",
+                "query_vector": query_vector,
+                "k": top_k,
+                "num_candidates": max(top_k * 4, 20),
+                "filter": {"bool": {"filter": [
+                    {"term": {"status": "READY"}},
+                    {"term": {"case_id": case_id}},
+                ]}},
+            },
+            "_source": ["chunk_id", "case_id", "document_id", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
+            "size": top_k,
+        }
+        try:
+            response = self.client.search(index=self.contract_index, body=body)
+            return self._parse_contract_hits(response)
+        except Exception as e:
+            logger.warning("contract vector search failed: %s", e)
+            return []
+
+    def search_contract_by_keyword(self, query: str, case_id: int, top_k: int = None) -> list[dict]:
+        """合同私有关键词 fallback 检索，强制按 case_id 隔离。"""
+        if top_k is None:
+            top_k = settings.retrieval_top_k
+        if not _tcp_port_open(self._host, self._port):
+            return []
+        body = {
+            "query": {
+                "bool": {
+                    "must": [{
+                        "multi_match": {
+                            "query": query,
+                            "fields": ["title^3", "clause_number^2", "content"],
+                            "type": "best_fields",
+                        }
+                    }],
+                    "filter": [
+                        {"term": {"status": "READY"}},
+                        {"term": {"case_id": case_id}},
+                    ],
+                }
+            },
+            "highlight": {"fields": {"content": {"fragment_size": 180, "number_of_fragments": 2}}},
+            "_source": ["chunk_id", "case_id", "document_id", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
+            "size": top_k,
+        }
+        try:
+            response = self.client.search(index=self.contract_index, body=body)
+            return self._parse_contract_hits(response)
+        except Exception as e:
+            logger.warning("contract keyword search failed: %s", e)
+            return []
+
     # ==================== 内部工具 ====================
 
     def _parse_hits(self, response: dict) -> list[dict]:
@@ -531,6 +709,33 @@ class ESService:
                     "content": content,
                     "snippet": snippet,
                     "sectionTitle": source.get("section_title", ""),
+                    "page": source.get("source_page"),
+                    "score": hit.get("_score", 0),
+                }
+            )
+        return results
+
+    def _parse_contract_hits(self, response: dict) -> list[dict]:
+        """解析合同 chunk 检索结果。"""
+        hits = response.get("hits", {}).get("hits", [])
+        results = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            highlights = hit.get("highlight", {}).get("content", [])
+            content = source.get("content", "") or ""
+            snippet = " ... ".join(highlights) if highlights else content[:220]
+            results.append(
+                {
+                    "sourceType": "CONTRACT_CLAUSE",
+                    "caseId": source.get("case_id"),
+                    "documentId": source.get("document_id"),
+                    "clauseId": source.get("clause_id"),
+                    "chunkId": source.get("chunk_id"),
+                    "clauseNumber": source.get("clause_number", ""),
+                    "title": source.get("title", ""),
+                    "content": content,
+                    "snippet": snippet,
+                    "clauseType": source.get("clause_type", "OTHER"),
                     "page": source.get("source_page"),
                     "score": hit.get("_score", 0),
                 }

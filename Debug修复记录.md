@@ -2,6 +2,110 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 合同正文智能提取与确认建案
+
+**日期**：2026-08-03
+
+### 调整原因
+
+- 原“案件信息”表单要求用户先手工填写合同标题、类型、双方、金额和日期，合同正文里已经存在的信息被重复录入。
+- 直接让 LLM 创建正式案件风险过高：模型可能猜错我方主体、生成原文不存在的字段，失败时还可能留下半成品数据。
+- 用户无法看到字段来自哪段合同原文，也无法判断低置信度结果是否需要修改。
+
+### 实现
+
+- 新增 `contract_intake` 暂存表和 `V013__contract_intake.sql`；模型原始输出、验证结果、确认数据与正式案件分层存储。
+- 用户端 `/contracts/new` 改为正文优先：支持粘贴合同或读取 TXT/Markdown 文件，不再预填可由合同推断的案件字段。
+- Python 新增合同元数据提取器，DeepSeek 以 JSON 模式、`temperature=0` 提取标题、类型、甲乙方、金额、币种和起止日期。
+- 所有 citation 必须在原文中逐字命中并重新计算字符偏移；确定性规则命中与模型冲突时，以可验证规则结果为准。
+- 模型不得判断“哪一方是我方”，必须由用户显式选择；确认前允许修改字段并查看对应原文高亮。
+- LLM 不可用时降级为规则提取并进入 `NEEDS_CONFIRMATION`，不会把失败结果直接写入正式案件。
+- 确认操作在 Java 事务内一次性创建 `contract_case`、双方主体和原始合同文档，并校验正文 SHA-256 未发生变化。
+- 新增创建、查询、重试、确认四个用户端 Intake API，以及 Python 内部提取端点。
+- 移动端底部操作区为 AI 对话按钮预留安全距离，主要按钮和我方主体选择保持至少 44px 触控高度。
+
+### 验证
+
+- 真实中文浏览器 E2E：正文提交 → DeepSeek 提取 → 字段核对 → 原文字符定位 → 选择我方主体 → 创建案件，全链路通过。
+- 实测识别双方、`500000 CNY`、生效/到期日期正确；引用按钮可高亮到精确字符范围，详情页案件和原始文档均正确落库。
+- 移动端 390px 视口无横向溢出，AI 对话按钮与“确认并创建案件”无重叠；浏览器控制台 0 错误。
+- Python `unittest` 22 项通过；Java `mvnw test` 12 项通过；用户端 Vite 生产构建通过（仅保留已有大 chunk 警告）。
+- 浏览器回归产生的 Intake、案件、主体、文档和条款测试数据已全部清理。
+
+---
+
+## 新建合同误把 undefined 当作 caseId
+
+**日期**：2026-08-03
+
+### 现象
+
+- 从合同工作台点击“发起新合同”后，页面提示 `参数类型错误: caseId 应为 Long`。
+- 继续点击上传时，请求仍然失败，无法创建合同案件。
+
+### 根因
+
+- `/contracts/new` 路由复用了只支持详情态的 `ContractCaseView.vue`。
+- 新建路由没有 `route.params.id`，详情页仍请求 `/api/workspace/contracts/${route.params.id}`，最终向 Java 发送了 `/api/workspace/contracts/undefined`。
+- Spring 尝试将字符串 `undefined` 转换为 `Long caseId`，因此由全局异常处理器返回参数类型错误。
+
+### 修复
+
+- 新增独立的 `ContractCreateView.vue`，将 `/contracts/new` 与合同详情页职责分离。
+- 新建页支持合同基础信息、交易主体、金额、日期以及可选文字合同一次提交。
+- 提交流程改为先 `POST /api/workspace/contracts` 获取真实数字 ID，再调用 `POST /api/workspace/contracts/{id}/documents`。
+- 如果案件已创建但正文提交失败，保留案件并跳转详情页展示具体错误，避免重复创建。
+- 增加必填项、日期范围、金额和提交中状态校验。
+
+### 验证
+
+- 生产构建通过。
+- 浏览器真实回归：打开 `/contracts/new`、填写案件、粘贴中文合同、提交后跳转到数字 ID 详情页。
+- 合同正文异步解析为 `READY`，详情页显示正确文件名、版本和字符数。
+- 浏览器控制台 0 错误，回归测试数据已清理。
+
+---
+
+## 文字合同提交失败与合同 Agent 链路修复
+
+**日期**：2026-08-03
+
+### 根因
+
+- Python migration runner 直接执行 `ADD COLUMN IF NOT EXISTS`，当前 MySQL 版本不支持该语法，导致 `V009`、`V011` 每次启动失败；新环境缺少 `contract_document.content_text` 后，纯文字合同提交会直接报错。
+- 原上传回归脚本只有 HTTP 调用，没有等待异步解析、校验正文和条款落库，而且中文样例已经乱码，不能捕获用户看到的真实故障。
+- 合同管理端仍请求已下线的 `/api/admin/projects/reports|actions`，报告与动作页面无法加载；删除合同文档不会清理 `contract_clause`。
+- Python ReportStore 没有给合同报告和动作写入 `subject_type/subject_id`，且会把合同动作错误改写成 `CREATE_GITHUB_ISSUE`。
+- 通用 Harness 在合同模式下仍硬编码 `getProjectMemory`、`searchProjectEvidence` 等项目工具；并发工具写 trace 使用 `MAX(sequence_no)+1`，会因序号竞争留下永久 `RUNNING` 的 tool call。
+- 合同风险查询引用了不存在的 `contract_review_finding.rule_key/clause_type`，风险引擎又只识别 snake_case，而 Store 返回 camelCase，导致计算失败或错误高分。
+
+### 修复
+
+- migration runner 对 `ADD COLUMN IF NOT EXISTS` 做 `information_schema` 检查后再执行标准 `ALTER TABLE`；修正 `V009` 配置种子 SQL，正式执行 `V009`、`V011`。
+- 新增纯文字合同解析器和 `/internal/contract/documents/{id}/parse`：按中文编号条款切分，分类 PAYMENT、LIABILITY、ACCEPTANCE、CONFIDENTIALITY 等类型，并写入 `contract_clause`。
+- Java 上传链路增加案件/类型/长度校验、案件行锁版本分配、事务提交后解析调度和正文按需读取；前端防重复提交并展示后端真实错误。
+- 合同文档列表不再携带完整正文，只返回 `hasInlineText/textLength`；删除文档时同事务清理条款和已批准/已签署版本引用。
+- 新增合同域报告/动作管理 API，修正管理端 URL、合同报告类型和动作类型文案；Run/审批/删除操作增加 `CONTRACT_CASE` 主体隔离。
+- `V012` 回填历史报告/动作主体；ReportStore 从 Run 继承主体，只接受合同动作白名单，并把合同审查 findings 落入 `contract_review_finding`。
+- Harness 上下文新增 `subjectType/subjectId`；合同计划、工具兜底、证据保证、风险计算和 Reflection 全部改用合同工具，规则 findings 会传入最终报告。
+- trace 序号分配增加 `agent_run FOR UPDATE` 行锁，并将 trace 写入纳入工具失败处理，修复并发调用悬挂。
+- 管理端规则和标准条款更新增加 camelCase 到数据库 snake_case 的字段映射，修复编辑保存 SQL 报错。
+- 登录成功后在 Service 返回前清空密码字段，修复 BCrypt 哈希随登录响应暴露给前端的问题。
+- 将已删除 Java Runtime 的 3 组失效测试迁移到 Python，覆盖执行预算、重复调用、工具白名单、确定性评分、合同路由和风险评分。
+
+### 验证
+
+- 真实 E2E：登录、创建合同案件、提交中文文字合同、轮询 `READY`、读取正文、校验 `DELIVERY/PAYMENT/LIABILITY` 三条条款、删除文档并确认无孤儿条款，全链路通过且测试数据自动清理。
+- 真实合同 Run：6 次工具调用均为合同工具且全部 `DONE`，不再出现项目工具；当前 DeepSeek Key 无效时 Run 快速进入 `FAILED` 并返回明确错误，不生成伪报告。
+- Python `unittest`：18 项通过；Java `mvnw clean test`：12 项通过；用户端和管理端 Vite build 均通过（仅保留已有大 chunk 警告）。
+- Migration 已应用至 `V012`；Elasticsearch Docker 容器恢复 healthy，Embedding 和 ES 健康探针均为 `ok`。
+
+### 待外部处理
+
+- DeepSeek 实际请求返回“LLM API Key 无效”。网络、ES 和 Embedding 均正常，需要更换有效的 `LLM_API_KEY` 后才能进行合同 LLM 分析。
+
+---
+
 ## 源码同步与检索 —— Agent 可以读取项目源代码
 
 **日期**：2026-08-02

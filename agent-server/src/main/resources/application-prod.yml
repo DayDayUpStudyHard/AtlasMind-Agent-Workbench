@@ -26,6 +26,9 @@ spring:
 
 atlasmind:
   upload-path: ${UPLOAD_PATH:upload/}
+  chat-assistant:
+    url: ${CHAT_ASSISTANT_URL:http://ai-service:18088}
+    token: ${CHAT_ASSISTANT_TOKEN:}
   search:
     type: ${SEARCH_TYPE:elasticsearch}
   storage:

@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
 from pathlib import Path
@@ -195,6 +196,49 @@ def get_contract_dispatcher():
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parent.parent.parent / "migrations"
 
+_ALTER_TABLE_RE = re.compile(
+    r"^ALTER\s+TABLE\s+`?([A-Za-z0-9_]+)`?\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_ADD_COLUMN_IF_MISSING_RE = re.compile(
+    r"^ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+`?([A-Za-z0-9_]+)`?\s+(.+)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _execute_migration_statement(cur, statement: str) -> None:
+    """Execute one migration statement with portable idempotent column adds.
+
+    MySQL does not accept ``ADD COLUMN IF NOT EXISTS``. Migrations use that
+    readable form, so the runner checks information_schema and emits one
+    standard ALTER statement for each missing column.
+    """
+    alter_match = _ALTER_TABLE_RE.match(statement.strip())
+    if not alter_match or "ADD COLUMN IF NOT EXISTS" not in statement.upper():
+        cur.execute(statement)
+        return
+
+    table_name, alter_body = alter_match.groups()
+    clauses = re.split(
+        r",\s*(?=ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS)",
+        alter_body.strip(),
+        flags=re.IGNORECASE,
+    )
+    for clause in clauses:
+        column_match = _ADD_COLUMN_IF_MISSING_RE.match(clause.strip())
+        if not column_match:
+            raise ValueError(f"Unsupported idempotent ALTER clause: {clause}")
+        column_name, definition = column_match.groups()
+        cur.execute(
+            """SELECT 1 FROM information_schema.COLUMNS
+               WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s""",
+            (table_name, column_name),
+        )
+        if cur.fetchone() is None:
+            cur.execute(
+                f"ALTER TABLE `{table_name}` ADD COLUMN `{column_name}` {definition.strip()}"
+            )
+
 
 async def run_migrations() -> list[str]:
     """Execute unapplied SQL migrations. Returns list of newly applied versions."""
@@ -258,7 +302,7 @@ async def run_migrations() -> list[str]:
                     for statement in clean_sql.split(";"):
                         stmt = statement.strip()
                         if stmt:
-                            cur.execute(stmt)
+                            _execute_migration_statement(cur, stmt)
                     cur.execute(
                         "INSERT INTO schema_migrations (version) VALUES (%s)",
                         (version,),
@@ -714,6 +758,34 @@ async def delete_document_index(
     _check_internal_token(x_internal_token)
     ok = get_es().delete_kb_document(document_id)
     return {"ok": ok}
+
+
+@internal_router.post("/contract/documents/{document_id}/parse")
+async def parse_contract_document(
+    document_id: int,
+    background_tasks: BackgroundTasks,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Parse an inline contract document and persist locatable clauses."""
+    _check_internal_token(x_internal_token)
+    from app.agent_runtime.contract_document_parser import parse_contract_document
+
+    background_tasks.add_task(parse_contract_document, document_id)
+    return {"ok": True, "documentId": document_id, "status": "PENDING"}
+
+
+@internal_router.post("/contract/intakes/{intake_id}/extract")
+async def extract_contract_intake(
+    intake_id: int,
+    background_tasks: BackgroundTasks,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Extract citable metadata candidates for an unconfirmed intake."""
+    _check_internal_token(x_internal_token)
+    from app.agent_runtime.contract_intake_extractor import extract_intake
+
+    background_tasks.add_task(extract_intake, intake_id)
+    return {"ok": True, "intakeId": intake_id, "status": "PENDING"}
 
 
 # ── Agent Runtime endpoints ──────────────────────────────────────────

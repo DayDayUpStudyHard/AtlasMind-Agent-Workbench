@@ -61,6 +61,16 @@ public class HttpAiGateway implements AiGateway {
     }
 
     @Override
+    public void parseContractDocument(Long documentId) {
+        post("/internal/contract/documents/" + documentId + "/parse", Map.of());
+    }
+
+    @Override
+    public void extractContractIntake(Long intakeId) {
+        post("/internal/contract/intakes/" + intakeId + "/extract", Map.of());
+    }
+
+    @Override
     public Map<String, Object> testRetrieval(Map<String, Object> payload) {
         return post("/api/kb/qa/test", payload);
     }

@@ -4,7 +4,7 @@
       <div>
         <span class="eyebrow">Knowledge Base</span>
         <h2>企业知识库</h2>
-        <p>把研发文档、制度 SOP、项目复盘和 FAQ 导入 RAG，统一进入 AtlasMind AI 的引用式问答。</p>
+        <p>把企业采购制度、法规文档、合同范本和 FAQ 导入知识库，供 Agent RAG 引用式问答。</p>
       </div>
       <div class="hero-actions">
         <el-button @click="openSpaceDialog()">
@@ -58,9 +58,9 @@
           <el-form-item label="标题">
             <el-input v-model="uploadForm.title" placeholder="不填则使用文件名" />
           </el-form-item>
-          <el-form-item label="适用项目">
-            <el-select v-model="uploadForm.projectIds" multiple clearable collapse-tags placeholder="选择用于哪些项目分析">
-              <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+          <el-form-item label="关联合同">
+            <el-select v-model="uploadForm.projectIds" multiple clearable collapse-tags placeholder="选择关联的合同案件">
+              <el-option v-for="project in projects" :key="project.id" :label="project.title || project.name" :value="project.id" />
             </el-select>
           </el-form-item>
           <el-form-item label="解析模式">
@@ -106,7 +106,7 @@
           </el-select>
         </div>
         <div class="qa-box">
-          <el-input v-model="qaForm.message" type="textarea" :rows="3" placeholder="输入一个面试题、项目问题或笔记关键词" />
+          <el-input v-model="qaForm.message" type="textarea" :rows="3" placeholder="输入合同条款关键词或知识库问题" />
           <div class="qa-actions">
             <div class="top-k-control">
               <span class="top-k-label">Top-K</span>
@@ -172,7 +172,7 @@
         <el-table-column label="空间" width="120">
           <template #default="{ row }">{{ spaceName(row.spaceId) }}</template>
         </el-table-column>
-        <el-table-column label="适用项目" min-width="170">
+        <el-table-column label="关联合同" min-width="170">
           <template #default="{ row }">
             <div v-if="row.boundProjects?.length" class="bound-projects">
               <span v-for="project in row.boundProjects" :key="project.projectId">{{ project.projectName }}</span>
@@ -217,7 +217,7 @@
           <template #default="{ row }">
             <div class="actions">
               <button class="action-btn preview" @click="openChunks(row)">切片</button>
-              <button class="action-btn bind" @click="openBindDialog(row)">绑定项目</button>
+              <button class="action-btn bind" @click="openBindDialog(row)">关联合同</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReparse(row)">重解析</button>
               <button v-if="row.deleted !== 1" class="action-btn edit" @click="doReindex(row)">重索引</button>
               <button v-if="row.deleted === 1" class="action-btn restore" @click="doRestore(row)">恢复</button>
@@ -243,7 +243,7 @@
     <el-dialog v-model="spaceDialogVisible" :title="editingSpace ? '编辑空间' : '新建空间'" width="460px">
       <el-form :model="spaceForm" label-width="70px">
         <el-form-item label="名称">
-          <el-input v-model="spaceForm.name" placeholder="例如：项目复盘" />
+          <el-input v-model="spaceForm.name" placeholder="例如：采购制度库" />
         </el-form-item>
         <el-form-item label="描述">
           <el-input v-model="spaceForm.description" type="textarea" :rows="2" />
@@ -276,9 +276,9 @@
 
     <el-dialog v-model="bindDialogVisible" :title="bindDialogTitle" width="520px">
       <el-form label-position="top">
-        <el-form-item label="适用项目">
-          <el-select v-model="bindProjectIds" multiple clearable filterable placeholder="选择用于哪些项目分析">
-            <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+        <el-form-item label="关联合同">
+          <el-select v-model="bindProjectIds" multiple clearable filterable placeholder="选择关联的合同案件">
+            <el-option v-for="project in projects" :key="project.id" :label="project.title || project.name" :value="project.id" />
           </el-select>
         </el-form-item>
       </el-form>
@@ -336,7 +336,7 @@ const documentPollTimer = ref(null)
 const chunkDialogVisible = ref(false)
 const chunkDialogTitle = ref('切片预览')
 const bindDialogVisible = ref(false)
-const bindDialogTitle = ref('绑定适用项目')
+const bindDialogTitle = ref('关联合同')
 const bindingDocument = ref(null)
 const bindProjectIds = ref([])
 const spaceDialogVisible = ref(false)
@@ -527,7 +527,7 @@ async function doUpload() {
 
 function openBindDialog(row) {
   bindingDocument.value = row
-  bindDialogTitle.value = `绑定适用项目 - ${row.title}`
+  bindDialogTitle.value = `关联合同 - ${row.title}`
   bindProjectIds.value = (row.boundProjects || []).map(project => Number(project.projectId))
   bindDialogVisible.value = true
 }
@@ -535,7 +535,7 @@ function openBindDialog(row) {
 async function saveDocumentProjects() {
   if (!bindingDocument.value) return
   await bindKbDocumentProjects(bindingDocument.value.id, bindProjectIds.value)
-  ElMessage.success('适用项目已更新')
+  ElMessage.success('关联合同已更新')
   bindDialogVisible.value = false
   await fetchDocuments()
 }

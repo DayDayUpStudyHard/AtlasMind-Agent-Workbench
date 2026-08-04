@@ -7,8 +7,8 @@
         <p>集中查看合同案件、审查发现、Agent Run、履约义务和审批状态。</p>
       </div>
       <div class="hero-actions">
-        <el-button @click="$router.push('/contracts')">合同管理</el-button>
-        <el-button type="primary" @click="$router.push('/agent-runs')">查看 Run</el-button>
+        <el-button @click="$router.push('/agent-runs')">查看 Run</el-button>
+        <el-button type="primary" @click="$router.push('/rules')">审查规则</el-button>
       </div>
     </section>
 
@@ -71,7 +71,7 @@
             class="record-row"
           >
             <div>
-              <strong>{{ run.projectName || `Project #${run.projectId}` }}</strong>
+              <strong>{{ run.subjectType === 'CONTRACT_CASE' ? '合同 #'+run.subjectId : (run.projectName || 'Run #'+run.id) }}</strong>
               <span>{{ run.currentStep || run.question || 'Agent Run' }}</span>
             </div>
             <em>{{ run.status }}</em>
@@ -83,20 +83,20 @@
       <section class="panel">
         <div class="panel-head">
           <div>
-            <span class="eyebrow">Evidence</span>
-            <h3>最近同步任务</h3>
+            <span class="eyebrow">Documents</span>
+            <h3>最近上传文件</h3>
           </div>
-          <router-link to="/evidence-sync">处理</router-link>
+          <router-link to="/evidence-sync">全部</router-link>
         </div>
         <div class="record-list" v-loading="loading">
-          <div v-for="job in recentSyncJobs" :key="job.id" class="record-row">
+          <div v-for="doc in recentDocs" :key="doc.id" class="record-row">
             <div>
-              <strong>{{ job.projectName || `Project #${job.projectId}` }}</strong>
-              <span>{{ job.message || job.errorMessage || 'Evidence sync job' }}</span>
+              <strong>{{ doc.fileName || 'Document #'+doc.id }}</strong>
+              <span>{{ doc.caseKey || '' }} · {{ doc.parseStatus }}</span>
             </div>
-            <em>{{ job.status }}</em>
+            <em>{{ doc.documentType }}</em>
           </div>
-          <el-empty v-if="!loading && recentSyncJobs.length === 0" description="暂无同步任务" :image-size="72" />
+          <el-empty v-if="!loading && recentDocs.length === 0" description="暂无上传文件" :image-size="72" />
         </div>
       </section>
     </div>
@@ -105,29 +105,28 @@
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
-import { getDashboardOverview } from '../api/index.js'
+import { getContractPortfolio, getAgentRuns, getKbDocuments } from '../api/index.js'
+import api from '../api/index.js'
 
 const loading = ref(false)
 const stats = ref({
-  projectCount: 0,
-  knowledgeDocumentCount: 0,
-  evidenceCount: 0,
-  activeRuns: 0,
-  pendingApprovals: 0,
-  failedIngestJobCount: 0,
-  failedSyncJobCount: 0
+  totalCases: 0, pendingReview: 0, pendingApproval: 0,
+  inFulfillment: 0, expiringSoon: 0, overdue: 0,
+  obligationsTotal: 0, obligationsOverdue: 0, openFindings: 0,
+  activeRuns: 0, totalAmount: 0
 })
 const recentRuns = ref([])
-const recentSyncJobs = ref([])
+const recentDocs = ref([])
 
-const totalFailedJobs = computed(() => stats.value.failedIngestJobCount + stats.value.failedSyncJobCount)
 const statItems = computed(() => [
-  { label: '项目', value: stats.value.projectCount, hint: '纳入 Agent 管理的研发项目' },
-  { label: '知识文档', value: stats.value.knowledgeDocumentCount, hint: '可被 RAG 检索的企业资料' },
-  { label: '证据', value: stats.value.evidenceCount, hint: '来自仓库、文档和连接器的事实' },
-  { label: '运行中 Run', value: stats.value.activeRuns, hint: '正在执行的 Agent 分析流程' },
-  { label: '待审批', value: stats.value.pendingApprovals, hint: '需要人工确认的自动化动作' },
-  { label: '失败任务', value: totalFailedJobs.value, hint: '导入或同步失败待处理' }
+  { label: '合同案件', value: stats.value.totalCases, hint: '合同全生命周期案件' },
+  { label: '待审查', value: stats.value.pendingReview, hint: '等待 Agent 审查或人工复核' },
+  { label: '待审批', value: stats.value.pendingApproval, hint: '需要法务/管理层审批' },
+  { label: '履约中', value: stats.value.inFulfillment, hint: '已签署正在执行中' },
+  { label: '即将到期', value: stats.value.expiringSoon, hint: '30 天内到期需关注' },
+  { label: '活跃 Run', value: stats.value.activeRuns, hint: '正在执行的 Agent 分析' },
+  { label: '待处理发现', value: stats.value.openFindings, hint: '审查发现待修改或接受' },
+  { label: '逾期义务', value: stats.value.obligationsOverdue, hint: '已逾期的履约义务' }
 ])
 
 onMounted(fetchDashboard)
@@ -135,22 +134,29 @@ onMounted(fetchDashboard)
 async function fetchDashboard() {
   loading.value = true
   try {
-    const response = await getDashboardOverview()
-    const data = response.data.data || {}
-    stats.value = {
-      projectCount: Number(data.projectCount) || 0,
-      knowledgeDocumentCount: Number(data.knowledgeDocumentCount) || 0,
-      evidenceCount: Number(data.evidenceCount) || 0,
-      activeRuns: Number(data.activeRuns) || 0,
-      pendingApprovals: Number(data.pendingApprovals) || 0,
-      failedIngestJobCount: Number(data.failedIngestJobCount) || 0,
-      failedSyncJobCount: Number(data.failedSyncJobCount) || 0
-    }
-    recentRuns.value = data.recentRuns || []
-    recentSyncJobs.value = data.recentSyncJobs || []
-  } finally {
-    loading.value = false
-  }
+    // Contract portfolio
+    const pf = await getContractPortfolio()
+    const d = pf.data.data || {}
+    Object.assign(stats.value, {
+      totalCases: d.total || 0, pendingReview: d.pendingReview || 0,
+      pendingApproval: d.pendingApproval || 0, inFulfillment: d.inFulfillment || 0,
+      expiringSoon: d.expiringSoon || 0, overdue: d.overdue || 0,
+      obligationsTotal: d.obligationsTotal || 0, obligationsOverdue: d.obligationsOverdue || 0,
+      openFindings: d.openFindings || 0, activeRuns: d.activeRuns || 0,
+      totalAmount: d.totalAmount || 0
+    })
+  } catch {}
+
+  try {
+    const runs = await getAgentRuns()
+    recentRuns.value = (runs.data.data || []).slice(0, 5)
+  } catch {}
+
+  try {
+    const docs = await api.get('/api/admin/contracts/documents')
+    recentDocs.value = (docs.data.data || []).slice(0, 5)
+  } catch {}
+  finally { loading.value = false }
 }
 </script>
 

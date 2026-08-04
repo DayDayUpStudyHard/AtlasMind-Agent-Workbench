@@ -7,6 +7,7 @@ elasticsearch>=8.11.0,<9.0.0
 numpy>=1.24.0
 pymysql>=1.1.0
 pypdf>=4.2.0
+python-docx>=1.1.2
 redis>=4.0,<5.0
 DBUtils>=3.0
 sentence-transformers>=2.7.0

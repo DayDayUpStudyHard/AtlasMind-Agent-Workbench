@@ -79,11 +79,14 @@ export function getRecentWorkspaceRuns() {
 }
 
 export function getContractPortfolio() { return api.get('/api/workspace/contracts/portfolio') }
+export function getContractWorkQueueSummary() { return api.get('/api/workspace/contracts/work-queues/summary') }
+export function getContractWorkQueue(type) { return api.get('/api/workspace/contracts/work-queues', { params: { type } }) }
 export function listContracts(params) { return api.get('/api/workspace/contracts', { params }) }
 export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
 export function createContractCase(data) { return api.post('/api/workspace/contracts', data) }
 export function startContractRun(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/runs`, data) }
 export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
+export function updateContractFinding(findingId, data) { return api.patch(`/api/workspace/contracts/findings/${findingId}`, data) }
 export function approveContractAction(runId, actionId, data) { return api.post(`/api/workspace/contracts/runs/${runId}/actions/${actionId}/approval`, data) }
 
 export function createAiSession(data = {}) {

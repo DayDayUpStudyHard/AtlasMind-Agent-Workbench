@@ -188,5 +188,5 @@ UPDATE agent_action SET subject_type = 'PROJECT', subject_id = project_id WHERE 
 -- ============================================================
 -- 9. PRODUCT_MODE config seed
 -- ============================================================
-INSERT IGNORE INTO system_config (config_key, config_value, description) VALUES
-('PRODUCT_MODE', 'contract', 'Product mode: contract (ContractOps) or project (legacy R&D). Switch to project to roll back.');
+INSERT IGNORE INTO system_config (config_key, config_value) VALUES
+('PRODUCT_MODE', 'contract');

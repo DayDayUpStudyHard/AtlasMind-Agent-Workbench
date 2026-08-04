@@ -8,6 +8,7 @@ const routes = [
     component: AdminLayout,
     children: [
       { path: '', name: 'Dashboard', component: () => import('../views/Dashboard.vue') },
+      { path: 'contracts', name: 'ContractManage', component: () => import('../views/ContractManage.vue') },
       { path: 'rules', name: 'ReviewRules', component: () => import('../views/RuleManage.vue') },
       { path: 'clauses', name: 'StandardClauses', component: () => import('../views/ClauseLibrary.vue') },
       { path: 'knowledge', name: 'KnowledgeBase', component: () => import('../views/KnowledgeBase.vue') },

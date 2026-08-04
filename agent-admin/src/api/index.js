@@ -47,12 +47,17 @@ export function getContracts() { return api.get('/api/workspace/contracts') }
 export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
 export function getContractPortfolio() { return api.get('/api/workspace/contracts/portfolio') }
 export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
+export function getAdminContractCases(params = {}) { return api.get('/api/admin/contracts/cases', { params }) }
+export function getAdminContractDeleteImpact(id) { return api.get(`/api/admin/contracts/cases/${id}/delete-impact`) }
+export function deleteAdminContractCase(id) { return api.delete(`/api/admin/contracts/cases/${id}`) }
+export function restoreAdminContractCase(id) { return api.post(`/api/admin/contracts/cases/${id}/restore`) }
 export function getAgentRuns() { return api.get('/api/workspace/runs/recent') }
-export function getAgentReports() { return api.get('/api/admin/projects/reports') }
-export function getAgentActions(params = {}) { return api.get('/api/admin/projects/actions', { params }) }
-export function deleteAgentRun(id) { return api.delete(`/api/admin/projects/runs/${id}`) }
-export function deleteAgentReport(id) { return api.delete(`/api/admin/projects/reports/${id}`) }
-export function deleteAgentAction(id) { return api.delete(`/api/admin/projects/actions/${id}`) }
+export function getAgentReports() { return api.get('/api/admin/contracts/reports') }
+export function getAgentActions(params = {}) { return api.get('/api/admin/contracts/actions', { params }) }
+export function deleteAgentRun(id) { return api.delete(`/api/admin/contracts/runs/${id}`) }
+export function cancelAgentRun(id) { return api.put(`/api/admin/contracts/runs/${id}/cancel`) }
+export function deleteAgentReport(id) { return api.delete(`/api/admin/contracts/reports/${id}`) }
+export function deleteAgentAction(id) { return api.delete(`/api/admin/contracts/actions/${id}`) }
 
 export function getKbSpaces() { return api.get('/api/admin/kb/spaces') }
 export function createKbSpace(data) { return api.post('/api/admin/kb/spaces', data) }
@@ -119,6 +124,22 @@ export function getAiObservabilityTraces(params) {
 
 export function getAiObservabilityTrace(id) {
   return api.get(`/api/admin/ai-observability/traces/${id}`)
+}
+
+export function getAiObservabilityAgentRuns(params) {
+  return api.get('/api/admin/ai-observability/agent-runs', { params })
+}
+
+export function getAiObservabilityAgentRun(id) {
+  return api.get(`/api/admin/ai-observability/agent-runs/${id}`)
+}
+
+export function getAiObservabilityDocumentPipelines(params) {
+  return api.get('/api/admin/ai-observability/document-pipelines', { params })
+}
+
+export function getAiObservabilityDocumentPipeline(id) {
+  return api.get(`/api/admin/ai-observability/document-pipelines/${id}`)
 }
 
 export function getKbNotifications(params) { return api.get('/api/admin/kb/notifications', { params }) }

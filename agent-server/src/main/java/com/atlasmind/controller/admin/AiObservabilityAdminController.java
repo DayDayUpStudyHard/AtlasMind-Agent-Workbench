@@ -43,8 +43,79 @@ public class AiObservabilityAdminController {
         return Result.ok(trace);
     }
 
+    @GetMapping("/agent-runs")
+    public Result<Map<String, Object>> agentRuns(
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long size,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String subjectType,
+            @RequestParam(required = false) String runType,
+            @RequestParam(required = false) String status) {
+        long safePage = Math.max(1, page);
+        long safeSize = Math.max(1, Math.min(size, 50));
+        long offset = (safePage - 1) * safeSize;
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("records", observabilityMapper.listAgentRuns(
+                offset, safeSize, normalizeKeyword(keyword),
+                normalizeEnum(subjectType), normalizeEnum(runType), normalizeEnum(status)));
+        data.put("total", observabilityMapper.countAgentRuns(
+                normalizeKeyword(keyword), normalizeEnum(subjectType),
+                normalizeEnum(runType), normalizeEnum(status)));
+        return Result.ok(data);
+    }
+
+    @GetMapping("/agent-runs/{id}")
+    public Result<Map<String, Object>> agentRun(@PathVariable Long id) {
+        Map<String, Object> run = observabilityMapper.getAgentRun(id);
+        if (run == null) {
+            return Result.fail("Agent Run not found");
+        }
+        Map<String, Object> data = new HashMap<>(run);
+        data.put("traces", observabilityMapper.listAgentRunTraces(id));
+        data.put("toolCalls", observabilityMapper.listAgentRunToolCalls(id));
+        data.put("reports", observabilityMapper.listAgentRunReports(id));
+        data.put("findings", observabilityMapper.listAgentRunFindings(id));
+        data.put("actions", observabilityMapper.listAgentRunActions(id));
+        return Result.ok(data);
+    }
+
+    @GetMapping("/document-pipelines")
+    public Result<Map<String, Object>> documentPipelines(
+            @RequestParam(defaultValue = "1") long page,
+            @RequestParam(defaultValue = "10") long size,
+            @RequestParam(required = false) String keyword,
+            @RequestParam(required = false) String status) {
+        long safePage = Math.max(1, page);
+        long safeSize = Math.max(1, Math.min(size, 50));
+        long offset = (safePage - 1) * safeSize;
+
+        Map<String, Object> data = new HashMap<>();
+        data.put("records", observabilityMapper.listDocumentPipelines(
+                offset, safeSize, normalizeKeyword(keyword), normalizeEnum(status)));
+        data.put("total", observabilityMapper.countDocumentPipelines(
+                normalizeKeyword(keyword), normalizeEnum(status)));
+        return Result.ok(data);
+    }
+
+    @GetMapping("/document-pipelines/{id}")
+    public Result<Map<String, Object>> documentPipeline(@PathVariable Long id) {
+        Map<String, Object> pipeline = observabilityMapper.getDocumentPipeline(id);
+        if (pipeline == null) {
+            return Result.fail("Document Pipeline not found");
+        }
+        Map<String, Object> data = new HashMap<>(pipeline);
+        data.put("traces", observabilityMapper.listDocumentPipelineTraces(id));
+        return Result.ok(data);
+    }
+
     private String normalizeKeyword(String keyword) {
         if (keyword == null || keyword.isBlank()) return null;
         return keyword.trim();
+    }
+
+    private String normalizeEnum(String value) {
+        if (value == null || value.isBlank()) return null;
+        return value.trim().toUpperCase();
     }
 }

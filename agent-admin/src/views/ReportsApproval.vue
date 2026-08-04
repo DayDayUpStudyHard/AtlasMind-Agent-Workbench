@@ -4,7 +4,7 @@
       <div>
         <span class="eyebrow">报告与动作状态</span>
         <h2>报告与动作状态</h2>
-        <p>后台查看 Agent 报告、业务审批队列和外部动作执行结果。审批决定由项目前台的负责人完成，后台只处理阻塞与审计。</p>
+        <p>查看 Agent 报告、审批队列和动作执行结果。审批在合同工作台完成，后台处理阻塞与审计。</p>
       </div>
       <el-button @click="fetchData">刷新</el-button>
     </section>
@@ -19,7 +19,7 @@
           <article v-for="report in reports" :key="report.id" class="record-row">
             <div>
               <strong>{{ report.title }}</strong>
-              <p>{{ report.projectName }} / {{ reportMeta(report) }}</p>
+              <p>{{ report.caseTitle || '合同 #'+report.subjectId }} / {{ reportMeta(report) }}</p>
             </div>
             <div class="record-actions">
               <el-tag effect="plain">{{ reportStatusLabel(report.status) }}</el-tag>
@@ -39,7 +39,7 @@
           <article v-for="action in actions" :key="action.id" class="record-row">
             <div>
               <strong>{{ action.title }}</strong>
-              <p>{{ action.projectName }} / {{ actionTypeLabel(action.actionType) }}</p>
+              <p>{{ action.caseTitle || '合同 #'+action.subjectId }} / {{ actionTypeLabel(action.actionType) }}</p>
               <small v-if="action.errorMessage">{{ action.errorMessage }}</small>
             </div>
             <div class="record-actions">
@@ -82,19 +82,26 @@ async function fetchData() {
 function tagType(status) {
   return { EXECUTED: 'success', BLOCKED: 'danger', REJECTED: 'info', PENDING_APPROVAL: 'warning' }[status] || 'info'
 }
-function healthLabel(status) {
-  return { HEALTHY: '稳定', WATCH: '关注', AT_RISK: '有风险', UNKNOWN: '未分析' }[status] || '未分析'
-}
 function reportMeta(report) {
-  if (report.reportType === 'ONBOARDING_GUIDE') return '项目接手手册'
-  if (report.reportType === 'DECISION_MEMO') return '研发决策备忘录'
-  return `${healthLabel(report.healthStatus)} / ${report.healthScore}/100`
+  return {
+    CONTRACT_REVIEW_REPORT: '合同审查报告',
+    CONTRACT_INTAKE_REPORT: '合同发起清单',
+    APPROVAL_MEMO: '审批决策备忘录',
+    VERSION_REVIEW_REPORT: '版本复核报告',
+    OBLIGATION_PLAN: '履约义务计划',
+    FULFILLMENT_REPORT: '履约检查报告',
+    RENEWAL_MEMO: '续约评估备忘录',
+    NEGOTIATION_STRATEGY_MEMO: '谈判策略备忘录'
+  }[report.reportType] || report.reportType || 'Agent 报告'
 }
 function reportStatusLabel(status) {
   return { DRAFT: '草稿', PUBLISHED: '已发布', ARCHIVED: '已归档' }[status] || status || '未知'
 }
 function actionTypeLabel(type) {
-  return { CREATE_GITHUB_ISSUE: '创建 GitHub Issue' }[type] || type || '外部动作'
+  return {
+    CREATE_NEGOTIATION_TASK: '创建谈判任务', REQUEST_MATERIAL: '请求补充材料',
+    REQUEST_LEGAL_REVIEW: '请求法务复核', SCHEDULE_REMINDER: '安排履约提醒'
+  }[type] || type || '外部动作'
 }
 function actionStatusLabel(status) {
   return { EXECUTED: '已执行', BLOCKED: '执行阻塞', REJECTED: '已驳回', PENDING_APPROVAL: '待审批', APPROVED: '已批准' }[status] || status || '未知'

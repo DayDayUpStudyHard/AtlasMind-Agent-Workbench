@@ -116,6 +116,8 @@ class AgentTaskContext:
     project_id: int
     task_type: str
     question: str
+    subject_type: str = "PROJECT"
+    subject_id: int = 0
     project: dict = field(default_factory=dict)
     task_input: dict = field(default_factory=dict)
 
@@ -126,6 +128,8 @@ class AgentTaskContext:
             project_id=request.project_id,
             task_type=request.task_type,
             question=request.question,
+            subject_type=request.subject_type,
+            subject_id=request.subject_id,
             project=request.project,
             task_input=request.task_input,
         )
