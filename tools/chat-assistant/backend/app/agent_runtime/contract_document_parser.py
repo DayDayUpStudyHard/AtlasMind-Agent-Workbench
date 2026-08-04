@@ -634,6 +634,7 @@ def _add_timeline_node(
             "clauseNumber": clause.get("clauseNumber"),
             "title": clause.get("title"),
             "quote": quote,
+            "fullQuote": str(clause.get("content") or "").strip()[:12000],
             "page": 1,
             "extractionMode": source_mode,
         },
@@ -911,12 +912,16 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
                 pass
             explicit_consequence = str(result.get("explicitConsequence") or "").strip()[:500]
             ai_risk = str(result.get("aiRisk") or "").strip()[:500]
+            contract_requirements = _string_list(result.get("contractRequirements"), 8, 500)
+            ai_suggestions = _string_list(result.get("aiSuggestions"), 8, 500)
             node["source"] = "LLM_ENRICHED"
             node["citation"]["timelineEnrichment"] = {
                 "keep": result.get("keep", True),
                 "reason": str(result.get("reason") or "")[:300],
                 "explicitConsequence": explicit_consequence,
                 "aiRisk": _normalize_ai_risk(ai_risk or _rule_ai_risk(node)),
+                "contractRequirements": contract_requirements,
+                "aiSuggestions": ai_suggestions,
             }
             if node["confidence"] < 0.8:
                 node["status"] = "NEEDS_REVIEW"
@@ -936,6 +941,16 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
         "returned": len(result_by_id),
         "dropped": dropped,
     }
+
+
+def _string_list(value, limit: int, item_limit: int) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [
+        re.sub(r"\s+", " ", str(item)).strip()[:item_limit]
+        for item in value[:limit]
+        if str(item).strip()
+    ]
 
 
 def _rule_explicit_consequence(quote: str) -> str:

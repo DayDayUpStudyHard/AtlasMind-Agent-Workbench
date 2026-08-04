@@ -36,8 +36,8 @@
     <section class="timeline-panel">
       <div class="timeline-panel-head">
         <div>
-          <span>时间节点</span>
-          <h3>合同履约时间线</h3>
+          <span>履约日程</span>
+          <h3>关键时间与待办</h3>
         </div>
         <strong>{{ caseTimelineNodes.length }} 个节点</strong>
       </div>
@@ -47,152 +47,174 @@
           :key="timelineKey(node)"
           class="detail-timeline-node"
           :class="timelineStatusClass(node)"
+          role="button"
+          tabindex="0"
+          @click="openTimelineDetail(node)"
+          @keydown.enter="openTimelineDetail(node)"
         >
-          <i></i>
+          <div class="timeline-date-column">
+            <strong>{{ timelineDateLabel(node) }}</strong>
+            <span v-if="relativeDateResult(node).baseUncertain" class="basis-warning">基准日期待确认</span>
+            <small v-else>{{ timelineDateKind(node) }}</small>
+          </div>
           <div class="timeline-node-main">
-            <div class="timeline-node-top">
-              <strong>{{ node.label || timelineTypeLabel(node.nodeType) }}</strong>
-              <span class="timeline-date-badge">{{ timelineDateLabel(node) }}</span>
-            </div>
-            <p class="timeline-meaning">{{ timelineMeaning(node) }}</p>
+            <span v-if="timelineTypeLabel(node.nodeType) !== (node.label || timelineTypeLabel(node.nodeType))" class="timeline-type">{{ timelineTypeLabel(node.nodeType) }}</span>
+            <h4>{{ node.label || timelineTypeLabel(node.nodeType) }}</h4>
+            <p class="timeline-action">{{ timelineAction(node) }}</p>
             <div class="timeline-node-meta">
               <small>{{ timelineSourceLabel(node) }}</small>
-              <small v-if="node.sourceTitle"> · {{ node.sourceTitle }}</small>
-              <small v-if="node.responsibleParty"> · {{ timelinePartyLabel(node.responsibleParty) }}</small>
-              <small v-if="node.confidence != null"> · 置信度 {{ confidenceLabel(node.confidence) }}</small>
+              <small>{{ timelinePartyLabel(node.responsibleParty) }}</small>
+              <small v-if="node.confidence != null">可信度 {{ confidenceLabel(node.confidence) }}</small>
             </div>
-            <div v-if="timelineCondition(node)" class="timeline-date-resolution">
-              <strong>{{ relativeDateResult(node).label }}</strong>
-              <select
-                v-if="relativeDateResult(node).needsChoice"
-                v-model="timelineBaseSelection[timelineKey(node)]"
-              >
-                <option value="">选择基准日期</option>
-                <option v-for="candidate in relativeDateResult(node).candidates" :key="candidate.key" :value="candidate.value">
-                  {{ candidate.label }} · {{ candidate.value }}
-                </option>
-              </select>
-              <small>{{ relativeDateResult(node).hint }}</small>
-            </div>
-            <details v-if="timelineQuote(node) || timelineCondition(node)" class="timeline-evidence">
-              <summary>原文依据与复核</summary>
-              <blockquote v-if="timelineQuote(node)">“{{ timelineQuote(node) }}”</blockquote>
-              <p v-if="timelineCondition(node)" class="timeline-condition">触发条件：{{ timelineCondition(node) }}</p>
-              <p v-if="timelineEnrichmentReason(node)" class="timeline-review-note">
-                Agent 复核：{{ timelineEnrichmentReason(node) }}
-              </p>
-            </details>
-            <div v-if="timelineConsequence(node).explicit || timelineConsequence(node).ai" class="timeline-consequence">
-              <div v-if="timelineConsequence(node).explicit">
-                <span>合同原文明确约定</span>
-                <p>{{ timelineConsequence(node).explicit }}</p>
-              </div>
-              <div v-if="timelineConsequence(node).ai">
-                <span>AI 推断，仅供参考，不代表合同约定</span>
-                <p>{{ timelineConsequence(node).ai }}</p>
-              </div>
-            </div>
-            <div v-if="canFulfillmentCheck(node)" class="fulfillment-box">
-              <div class="fulfillment-head">
-                <div>
-                  <span>履约核验</span>
-                  <strong>{{ fulfillmentConclusionLabel(latestFulfillmentCheck(node)?.conclusion) }}</strong>
-                </div>
-                <div class="fulfillment-actions">
-                  <button class="quiet-button tiny" @click="openEvidenceLinks(node)">调整证据</button>
-                  <button
-                    class="quiet-button tiny"
-                    :disabled="running || fulfillmentCheckRunning(node)"
-                    @click="startTimelineFulfillmentCheck(node)"
-                  >
-                    {{ fulfillmentCheckRunning(node) ? '核验中' : '发起核验' }}
-                  </button>
-                </div>
-              </div>
-              <div v-if="latestFulfillmentCheck(node)" class="fulfillment-result">
-                <p>{{ latestFulfillmentCheck(node).summary || '等待核验结果生成。' }}</p>
-                <div class="fulfillment-tags">
-                  <span>风险 {{ levelLabel(latestFulfillmentCheck(node).riskLevel) }}</span>
-                  <span>可信度 {{ levelLabel(latestFulfillmentCheck(node).confidenceLevel) }}</span>
-                  <span v-if="latestFulfillmentCheck(node).manualResult">人工：{{ manualResultLabel(latestFulfillmentCheck(node).manualResult) }}</span>
-                  <span v-if="latestFulfillmentCheck(node).needsRecheck">新证据待重新核验</span>
-                </div>
-                <div v-if="latestFulfillmentCheck(node).explicitConsequence || latestFulfillmentCheck(node).aiRisk" class="timeline-consequence">
-                  <div v-if="latestFulfillmentCheck(node).explicitConsequence">
-                    <span>合同原文明确约定</span>
-                    <p>{{ latestFulfillmentCheck(node).explicitConsequence }}</p>
-                  </div>
-                  <div v-if="latestFulfillmentCheck(node).aiRisk">
-                    <span>AI 推断，仅供参考，不代表合同约定</span>
-                    <p>{{ latestFulfillmentCheck(node).aiRisk }}</p>
-                  </div>
-                </div>
-                <div v-if="requirementRows(latestFulfillmentCheck(node)).length" class="fulfillment-requirements">
-                  <small>合同要求 · 证据 · 判断 · 缺口</small>
-                  <article v-for="(row, index) in requirementRows(latestFulfillmentCheck(node))" :key="index">
-                    <div><span>合同要求</span><p>{{ row.requirement || '待人工复核合同要求' }}</p></div>
-                    <div><span>证据</span><p>{{ row.evidence || '暂无充分证据' }}</p></div>
-                    <div><span>判断</span><p>{{ row.judgement || row.judgment || '需人工复核' }}</p></div>
-                    <div><span>缺口</span><p>{{ row.gap || '暂无明确缺口' }}</p></div>
-                    <em>{{ row.required === false ? '辅助项' : '必需项' }}</em>
-                  </article>
-                </div>
-                <div v-if="arrayField(latestFulfillmentCheck(node).missingEvidenceJson).length" class="fulfillment-list">
-                  <small>缺失证据</small>
-                  <ul><li v-for="item in arrayField(latestFulfillmentCheck(node).missingEvidenceJson)" :key="item">{{ item }}</li></ul>
-                </div>
-                <div v-if="arrayField(latestFulfillmentCheck(node).evidenceSnapshotJson).length" class="fulfillment-list evidence-snapshot">
-                  <small>证据快照</small>
-                  <ul>
-                    <li v-for="item in arrayField(latestFulfillmentCheck(node).evidenceSnapshotJson)" :key="item.documentId || item.fileName || item.snippet">
-                      {{ evidenceSnapshotLabel(item) }}
-                    </li>
-                  </ul>
-                </div>
-                <details class="fulfillment-history">
-                  <summary>查看 {{ fulfillmentHistory(node).length }} 次核验历史</summary>
-                  <article v-for="check in fulfillmentHistory(node)" :key="check.id">
-                    <strong>#{{ check.id }} · {{ fulfillmentConclusionLabel(check.conclusion) }}</strong>
-                    <p>{{ check.summary || check.runCurrentStep || '等待 Agent 生成结果' }}</p>
-                    <div v-if="requirementRows(check).length" class="history-grid">
-                      <div v-for="(row, index) in requirementRows(check)" :key="index">
-                        <span>{{ row.required === false ? '辅助项' : '必需项' }}</span>
-                        <p><b>要求：</b>{{ row.requirement || '待人工复核合同要求' }}</p>
-                        <p><b>证据：</b>{{ row.evidence || '暂无充分证据' }}</p>
-                        <p><b>判断：</b>{{ row.judgement || row.judgment || '需人工复核' }}</p>
-                        <p><b>缺口：</b>{{ row.gap || '暂无明确缺口' }}</p>
-                      </div>
-                    </div>
-                    <div v-if="arrayField(check.evidenceSnapshotJson).length" class="history-snapshots">
-                      <span>证据快照</span>
-                      <small v-for="item in arrayField(check.evidenceSnapshotJson)" :key="item.documentId || item.fileName || item.snippet">
-                        {{ evidenceSnapshotLabel(item) }}
-                      </small>
-                    </div>
-                    <div v-if="arrayField(check.missingEvidenceJson).length" class="history-snapshots warn">
-                      <span>补证清单</span>
-                      <small v-for="item in arrayField(check.missingEvidenceJson)" :key="item">{{ item }}</small>
-                    </div>
-                    <div v-if="check.explicitConsequence || check.aiRisk" class="history-consequence">
-                      <p v-if="check.explicitConsequence"><b>合同明确后果：</b>{{ check.explicitConsequence }}</p>
-                      <p v-if="check.aiRisk"><b>AI 推断，仅供参考：</b>{{ stripAiRiskPrefix(check.aiRisk) }}</p>
-                    </div>
-                    <small>{{ formatDate(check.createTime) }} · {{ check.runStatus || check.status }}</small>
-                  </article>
-                </details>
-                <div class="fulfillment-confirm">
-                  <button class="quiet-button tiny" @click="confirmFulfillmentCheck(latestFulfillmentCheck(node), 'COMPLETED')">人工确认完成</button>
-                  <button class="quiet-button tiny" @click="confirmFulfillmentCheck(latestFulfillmentCheck(node), 'FAILED')">人工确认失败</button>
-                  <button class="quiet-button tiny" @click="confirmFulfillmentCheck(latestFulfillmentCheck(node), 'NEEDS_MORE_EVIDENCE')">继续补证</button>
-                </div>
-              </div>
-              <p v-else class="fulfillment-empty">到达节点前后都可以发起预核验；AI 只给建议，最终结果由人工确认。</p>
-            </div>
+          </div>
+          <div class="timeline-row-actions" @click.stop>
+            <button v-if="canFulfillmentCheck(node)" class="evidence-button" @click="openTimelineDetail(node, true)">上传证明</button>
+            <button class="detail-button" @click="openTimelineDetail(node)">查看详情 <span aria-hidden="true">→</span></button>
           </div>
         </article>
       </div>
       <div v-else class="timeline-empty">{{ timelineEmptyText() }}</div>
     </section>
+
+    <div v-if="selectedTimelineNode" class="modal-overlay" @click.self="closeTimelineDetail">
+      <section class="timeline-detail-modal" role="dialog" aria-modal="true" aria-labelledby="timeline-detail-title">
+        <header class="timeline-detail-header">
+          <div>
+            <span>{{ timelineTypeLabel(selectedTimelineNode.nodeType) }}</span>
+            <h3 id="timeline-detail-title">{{ selectedTimelineNode.label || timelineTypeLabel(selectedTimelineNode.nodeType) }}</h3>
+            <p>{{ timelineAction(selectedTimelineNode) }}</p>
+          </div>
+          <button class="modal-close" aria-label="关闭时间节点详情" @click="closeTimelineDetail">×</button>
+        </header>
+
+        <div class="timeline-detail-body">
+          <section class="detail-date-band">
+            <div>
+              <span>预计时间</span>
+              <strong>{{ timelineDateLabel(selectedTimelineNode) }}</strong>
+              <small v-if="relativeDateResult(selectedTimelineNode).baseUncertain">基准日期不确定，当前结果为推定日期</small>
+              <small v-else>{{ timelineDateKind(selectedTimelineNode) }}</small>
+            </div>
+            <label v-if="timelineCondition(selectedTimelineNode)" class="base-date-editor">
+              <span>计算基准日期</span>
+              <input
+                type="date"
+                :value="relativeDateResult(selectedTimelineNode).baseDate"
+                @input="setTimelineBaseDate(selectedTimelineNode, $event.target.value)"
+              />
+              <small>{{ relativeDateResult(selectedTimelineNode).hint }}</small>
+              <div v-if="timelineBaseSelection[timelineKey(selectedTimelineNode)]" class="base-date-actions">
+                <button
+                  v-if="timelineBaseField(selectedTimelineNode)"
+                  type="button"
+                  class="base-date-save"
+                  :disabled="timelineBaseSaving"
+                  @click="saveTimelineBaseDate(selectedTimelineNode)"
+                >{{ timelineBaseSaving ? '保存中...' : `保存为${timelineBaseField(selectedTimelineNode).label}` }}</button>
+                <button type="button" :disabled="timelineBaseSaving" @click="resetTimelineBaseDate(selectedTimelineNode)">恢复系统推定</button>
+              </div>
+              <small v-if="timelineBaseSelection[timelineKey(selectedTimelineNode)] && !timelineBaseField(selectedTimelineNode)" class="base-date-trial-note">事件触发日期仅用于本页试算，不会改写合同基本信息。</small>
+            </label>
+          </section>
+
+          <section class="detail-section">
+            <div class="detail-section-title"><span>01</span><h4>本节点要完成什么</h4></div>
+            <div v-if="timelineContractRequirements(selectedTimelineNode).length" class="requirement-list">
+              <div v-for="item in timelineContractRequirements(selectedTimelineNode)" :key="item">
+                <span class="source-contract">来自合同</span><p>{{ item }}</p>
+              </div>
+            </div>
+            <div v-if="timelineAiSuggestions(selectedTimelineNode).length" class="requirement-list ai-list">
+              <div v-for="item in timelineAiSuggestions(selectedTimelineNode)" :key="item">
+                <span class="source-ai">AI 建议</span><p>{{ item }}</p>
+              </div>
+            </div>
+            <p v-if="!timelineContractRequirements(selectedTimelineNode).length && !timelineAiSuggestions(selectedTimelineNode).length" class="detail-empty">
+              合同未明确列出交付材料，需由 Agent 结合完整条款补充建议。
+            </p>
+          </section>
+
+          <section class="detail-section">
+            <div class="detail-section-title"><span>02</span><h4>原文依据</h4></div>
+            <p class="evidence-location">{{ selectedTimelineNode.sourceTitle || '合同正文' }} · {{ timelineSourceLabel(selectedTimelineNode) }}</p>
+            <blockquote class="full-contract-quote">{{ timelineFullQuote(selectedTimelineNode) || timelineQuote(selectedTimelineNode) }}</blockquote>
+            <p v-if="timelineCondition(selectedTimelineNode)" class="timeline-condition">命中条件：{{ timelineCondition(selectedTimelineNode) }}</p>
+          </section>
+
+          <section v-if="timelineConsequence(selectedTimelineNode).explicit || timelineConsequence(selectedTimelineNode).ai" class="detail-section">
+            <div class="detail-section-title"><span>03</span><h4>未完成可能产生什么后果</h4></div>
+            <div class="consequence-split">
+              <div v-if="timelineConsequence(selectedTimelineNode).explicit">
+                <span>合同明确约定</span><p>{{ timelineConsequence(selectedTimelineNode).explicit }}</p>
+              </div>
+              <div v-if="timelineConsequence(selectedTimelineNode).ai" class="ai-consequence">
+                <span>AI 推断，仅供参考，不代表合同约定</span><p>{{ stripAiRiskPrefix(timelineConsequence(selectedTimelineNode).ai) }}</p>
+              </div>
+            </div>
+          </section>
+
+          <section v-if="canFulfillmentCheck(selectedTimelineNode)" ref="evidenceSection" class="detail-section fulfillment-workspace">
+            <div class="detail-section-title"><span>04</span><h4>上传证明并进行履约核验</h4></div>
+            <div class="evidence-upload-zone">
+              <label>
+                <input type="file" accept=".doc,.docx,.pdf,.txt,.md,.markdown" @change="chooseTimelineEvidenceFile" />
+                <strong>{{ timelineEvidenceUpload.file?.name || '选择履约证明文件' }}</strong>
+                <small>支持 PDF、DOC、DOCX、TXT；图片证据请先转为 PDF，或由人工配合复核</small>
+              </label>
+              <button :disabled="!timelineEvidenceUpload.file || timelineEvidenceUpload.uploading" @click="uploadTimelineEvidence(selectedTimelineNode)">
+                {{ timelineEvidenceUpload.uploading ? '上传并解析中' : '上传并绑定当前节点' }}
+              </button>
+            </div>
+            <div class="fulfillment-actions detail-actions">
+              <button class="quiet-button" @click="openEvidenceLinks(selectedTimelineNode)">管理已绑定证据</button>
+              <button class="primary-button" :disabled="running || fulfillmentCheckRunning(selectedTimelineNode)" @click="startTimelineFulfillmentCheck(selectedTimelineNode)">
+                {{ fulfillmentCheckRunning(selectedTimelineNode) ? 'Agent 核验中' : '让 Agent 核验履约情况' }}
+              </button>
+            </div>
+
+            <div v-if="latestFulfillmentCheck(selectedTimelineNode)" class="fulfillment-result detail-result">
+              <div class="fulfillment-summary-row">
+                <strong>{{ fulfillmentConclusionLabel(latestFulfillmentCheck(selectedTimelineNode).conclusion) }}</strong>
+                <div class="fulfillment-tags">
+                  <span>风险 {{ levelLabel(latestFulfillmentCheck(selectedTimelineNode).riskLevel) }}</span>
+                  <span>可信度 {{ levelLabel(latestFulfillmentCheck(selectedTimelineNode).confidenceLevel) }}</span>
+                  <span v-if="latestFulfillmentCheck(selectedTimelineNode).needsRecheck">新证据待重新核验</span>
+                </div>
+              </div>
+              <p>{{ latestFulfillmentCheck(selectedTimelineNode).summary || '等待核验结果生成。' }}</p>
+              <div v-if="requirementRows(latestFulfillmentCheck(selectedTimelineNode)).length" class="fulfillment-requirements">
+                <small>合同要求 · 证据 · 判断 · 缺口</small>
+                <article v-for="(row, index) in requirementRows(latestFulfillmentCheck(selectedTimelineNode))" :key="index">
+                  <div><span>合同要求</span><p>{{ row.requirement || '待人工复核合同要求' }}</p></div>
+                  <div><span>证据</span><p>{{ row.evidence || '暂无充分证据' }}</p></div>
+                  <div><span>判断</span><p>{{ row.judgement || row.judgment || '需人工复核' }}</p></div>
+                  <div><span>缺口</span><p>{{ row.gap || '暂无明确缺口' }}</p></div>
+                  <em>{{ row.required === false ? '辅助项' : '必需项' }}</em>
+                </article>
+              </div>
+              <div v-if="arrayField(latestFulfillmentCheck(selectedTimelineNode).missingEvidenceJson).length" class="fulfillment-list">
+                <small>还需补充</small>
+                <ul><li v-for="item in arrayField(latestFulfillmentCheck(selectedTimelineNode).missingEvidenceJson)" :key="item">{{ item }}</li></ul>
+              </div>
+              <details class="fulfillment-history">
+                <summary>查看 {{ fulfillmentHistory(selectedTimelineNode).length }} 次核验历史</summary>
+                <article v-for="check in fulfillmentHistory(selectedTimelineNode)" :key="check.id">
+                  <strong>#{{ check.id }} · {{ fulfillmentConclusionLabel(check.conclusion) }}</strong>
+                  <p>{{ check.summary || check.runCurrentStep || '等待 Agent 生成结果' }}</p>
+                  <small>{{ formatDate(check.createTime) }} · {{ check.runStatus || check.status }}</small>
+                </article>
+              </details>
+              <div class="fulfillment-confirm">
+                <button class="quiet-button" @click="confirmFulfillmentCheck(latestFulfillmentCheck(selectedTimelineNode), 'COMPLETED')">人工确认完成</button>
+                <button class="quiet-button" @click="confirmFulfillmentCheck(latestFulfillmentCheck(selectedTimelineNode), 'FAILED')">人工确认失败</button>
+                <button class="quiet-button" @click="confirmFulfillmentCheck(latestFulfillmentCheck(selectedTimelineNode), 'NEEDS_MORE_EVIDENCE')">继续补证</button>
+              </div>
+            </div>
+            <p v-else class="fulfillment-empty">先上传证明材料，再让 Agent 按合同要求逐项核验；最终结果仍由人工确认。</p>
+          </section>
+        </div>
+      </section>
+    </div>
 
     <section class="side-section" v-if="availableKnowledge.length">
       <h3>本合同可用知识 · {{ availableKnowledge.length }} 份</h3>
@@ -381,10 +403,10 @@
           </div>
         </div>
         <div class="modal-foot intake-actions">
-          <el-button @click="showIntakeModal = false">暂不处理</el-button>
-          <el-button type="primary" @click="doConfirmIntake" :loading="confirming">
-            确认无误，更新合同信息
-          </el-button>
+          <button class="quiet-button" @click="showIntakeModal = false">暂不处理</button>
+          <button class="primary-button" @click="doConfirmIntake" :disabled="confirming">
+            {{ confirming ? '正在更新' : '确认无误，更新合同信息' }}
+          </button>
         </div>
       </div>
     </div>
@@ -411,10 +433,10 @@
           </label>
         </div>
         <div class="modal-foot intake-actions">
-          <el-button @click="closeEvidenceLinks">取消</el-button>
-          <el-button type="primary" :loading="evidenceDialog.saving" @click="saveEvidenceLinks">
-            保存绑定
-          </el-button>
+          <button class="quiet-button" @click="closeEvidenceLinks">取消</button>
+          <button class="primary-button" :disabled="evidenceDialog.saving" @click="saveEvidenceLinks">
+            {{ evidenceDialog.saving ? '正在保存' : '保存绑定' }}
+          </button>
         </div>
       </div>
     </div>
@@ -493,10 +515,15 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import api from '../api/index.js'
+import {
+  deriveTimelineAction,
+  resolveTimelineDate,
+  sanitizeTimelineMeaning,
+} from '../utils/contractTimeline.js'
 
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const running = ref(false)
@@ -509,6 +536,10 @@ const intakeFields = ref(null)
 const confirming = ref(false)
 const selectedTask = ref('VERSION_REVIEW')
 const timelineBaseSelection = reactive({})
+const timelineBaseSaving = ref(false)
+const selectedTimelineNode = ref(null)
+const evidenceSection = ref(null)
+const timelineEvidenceUpload = reactive({ file: null, uploading: false })
 const evidenceDialog = reactive({
   visible: false,
   loading: false,
@@ -609,6 +640,11 @@ async function openTextPreview(document) {
 async function refreshCase() {
   const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
   c.value = r.data.data
+  if (selectedTimelineNode.value) {
+    selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
+      String(node.sourceId || node.id) === String(selectedTimelineNode.value.sourceId || selectedTimelineNode.value.id)
+    ) || selectedTimelineNode.value
+  }
   checkPendingIntake()
 }
 
@@ -759,6 +795,56 @@ async function startTimelineFulfillmentCheck(node) {
     running.value = false
   }
 }
+async function openTimelineDetail(node, focusEvidence = false) {
+  selectedTimelineNode.value = node
+  if (focusEvidence) {
+    await nextTick()
+    evidenceSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+function closeTimelineDetail() {
+  selectedTimelineNode.value = null
+  timelineEvidenceUpload.file = null
+}
+function chooseTimelineEvidenceFile(event) {
+  timelineEvidenceUpload.file = event.target.files?.[0] || null
+}
+async function uploadTimelineEvidence(node) {
+  const file = timelineEvidenceUpload.file
+  if (!file || timelineEvidenceUpload.uploading || !canFulfillmentCheck(node)) return
+  timelineEvidenceUpload.uploading = true
+  try {
+    const form = new FormData()
+    form.append('file', file)
+    const stored = await api.post('/api/upload', form, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: 120000,
+    })
+    const filePath = stored.data.data?.url || ''
+    if (!filePath) throw new Error('文件存储未返回可用路径')
+    const uploaded = await api.post(`/api/workspace/contracts/${route.params.id}/fulfillment-evidence`, {
+      fileName: file.name,
+      filePath,
+      fileSize: file.size,
+    })
+    const documentId = Number(uploaded.data.data?.uploadedDocumentId || 0)
+    const links = await api.get(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/evidence-links`)
+    const linkedIds = Array.isArray(links.data.data?.linkedDocumentIds)
+      ? links.data.data.linkedDocumentIds.map(Number).filter(Boolean)
+      : []
+    if (documentId && !linkedIds.includes(documentId)) linkedIds.push(documentId)
+    await api.put(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/evidence-links`, {
+      documentIds: linkedIds,
+    })
+    timelineEvidenceUpload.file = null
+    message.success('证明文件已上传并绑定当前节点，解析完成后可发起 Agent 核验')
+    await refreshCase()
+  } catch (e) {
+    message.error(uploadErrorMessage(e, '履约证明上传失败'))
+  } finally {
+    timelineEvidenceUpload.uploading = false
+  }
+}
 async function openEvidenceLinks(node) {
   if (!canFulfillmentCheck(node)) {
     message.warning('该时间节点缺少可绑定的合同条款记录')
@@ -866,12 +952,12 @@ function timelineDateValue(node) { return node.nodeDate || node.date || '' }
 function timelineCondition(node) { return node.conditionText || node.condition || '' }
 function timelineDateLabel(node) {
   const result = relativeDateResult(node)
-  if (result.display) return result.display
+  if (result.resolvedDate) return result.resolvedDate
   if (timelineDateValue(node)) return timelineDateValue(node)
-  return '待确认'
+  return timelineCondition(node) || '待确认'
 }
 function timelineMeaning(node) {
-  return node.businessMeaning || node.description || timelineCondition(node)
+  return sanitizeTimelineMeaning(node.businessMeaning || node.description || timelineCondition(node))
     || (timelineDateValue(node) ? '来自合同正文提取的履约时间点。' : '来自合同正文或案件字段的时间节点。')
 }
 function timelineCitation(node) {
@@ -883,6 +969,31 @@ function timelineCitation(node) {
 function timelineQuote(node) {
   const citation = timelineCitation(node)
   return citation?.quote || citation?.snippet || ''
+}
+function timelineFullQuote(node) {
+  const citation = timelineCitation(node)
+  return citation?.fullQuote || citation?.clauseContent || timelineQuote(node)
+}
+function timelineAction(node) {
+  const enrichment = timelineCitation(node)?.timelineEnrichment || {}
+  const enriched = sanitizeTimelineMeaning(enrichment.businessMeaning || '')
+  if (enriched) return enriched
+  const sourceText = timelineCondition(node)
+    ? (timelineFullQuote(node) || timelineQuote(node))
+    : (timelineQuote(node) || timelineFullQuote(node))
+  const action = deriveTimelineAction(sourceText, timelineCondition(node))
+  return action || timelineMeaning(node)
+}
+function timelineContractRequirements(node) {
+  const values = timelineCitation(node)?.timelineEnrichment?.contractRequirements
+  if (Array.isArray(values) && values.length) return values.map(String).filter(Boolean)
+  const action = timelineAction(node)
+  if (!action || /需要关注|来自合同|时间节点/.test(action)) return []
+  return [action]
+}
+function timelineAiSuggestions(node) {
+  const values = timelineCitation(node)?.timelineEnrichment?.aiSuggestions
+  return Array.isArray(values) ? values.map(String).filter(Boolean) : []
 }
 function timelineEnrichmentReason(node) {
   const citation = timelineCitation(node)
@@ -897,82 +1008,46 @@ function timelineConsequence(node) {
   }
 }
 function relativeDateResult(node) {
-  const condition = timelineCondition(node)
-  const raw = String(condition || '').replace(/\s+/g, '')
-  if (!raw) return { display: '', hint: '', candidates: [], needsChoice: false }
-  const amountMatch = raw.match(/(\d{1,3})/)
-  const amount = amountMatch ? Number(amountMatch[1]) : null
-  const candidates = []
-  const addCandidate = (key, label, value, direction = 'after') => {
-    if (!value) return
-    candidates.push({ key, label, value, direction })
-  }
-  if (raw.includes('期满前') || raw.includes('到期前') || raw.includes('合同期满前')) {
-    addCandidate('expiryDate', '合同到期/期满日', c.value?.expiryDate)
-  }
-  if (raw.includes('生效后') || raw.includes('生效日起') || raw.includes('自生效')) {
-    addCandidate('effectiveDate', '合同生效日', c.value?.effectiveDate)
-  }
-  if (raw.includes('签订合同后') || raw.includes('签署后') || raw.includes('签订后')) {
-    if (c.value?.signedDate) addCandidate('signedDate', '合同签订日', c.value.signedDate)
-  }
-  if (raw.includes('合同期内') || raw.includes('有效期内')) {
-    if (c.value?.effectiveDate) addCandidate('effectiveDate', '合同生效日', c.value.effectiveDate)
-    if (c.value?.expiryDate) addCandidate('expiryDate', '合同到期/期满日', c.value.expiryDate)
-  }
-  const selected = timelineBaseSelection[timelineKey(node)] || (candidates.length === 1 ? candidates[0].value : '')
-  const resolved = selected ? resolveRelativeDate(raw, selected) : null
-  if (resolved) {
-    return {
-      display: `计算结果：${resolved}`,
-      hint: `基准日期：${selected}`,
-      candidates,
-      needsChoice: candidates.length > 1,
-    }
-  }
-  if (candidates.length > 1) {
-    return {
-      display: `相对期限：${condition}`,
-      hint: '存在多个基准日期候选，请先选择后再计算。AI 不会替你猜。',
-      candidates,
-      needsChoice: true,
-    }
-  }
-  const missing = raw.includes('签订合同后') || raw.includes('签署后') || raw.includes('签订后')
-    ? '缺少合同签订日期'
-    : raw.includes('期满前') || raw.includes('到期前') || raw.includes('合同期满前')
-      ? '缺少合同到期/期满日期'
-      : raw.includes('生效后') || raw.includes('生效日起') || raw.includes('自生效')
-        ? '缺少合同生效日期'
-        : '缺少可计算的基准日期'
-  return {
-    display: `相对期限：${condition}`,
-    hint: `${missing}，暂不自动计算。`,
-    candidates,
-    needsChoice: false,
+  return resolveTimelineDate({
+    condition: timelineCondition(node),
+    contract: c.value,
+    manualBaseDate: timelineBaseSelection[timelineKey(node)] || '',
+  })
+}
+function setTimelineBaseDate(node, value) {
+  timelineBaseSelection[timelineKey(node)] = value
+}
+function resetTimelineBaseDate(node) {
+  delete timelineBaseSelection[timelineKey(node)]
+}
+function timelineBaseField(node) {
+  const condition = String(timelineCondition(node) || '').replace(/\s+/g, '')
+  if (/签订合同后|签署后|签订后/.test(condition)) return { key: 'signedDate', label: '合同签订日期' }
+  if (/生效后|生效日起|自生效/.test(condition)) return { key: 'effectiveDate', label: '合同生效日期' }
+  if (/期满前|到期前|合同期满前/.test(condition)) return { key: 'expiryDate', label: '合同到期日期' }
+  return null
+}
+async function saveTimelineBaseDate(node) {
+  const field = timelineBaseField(node)
+  const value = timelineBaseSelection[timelineKey(node)]
+  if (!field || !value || timelineBaseSaving.value) return
+  timelineBaseSaving.value = true
+  try {
+    const response = await api.put(`/api/workspace/contracts/${route.params.id}`, { [field.key]: value })
+    c.value = response.data.data
+    delete timelineBaseSelection[timelineKey(node)]
+    message.success(`${field.label}已保存，相关时间节点已重新计算`)
+  } catch (e) {
+    message.error(e.response?.data?.message || `${field.label}保存失败`)
+  } finally {
+    timelineBaseSaving.value = false
   }
 }
-function resolveRelativeDate(condition, baseValue) {
-  const amountMatch = String(condition || '').match(/(\d{1,3})/)
-  if (!amountMatch) return ''
-  const amount = Number(amountMatch[1])
-  const sign = /前/.test(condition) ? -1 : 1
-  const base = new Date(`${String(baseValue).slice(0, 10)}T00:00:00`)
-  if (Number.isNaN(base.getTime())) return ''
-  if (/(月|个月)/.test(condition)) {
-    base.setMonth(base.getMonth() + sign * amount)
-  } else if (/(年)/.test(condition)) {
-    base.setFullYear(base.getFullYear() + sign * amount)
-  } else {
-    base.setDate(base.getDate() + sign * amount)
+function timelineDateKind(node) {
+  if (timelineCondition(node)) {
+    return relativeDateResult(node).resolvedDate ? '按合同相对期限计算' : '条件触发，日期待补充'
   }
-  return formatYmd(base)
-}
-function formatYmd(date) {
-  const y = date.getFullYear()
-  const m = String(date.getMonth() + 1).padStart(2, '0')
-  const d = String(date.getDate()).padStart(2, '0')
-  return `${y}-${m}-${d}`
+  return timelineDateValue(node) ? '合同明确日期' : '日期待确认'
 }
 function evidenceSnapshotLabel(item) {
   if (!item) return '未命中快照'
@@ -1306,5 +1381,92 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .loading-block{display:flex;align-items:center;justify-content:center;gap:9px;min-height:50vh;color:var(--atlas-muted)}
 .loader{width:20px;height:20px;border:3px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
-@media(max-width:700px){.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid,.detail-timeline{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}}
+
+/* Fulfillment timeline workbench */
+.timeline-panel{padding:0;overflow:hidden}
+.timeline-panel-head{margin:0;padding:18px 20px;border-bottom:1px solid var(--atlas-border)}
+.detail-timeline{display:block}
+.detail-timeline-node{display:grid;grid-template-columns:152px minmax(0,1fr) 142px;gap:18px;align-items:center;padding:16px 20px;background:var(--atlas-surface);border:0;border-bottom:1px solid var(--atlas-border);border-radius:0;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease}
+.detail-timeline-node:last-child{border-bottom:0}
+.detail-timeline-node:hover,.detail-timeline-node:focus-visible{background:#f7fafc;box-shadow:inset 3px 0 0 var(--atlas-primary);outline:0}
+.timeline-date-column{align-self:stretch;display:flex;flex-direction:column;justify-content:center;padding-right:16px;border-right:1px solid var(--atlas-border)}
+.timeline-date-column strong{color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:18px;line-height:1.25;font-variant-numeric:tabular-nums;word-break:break-word}
+.timeline-date-column small{margin-top:5px;color:var(--atlas-subtle);font-size:10px;font-weight:700}
+.basis-warning{display:inline-flex;width:fit-content;margin-top:6px;padding:3px 6px;color:#8a5b14;background:#fff8e6;border:1px solid #e7c878;border-radius:3px;font-size:10px;font-weight:900}
+.timeline-type{display:block;margin-bottom:4px;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.timeline-node-main h4{margin:0;color:var(--atlas-text);font-size:15px;line-height:1.4}
+.timeline-action{margin:6px 0 0;color:var(--atlas-muted);font-size:13px;line-height:1.65;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.timeline-node-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
+.timeline-node-meta small{color:var(--atlas-subtle);font-size:10px}
+.timeline-row-actions{display:flex;flex-direction:column;gap:7px}
+.timeline-row-actions button,.modal-close,.evidence-upload-zone button{min-height:44px;border-radius:4px;font-size:12px;font-weight:900;cursor:pointer;transition:background-color .18s ease,border-color .18s ease,color .18s ease}
+.evidence-button{color:#fff;background:#347254;border:1px solid #347254}
+.evidence-button:hover{background:#285c42}
+.detail-button{color:var(--atlas-primary);background:transparent;border:1px solid var(--atlas-border)}
+.detail-button:hover{border-color:var(--atlas-primary);background:#f4f8fc}
+
+.timeline-detail-modal{width:min(920px,calc(100vw - 32px));max-height:calc(100vh - 32px);overflow:hidden;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:6px;box-shadow:0 24px 80px rgba(30,45,60,.28)}
+.timeline-detail-header{display:flex;justify-content:space-between;gap:20px;padding:22px 26px;border-bottom:1px solid var(--atlas-border);background:#f7fafc}
+.timeline-detail-header>div{min-width:0}
+.timeline-detail-header span{color:var(--atlas-primary);font-size:10px;font-weight:900}
+.timeline-detail-header h3{margin:4px 0 5px;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:23px;line-height:1.35}
+.timeline-detail-header p{max-width:720px;margin:0;color:var(--atlas-muted);font-size:13px;line-height:1.6}
+.modal-close{flex:0 0 44px;width:44px;padding:0;color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border);font-size:23px;font-weight:400}
+.modal-close:hover{color:var(--atlas-text);border-color:var(--atlas-primary)}
+.timeline-detail-body{max-height:calc(100vh - 160px);overflow:auto;padding:0 26px 28px}
+.detail-date-band{display:grid;grid-template-columns:minmax(180px,.7fr) minmax(280px,1.3fr);gap:22px;margin:0 -26px;padding:18px 26px;background:#edf5f1;border-bottom:1px solid #cfe1d7}
+.detail-date-band>div{display:flex;flex-direction:column;justify-content:center}
+.detail-date-band span,.base-date-editor>span{color:#347254;font-size:10px;font-weight:900}
+.detail-date-band strong{margin-top:3px;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:27px;font-variant-numeric:tabular-nums}
+.detail-date-band small{margin-top:4px;color:var(--atlas-muted);font-size:11px;line-height:1.5}
+.base-date-editor{display:grid;grid-template-columns:1fr;gap:5px;align-items:center;padding-left:22px;border-left:1px solid #c4d9cd}
+.base-date-editor>span,.base-date-editor>small{grid-column:1/-1}
+.base-date-editor input{min-height:40px;padding:0 10px;color:var(--atlas-text);background:var(--atlas-surface);border:1px solid #aac8b8;border-radius:4px;font:inherit;font-size:13px}
+.base-date-editor button{min-height:40px;padding:0 10px;color:#347254;background:transparent;border:1px solid #aac8b8;border-radius:4px;font-size:11px;font-weight:800;cursor:pointer}
+.base-date-editor button:disabled{cursor:wait;opacity:.6}
+.base-date-actions{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:8px}
+.base-date-editor .base-date-save{color:#fff;background:#347254;border-color:#347254}
+.base-date-editor .base-date-save:hover:not(:disabled){background:#285c42}
+.base-date-editor .base-date-trial-note{color:#8a5b14}
+.detail-section{padding:22px 0;border-bottom:1px solid var(--atlas-border)}
+.detail-section:last-child{border-bottom:0}
+.detail-section-title{display:flex;align-items:center;gap:10px;margin-bottom:13px}
+.detail-section-title>span{display:inline-flex;align-items:center;justify-content:center;width:27px;height:27px;color:var(--atlas-primary);background:#edf4fa;border:1px solid #c9dae9;border-radius:3px;font-size:10px;font-weight:900}
+.detail-section-title h4{margin:0;color:var(--atlas-text);font-size:15px}
+.requirement-list{display:grid;gap:8px}
+.requirement-list>div{display:grid;grid-template-columns:76px 1fr;gap:10px;align-items:start;padding:10px 0;border-top:1px solid var(--atlas-border)}
+.requirement-list>div:first-child{border-top:0}
+.requirement-list span{display:inline-flex;justify-content:center;padding:3px 6px;border-radius:3px;font-size:10px;font-weight:900}
+.source-contract{color:#246744;background:#eaf6ef}
+.source-ai{color:#355c88;background:#eaf2fa}
+.requirement-list p{margin:0;color:var(--atlas-text);font-size:13px;line-height:1.65}
+.ai-list{margin-top:8px;padding-top:8px;border-top:1px dashed var(--atlas-border)}
+.detail-empty{margin:0;color:var(--atlas-subtle);font-size:12px}
+.evidence-location{margin:0 0 8px;color:var(--atlas-subtle);font-size:11px;font-weight:800}
+.full-contract-quote{max-height:260px;overflow:auto;margin:0;padding:15px 17px;color:#354452;background:#f7f9fb;border:1px solid var(--atlas-border);border-left:3px solid var(--atlas-primary);font-size:13px;line-height:1.85;white-space:pre-wrap;word-break:break-word}
+.timeline-condition{margin:9px 0 0;color:var(--atlas-muted);font-size:12px;font-weight:700}
+.consequence-split{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.consequence-split>div{padding:12px 14px;background:#fff8f2;border-left:3px solid #b76d36}
+.consequence-split .ai-consequence{background:#f3f7fb;border-left-color:#527aa3}
+.consequence-split span{display:block;margin-bottom:5px;color:#8e4e22;font-size:10px;font-weight:900}
+.consequence-split .ai-consequence span{color:#42678c}
+.consequence-split p{margin:0;color:var(--atlas-text);font-size:12px;line-height:1.65}
+.evidence-upload-zone{display:grid;grid-template-columns:minmax(0,1fr) 190px;gap:10px;padding:14px;background:#f4f8f6;border:1px dashed #8eb5a0;border-radius:4px}
+.evidence-upload-zone label{display:flex;flex-direction:column;justify-content:center;min-height:64px;padding:0 14px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;cursor:pointer}
+.evidence-upload-zone label:focus-within{outline:2px solid var(--atlas-primary);outline-offset:2px}
+.evidence-upload-zone input{position:absolute;width:1px;height:1px;opacity:0}
+.evidence-upload-zone strong{color:var(--atlas-text);font-size:13px;word-break:break-word}
+.evidence-upload-zone small{margin-top:4px;color:var(--atlas-subtle);font-size:10px;line-height:1.5}
+.evidence-upload-zone button{padding:0 14px;color:#fff;background:#347254;border:1px solid #347254}
+.evidence-upload-zone button:disabled{opacity:.5;cursor:not-allowed}
+.detail-actions{justify-content:flex-start;margin-top:10px}
+.detail-actions .quiet-button,.detail-actions .primary-button{min-height:42px}
+.detail-result{margin-top:18px;padding-top:18px;border-top:1px solid var(--atlas-border)}
+.fulfillment-summary-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.fulfillment-summary-row>strong{color:var(--atlas-text);font-size:17px}
+
+@media(max-width:700px){
+  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}
+  .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}
+}
 </style>

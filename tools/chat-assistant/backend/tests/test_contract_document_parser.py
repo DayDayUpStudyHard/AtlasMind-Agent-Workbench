@@ -72,6 +72,7 @@ class ContractDocumentParserTest(unittest.TestCase):
         self.assertTrue(force_majeure)
         self.assertTrue(any("\u4ee5\u4e0a" in (node.get("condition") or "") for node in force_majeure))
         self.assertTrue(any(node.get("nodeType") == "TERMINATION" for node in force_majeure))
+        self.assertTrue(all(node["citation"]["fullQuote"] == text for node in force_majeure))
 
 
 if __name__ == "__main__":

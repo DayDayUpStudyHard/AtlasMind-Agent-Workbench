@@ -134,12 +134,11 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_kb_document_project (document_id, project_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
-        jdbcTemplate.execute("""
-                ALTER TABLE kb_document
-                    ADD COLUMN IF NOT EXISTS contract_usage_scope VARCHAR(32) NOT NULL DEFAULT 'DISABLED',
-                    ADD COLUMN IF NOT EXISTS contract_usage_summary VARCHAR(256),
-                    ADD COLUMN IF NOT EXISTS contract_usage_updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                """);
+        addColumnIfMissing("kb_document", "contract_usage_scope",
+                "VARCHAR(32) NOT NULL DEFAULT 'DISABLED'");
+        addColumnIfMissing("kb_document", "contract_usage_summary", "VARCHAR(256)");
+        addColumnIfMissing("kb_document", "contract_usage_updated_at",
+                "DATETIME DEFAULT CURRENT_TIMESTAMP");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_kb_document (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -177,11 +176,8 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_status (status, create_time)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
-        jdbcTemplate.execute("""
-                ALTER TABLE contract_case
-                    ADD COLUMN IF NOT EXISTS signed_date DATE,
-                    ADD COLUMN IF NOT EXISTS our_side VARCHAR(8)
-                """);
+        addColumnIfMissing("contract_case", "signed_date", "DATE");
+        addColumnIfMissing("contract_case", "our_side", "VARCHAR(8)");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_document_job_trace (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -268,10 +264,7 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_status (status)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
-        jdbcTemplate.execute("""
-                ALTER TABLE contract_document
-                    ADD COLUMN IF NOT EXISTS deleted TINYINT NOT NULL DEFAULT 0
-                """);
+        addColumnIfMissing("contract_document", "deleted", "TINYINT NOT NULL DEFAULT 0");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_timeline_evidence_link (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -329,5 +322,16 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                       WHERE s.project_id=p.id AND s.source_url=p.repository_url
                   )
                 """);
+    }
+
+    private void addColumnIfMissing(String tableName, String columnName, String definition) {
+        Integer count = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=? AND COLUMN_NAME=?
+                """, Integer.class, tableName, columnName);
+        if (count != null && count > 0) return;
+        jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN `"
+                + columnName + "` " + definition);
     }
 }

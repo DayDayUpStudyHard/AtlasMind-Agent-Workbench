@@ -796,6 +796,8 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
       "label": "string",
       "responsibleParty": "OUR_ENTITY | COUNTERPARTY | BOTH | UNKNOWN",
       "businessMeaning": "string",
+      "contractRequirements": ["string"],
+      "aiSuggestions": ["string"],
       "explicitConsequence": "string",
       "aiRisk": "string",
       "reason": "string",
@@ -814,6 +816,8 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 7. confidence 0-1。
 8. explicitConsequence 只能写合同原文明确约定的后果；没有明确后果时返回空字符串。
 9. aiRisk 是基于节点类型推断的管理风险，必须以“AI 推断，仅供参考：”开头，不能冒充合同约定。
+10. contractRequirements 只列合同原文明确要求在该节点完成或提交的事项，例如实施方案、研究报告、验收材料；没有则返回空数组。
+11. aiSuggestions 只列为了履约留痕、验收或付款而建议准备的材料；不得冒充合同要求，且与 contractRequirements 不重复。
 """.strip()
         payload = {"candidates": candidates[:60]}
         response = self._call_llm_with_retry(

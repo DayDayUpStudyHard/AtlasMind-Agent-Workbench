@@ -564,6 +564,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
         }
         if (request.containsKey("signedDate")) { sets.add("signed_date=?"); params.add(dateOrNull(request.get("signedDate"), "签订日期")); }
+        if (request.containsKey("effectiveDate")) { sets.add("effective_date=?"); params.add(dateOrNull(request.get("effectiveDate"), "生效日期")); }
+        if (request.containsKey("expiryDate")) { sets.add("expiry_date=?"); params.add(dateOrNull(request.get("expiryDate"), "到期日期")); }
         if (sets.isEmpty()) return getCase(caseId);
         params.add(caseId);
         jdbcTemplate.update("UPDATE contract_case SET " + String.join(",", sets) + " WHERE id=?", params.toArray());
@@ -1065,17 +1067,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Override
     @Transactional
     public Map<String, Object> uploadFulfillmentEvidence(Long caseId, Map<String, Object> request) {
-        String fileName = str(request, "fileName").trim();
-        String filePath = str(request, "filePath").trim();
-        if (fileName.isBlank()) throw new IllegalArgumentException("履约证据文件名不能为空");
-        if (filePath.isBlank()) throw new IllegalArgumentException("履约证据文件路径不能为空");
-        int version = lockCaseAndNextDocumentVersion(caseId);
-        jdbcTemplate.update("""
-                INSERT INTO contract_document
-                    (case_id, document_type, file_name, file_path, file_size, version, parse_status)
-                VALUES (?,'FULFILLMENT_EVIDENCE',?,?,?,?, 'PENDING')
-                """, caseId, fileName, filePath, request.get("fileSize"), version);
-        return getCase(caseId);
+        Map<String, Object> evidenceRequest = new HashMap<>(request);
+        evidenceRequest.put("documentType", "FULFILLMENT_EVIDENCE");
+        return uploadDocument(caseId, evidenceRequest);
     }
 
     @Override
@@ -1316,7 +1310,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        n.business_meaning AS businessMeaning,
                        n.responsible_party AS responsibleParty,
                        n.source, n.status, n.confidence, n.citation_json AS citationJson,
-                       c.clause_number AS clauseNumber, c.title AS clauseTitle
+                       c.clause_number AS clauseNumber, c.title AS clauseTitle,
+                       c.content AS clauseContent
                 FROM contract_timeline_node n
                 LEFT JOIN contract_clause c ON c.id=n.clause_id
                 WHERE n.case_id=?
@@ -1324,9 +1319,11 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 LIMIT 80
                 """, caseId);
         for (Map<String, Object> node : extractedNodes) {
+            Object citation = parseJson(node.get("citationJson"));
+            if (isLegacyNoisyTimelineNode(node, citation)) continue;
             String sourceTitle = String.join(" ",
                     str(node, "clauseNumber"), str(node, "clauseTitle")).trim();
-            String description = str(node, "businessMeaning");
+            String description = cleanTimelineBusinessMeaning(str(node, "businessMeaning"));
             if (description.isBlank()) {
                 description = "来自合同文档流水线的可追溯时间节点";
             }
@@ -1335,8 +1332,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     "PIPELINE_TIMELINE", node.get("id"), sourceTitle,
                     description, str(node, "source"), str(node, "status"));
             if (added != null) {
-                Object citation = parseJson(node.get("citationJson"));
-                if (citation != null) added.put("citation", citation);
+                if (citation instanceof Map<?, ?> parsedCitation) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> citationMap = (Map<String, Object>) parsedCitation;
+                    if (str(citationMap, "fullQuote").isBlank()) {
+                        citationMap.put("fullQuote", str(node, "clauseContent"));
+                    }
+                    added.put("citation", citationMap);
+                }
                 added.put("confidence", node.get("confidence"));
                 added.put("responsibleParty", str(node, "responsibleParty"));
                 added.put("source", str(node, "source"));
@@ -1391,6 +1394,23 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         });
         attachFulfillmentChecks(caseId, nodes);
         return nodes;
+    }
+
+    private String cleanTimelineBusinessMeaning(String value) {
+        if (value == null) return "";
+        String cleaned = value.replaceAll("[；;]\\s*来源\\s*=\\s*[A-Z0-9_]+\\s*", "")
+                .replaceAll("[；;]\\s*原文片段\\s*[:：].*$", "")
+                .replaceAll("来源\\s*=\\s*(DURATION_TERM|TEXT_DATE(_INFERRED_YEAR)?|RELATIVE_TERM)(_RESOLVED)?", "")
+                .trim();
+        return cleaned.replaceAll("[；;，,\\s]+$", "");
+    }
+
+    private boolean isLegacyNoisyTimelineNode(Map<String, Object> node, Object citation) {
+        if (!"RULE_EXTRACTED".equalsIgnoreCase(str(node, "source"))) return false;
+        if (!(citation instanceof Map<?, ?> citationMap)) return false;
+        Object extractionMode = citationMap.get("extractionMode");
+        String mode = extractionMode == null ? "" : String.valueOf(extractionMode).toUpperCase(Locale.ROOT);
+        return mode.equals("TEXT_DATE") || mode.equals("TEXT_DATE_INFERRED_YEAR");
     }
 
     private void attachFulfillmentChecks(Long caseId, List<Map<String, Object>> nodes) {
