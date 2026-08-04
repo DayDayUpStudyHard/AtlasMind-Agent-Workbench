@@ -141,6 +141,111 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_document_job (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    document_id BIGINT NOT NULL,
+                    job_type VARCHAR(64) NOT NULL DEFAULT 'CONTRACT_DOCUMENT_PIPELINE',
+                    status VARCHAR(64) NOT NULL DEFAULT 'UPLOADED',
+                    stage VARCHAR(64),
+                    progress INT NOT NULL DEFAULT 0,
+                    error_message TEXT,
+                    started_at DATETIME,
+                    finished_at DATETIME,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_case_job (case_id, create_time),
+                    KEY idx_document_job (document_id, create_time),
+                    KEY idx_status (status, create_time)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_document_job_trace (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    job_id BIGINT NOT NULL,
+                    stage VARCHAR(64) NOT NULL,
+                    sequence_no INT NOT NULL,
+                    summary VARCHAR(500) NOT NULL,
+                    input_json LONGTEXT,
+                    output_json LONGTEXT,
+                    error_message TEXT,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_job_seq (job_id, sequence_no),
+                    KEY idx_job_stage (job_id, stage, sequence_no)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_clause_chunk (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    document_id BIGINT NOT NULL,
+                    clause_id BIGINT,
+                    clause_number VARCHAR(64),
+                    chunk_index INT NOT NULL,
+                    chunk_text LONGTEXT NOT NULL,
+                    source_page INT,
+                    content_hash CHAR(64) NOT NULL,
+                    embedding_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                    index_status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_case_chunk (case_id, document_id, chunk_index),
+                    KEY idx_clause_chunk (clause_id, chunk_index),
+                    KEY idx_embedding_status (embedding_status, index_status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_timeline_node (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    document_id BIGINT,
+                    clause_id BIGINT,
+                    node_type VARCHAR(64) NOT NULL,
+                    label VARCHAR(256) NOT NULL,
+                    node_date DATE,
+                    condition_text VARCHAR(512),
+                    responsible_party VARCHAR(64),
+                    business_meaning TEXT,
+                    citation_json LONGTEXT,
+                    confidence DECIMAL(5,4),
+                    source VARCHAR(64) NOT NULL DEFAULT 'EXTRACTED',
+                    status VARCHAR(64) NOT NULL DEFAULT 'EXTRACTED',
+                    manual_override TINYINT NOT NULL DEFAULT 0,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_case_timeline (case_id, node_date),
+                    KEY idx_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_fulfillment_check (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    timeline_node_id BIGINT NOT NULL,
+                    run_id BIGINT,
+                    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                    conclusion VARCHAR(64),
+                    risk_level VARCHAR(16),
+                    confidence_level VARCHAR(16),
+                    summary TEXT,
+                    requirement_json LONGTEXT,
+                    evidence_snapshot_json LONGTEXT,
+                    missing_evidence_json LONGTEXT,
+                    explicit_consequence TEXT,
+                    ai_risk TEXT,
+                    suggested_actions_json LONGTEXT,
+                    manual_result VARCHAR(32),
+                    manual_note TEXT,
+                    confirmed_by VARCHAR(128),
+                    confirmed_at DATETIME,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_case_node (case_id, timeline_node_id, create_time),
+                    KEY idx_run (run_id),
+                    KEY idx_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
         jdbcTemplate.update("""
                 INSERT IGNORE INTO system_config (config_key, config_value)
                 VALUES ('AGENT_RUNTIME', 'java')

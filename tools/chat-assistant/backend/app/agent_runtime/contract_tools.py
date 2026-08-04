@@ -54,8 +54,68 @@ CONTRACT_TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "searchContractClause",
+            "description": "在当前合同案件的私有条款切片中检索相关原文；命中子切片后返回完整父条款和相似度分数",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "检索问题或风险点"},
+                    "topK": {"type": "integer", "description": "返回条数", "minimum": 1},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "getContractClauseDetail",
+            "description": "按条款 ID 读取完整合同条款详情",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "clauseId": {"type": "integer", "description": "合同条款 ID"},
+                },
+                "required": ["clauseId"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "searchContractTimeline",
+            "description": "检索当前合同案件中的时间节点、相对期限和履约节点",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "如付款、验收、到期、续签"},
+                    "limit": {"type": "integer", "description": "返回条数", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "listContractTimeline",
+            "description": "列出当前合同案件已提取的全部时间节点",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "limit": {"type": "integer", "description": "返回条数", "minimum": 1},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "searchPolicyKnowledge",
-            "description": "检索适用的企业采购制度和标准条款",
+            "description": "检索适用的企业知识库文档、采购制度、验收标准和标准条款",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -149,11 +209,12 @@ CONTRACT_TOOL_DEFINITIONS: list[dict] = [
         "type": "function",
         "function": {
             "name": "verifyFulfillmentEvidence",
-            "description": "验证已上传的履约证据是否覆盖义务要求",
+            "description": "验证已上传的履约证据是否覆盖某个履约义务或时间节点要求",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "obligationId": {"type": "integer", "description": "履约义务 ID"},
+                    "timelineNodeId": {"type": "integer", "description": "合同时间节点 ID"},
                 },
                 "additionalProperties": False,
             },
@@ -185,6 +246,10 @@ _CONCURRENT_GROUP = {
     "getContractParties":       "read",
     "listContractDocuments":    "read",
     "readContractClause":       "read",
+    "getContractClauseDetail":  "read",
+    "listContractTimeline":     "read",
+    "searchContractClause":     "search",
+    "searchContractTimeline":   "search",
     "searchPolicyKnowledge":    "search",
     "findStandardClause":       "search",
     "searchHistoricalDecisions": "search",
@@ -232,6 +297,18 @@ class ContractToolRegistry:
         if tool_name == "readContractClause":
             return {"clauses": await self.store.read_clauses(case_id, arguments)}
 
+        if tool_name == "searchContractClause":
+            return {"hits": await self.store.search_contract_clause(case_id, arguments)}
+
+        if tool_name == "getContractClauseDetail":
+            return {"clause": await self.store.get_clause_detail(case_id, arguments)}
+
+        if tool_name == "searchContractTimeline":
+            return {"nodes": await self.store.search_timeline(case_id, arguments)}
+
+        if tool_name == "listContractTimeline":
+            return {"nodes": await self.store.list_timeline(case_id, arguments)}
+
         if tool_name == "searchPolicyKnowledge":
             return {"items": await self.store.search_policy(case_id, arguments)}
 
@@ -245,19 +322,26 @@ class ContractToolRegistry:
             return {"findings": await self.store.evaluate_rules(case_id, arguments)}
 
         if tool_name == "calculateContractRisk":
-            findings = await self.store.get_open_findings(case_id)
-            rules = await self.store.get_active_rules(arguments.get("ruleSet", ""))
+            rule_set = str(arguments.get("ruleSet", ""))
+            findings = await self.store.evaluate_rules(
+                case_id, {"ruleSet": rule_set or "SERVICE_PROCUREMENT_V1"}
+            )
+            rules = await self.store.get_active_rules(rule_set)
             case = await self.store.get_case(case_id)
             from .contract_risk_scoring import ContractRiskScoringEngine
             engine = ContractRiskScoringEngine()
             return {"scoring": engine.score(
-                case.get("case", {}), rules, findings)}
+                case, rules, findings)}
 
         if tool_name == "extractObligations":
             return {"obligations": await self.store.extract_obligations(case_id, arguments)}
 
         if tool_name == "verifyFulfillmentEvidence":
-            return await self.store.verify_evidence(int(arguments.get("obligationId", 0)))
+            return await self.store.verify_evidence(
+                case_id,
+                int(arguments.get("obligationId", 0) or 0),
+                int(arguments.get("timelineNodeId", 0) or 0),
+            )
 
         if tool_name == "compareContractVersions":
             return await self.store.compare_versions(

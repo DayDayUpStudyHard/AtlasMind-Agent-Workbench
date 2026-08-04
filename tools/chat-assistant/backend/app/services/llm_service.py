@@ -16,15 +16,18 @@ class CircuitBreaker:
 
     After `fail_max` consecutive failures within `window_seconds`, the breaker
     opens for `timeout_seconds`.  While open all calls are rejected immediately.
+
+    Connection errors (unreachable) count double — the LLM is down, not flaky.
     """
 
-    def __init__(self, fail_max: int = 5, window_seconds: float = 300.0,
+    def __init__(self, fail_max: int = 3, window_seconds: float = 300.0,
                  timeout_seconds: float = 60.0):
         self._fail_max = fail_max
         self._window = window_seconds
         self._timeout = timeout_seconds
         self._failures: list[float] = []   # timestamps of recent failures
         self._opened_at: float = 0.0
+        self._connection_down = False       # true when last error was APIConnectionError
 
     @property
     def is_open(self) -> bool:
@@ -34,22 +37,34 @@ class CircuitBreaker:
             # Transition to half-open
             self._opened_at = 0.0
             self._failures.clear()
+            self._connection_down = False
             return False
         return True
+
+    @property
+    def is_connection_dead(self) -> bool:
+        """True when the breaker is open AND the cause was connectivity loss."""
+        return self.is_open and self._connection_down
 
     def success(self) -> None:
         if self._opened_at > 0:
             self._opened_at = 0.0  # half-open → closed on success
         self._failures.clear()
+        self._connection_down = False
 
-    def failure(self) -> None:
+    def failure(self, is_connection_error: bool = False) -> None:
         now = time.monotonic()
+        # Connection errors count as 2 failures (faster trip)
+        weight = 2 if is_connection_error else 1
         self._failures = [t for t in self._failures if now - t < self._window]
-        self._failures.append(now)
+        for _ in range(weight):
+            self._failures.append(now)
+        if is_connection_error:
+            self._connection_down = True
         if len(self._failures) >= self._fail_max:
             self._opened_at = now
-            logger.warning("Circuit breaker OPEN (failures=%d, timeout=%ds)",
-                           len(self._failures), self._timeout)
+            logger.warning("Circuit breaker OPEN (failures=%d, timeout=%ds, connection_dead=%s)",
+                           len(self._failures), self._timeout, self._connection_down)
 
 _llm_circuit_breaker = CircuitBreaker()
 
@@ -188,6 +203,8 @@ Use Simplified Chinese for human-facing strings. Build three to six bounded step
 For health analysis, calculateHealthScore is mandatory and its score is authoritative.
 For every task, gather project evidence and consider project-bound knowledge. Do not
 invent observations and do not write the final report.
+For contract tasks, searchPolicyKnowledge is mandatory context: it searches both
+enterprise knowledge-base documents and standard clauses.
 """
 
 
@@ -202,6 +219,8 @@ turn. When the evidence is sufficient, return a short JSON object with
 The model never computes health scores. For HEALTH_ANALYSIS, it must call
 calculateHealthScore after evidence retrieval. Company rules and project-bound technical
 documents are first-class evidence, so searchProjectKnowledge is not merely a fallback.
+For contract review, fulfillment, approval, and renewal tasks, enterprise knowledge-base
+documents are first-class policy evidence, so call searchPolicyKnowledge before reflection.
 """
 
 
@@ -273,9 +292,17 @@ class LLMService:
         *fn* is a zero-argument callable that performs a single LLM API call.
         Returns the result on success.  Raises the last exception after all
         retries are exhausted or the circuit breaker is open.
+
+        Connection errors (APIConnectionError) are retried at most once — if the
+        LLM is unreachable, waiting 2+4+8s is worse than failing fast so the
+        harness can report the error immediately.
         """
+        if _llm_circuit_breaker.is_open:
+            raise APIError("LLM circuit breaker is open — skipping call")
+
         last_exc = None
-        for attempt in range(max_retries + 1):
+        effective_max = max_retries
+        for attempt in range(effective_max + 1):
             if _llm_circuit_breaker.is_open:
                 raise APIError("LLM circuit breaker is open — skipping call")
 
@@ -285,9 +312,29 @@ class LLMService:
                 return result
             except AuthenticationError:
                 raise  # never retry auth errors
-            except (APIConnectionError, APIError) as exc:
+            except APIConnectionError as exc:
+                # Connection error = LLM unreachable. Retry at most once (total 2 attempts),
+                # then fail fast. The harness will propagate the error to the user.
                 last_exc = exc
-                _llm_circuit_breaker.failure()
+                is_conn = True
+                if attempt == 0 and effective_max > 1:
+                    # Single quick retry (1s) for transient blips
+                    delay = 1.0
+                    logger.warning(
+                        "LLM connection error (attempt %s/%s), retrying in %.1fs: %s",
+                        attempt + 1, effective_max + 1, delay, exc,
+                    )
+                    time.sleep(delay)
+                    # Reduce subsequent attempts — no more retries for this call
+                    effective_max = min(effective_max, 1)
+                else:
+                    _llm_circuit_breaker.failure(is_connection_error=True)
+                    logger.error("LLM unreachable after %s attempts: %s", attempt + 1, exc)
+                    break
+            except APIError as exc:
+                last_exc = exc
+                is_conn = False
+                _llm_circuit_breaker.failure(is_connection_error=False)
                 if attempt < max_retries:
                     delay = backoff_base ** attempt
                     logger.warning(
@@ -610,6 +657,172 @@ class LLMService:
                 stream=False,
             ),
             max_retries=2, backoff_base=2.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
+    def contract_fulfillment_check(self, case: dict, verification: dict,
+                                   citations: list[dict], task_input: dict,
+                                   run_id: int = 0) -> dict:
+        """Generate a structured fulfillment verification report."""
+        system_prompt = """
+你是 AtlasMind ContractOps 的履约核验 Agent。你要判断某个合同时间节点当前是否有足够证据支持履约或验收。
+
+只基于输入的合同节点、证据、企业知识库引用和工具结果输出，不编造付款记录、验收单、图片内容或对方确认。
+不要输出数字评分；风险等级和可信度只能使用 HIGH/MEDIUM/LOW。
+AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须人工确认。
+
+返回且只返回一个 JSON 对象：
+{
+  "reportType":"FULFILLMENT_REPORT",
+  "title":"string",
+  "summary":"string",
+  "timelineNodeId":0,
+  "conclusion":"BASICALLY_SATISFIED | HAS_ISSUES | INSUFFICIENT_EVIDENCE | UNCLEAR_TERMS | NEEDS_REVIEW",
+  "riskLevel":"HIGH | MEDIUM | LOW",
+  "confidenceLevel":"HIGH | MEDIUM | LOW",
+  "requirements":[
+    {"requirement":"合同要求","evidence":"已找到证据或空","judgement":"满足/不满足/证据不足/需复核","gap":"缺口或问题","required":true}
+  ],
+  "evidenceSnapshot":[{"documentId":0,"fileName":"string","version":0,"snippet":"string"}],
+  "missingEvidence":["string"],
+  "explicitConsequence":"合同原文明示后果；没有则写合同未明确约定",
+  "aiRisk":"AI 推断风险，必须标注仅供参考",
+  "suggestedActions":[{"type":"REQUEST_MATERIAL|REQUEST_LEGAL_REVIEW|SCHEDULE_REMINDER","title":"string","description":"string"}],
+  "citations":[{"sourceId":"string","reason":"string"}],
+  "content":{"manualConfirmationRequired":true}
+}
+
+规则：
+1. requirements 必须按“合同要求 → 证据 → 判断 → 缺口”逐项对照。
+2. 只有合同原文明确要求或作为付款/验收前提的事项，才能标 required=true。
+3. 证据不足时 conclusion=INSUFFICIENT_EVIDENCE，不要推断完成。
+4. 条款如“甲方满意/按甲方要求”缺少客观标准，conclusion=UNCLEAR_TERMS。
+5. 图片或视频证据未经过多模态识别时，不能作为已完成的充分证据。
+""".strip()
+        payload = {
+            "case": case,
+            "taskInput": task_input or {},
+            "verification": verification or {},
+            "citations": citations[:10],
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=0.0,
+                max_tokens=max(4096, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=2, backoff_base=1.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        artifact = self._parse_json_object(content or "")
+        artifact.setdefault("reportType", "FULFILLMENT_REPORT")
+        artifact.setdefault("timelineNodeId", int((task_input or {}).get("timelineNodeId") or 0))
+        artifact.setdefault("content", {})
+        if isinstance(artifact["content"], dict):
+            artifact["content"]["manualConfirmationRequired"] = True
+        return artifact
+
+    def extract_contract_metadata(self, file_name: str, text_excerpt: str,
+                                  deterministic_hints: dict) -> dict:
+        """Extract citable contract intake fields without writing business data."""
+        system_prompt = """
+你是企业合同录入流程中的结构化信息提取器。只提取输入合同明确写出的事实，不做合同审查，
+不猜测哪一方属于当前用户，不生成部门、负责人或优先级。返回且只返回一个 JSON 对象。
+
+输出结构：
+{
+  "fields": {
+    "contractTitle": {"value": "string|null", "confidence": 0.0, "citations": [{"quote": "原文逐字引用"}]},
+    "contractType": {"value": "SERVICE_PROCUREMENT|GOODS_PURCHASE|NDA|OTHER|null", "confidence": 0.0, "citations": [{"quote": "原文逐字引用"}]},
+    "partyA": {"value": "string|null", "confidence": 0.0, "citations": [{"quote": "包含甲方名称的原文"}]},
+    "partyB": {"value": "string|null", "confidence": 0.0, "citations": [{"quote": "包含乙方名称的原文"}]},
+    "amount": {"value": 0.0, "confidence": 0.0, "citations": [{"quote": "金额原文"}]},
+    "currency": {"value": "CNY|USD|EUR|GBP|JPY|HKD|null", "confidence": 0.0, "citations": [{"quote": "币种原文"}]},
+    "effectiveDate": {"value": "YYYY-MM-DD|null", "confidence": 0.0, "citations": [{"quote": "日期原文"}]},
+    "expiryDate": {"value": "YYYY-MM-DD|null", "confidence": 0.0, "citations": [{"quote": "日期原文"}]}
+  }
+}
+
+规则：quote 必须逐字存在于输入合同片段；没有明确事实时 value 为 null、citations 为空；
+金额统一换算为基础货币单位；日期无法确定到具体日时返回 null；不得把甲方默认视为我方。
+""".strip()
+        system_prompt += "\n如果原文明确写出所属部门、业务部门、需求部门、采购部门或经办部门，请在 fields.department 中返回；没有明确原文时返回 null。"
+        payload = {
+            "fileName": file_name,
+            "deterministicHints": deterministic_hints,
+            "contractExcerpt": text_excerpt,
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=0.0,
+                max_tokens=2400,
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=2,
+            backoff_base=1.0,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
+    def enrich_contract_timeline(self, candidates: list[dict]) -> dict:
+        """Classify timeline candidates without inventing new dates."""
+        system_prompt = """
+你是合同时间节点语义整理器。输入是一组已经由代码提取出来的时间候选。
+你只能基于候选里的 date、condition、quote、context、clauseTitle 做判断，不能发明新的日期。
+
+输出且只输出一个 JSON 对象：
+{
+  "nodes": [
+    {
+      "candidateId": "string",
+      "keep": true,
+      "eventType": "CONTRACT_START | CONTRACT_END | SERVICE_START | SERVICE_END | PAYMENT | ACCEPTANCE | NOTICE | RENEWAL | TERMINATION | PENALTY | OTHER",
+      "label": "string",
+      "responsibleParty": "OUR_ENTITY | COUNTERPARTY | BOTH | UNKNOWN",
+      "businessMeaning": "string",
+      "reason": "string",
+      "confidence": 0.0
+    }
+  ]
+}
+
+规则：
+1. 只能返回候选里已有的 candidateId。
+2. keep=false 仅表示这个候选不值得展示，不得新增候选。
+3. 如果候选明显是封面元信息、签订时间、印制说明或模板噪声，优先 keep=false。
+4. quote 是命中片段，context 是它附近的条款上下文；如果 context 比 quote 更完整，以 context 判断业务含义。
+5. label 要尽量短，保留履约含义。
+6. businessMeaning 要像给业务人员看的话，尽量写成“谁应在什么时间/条件下完成什么事”。
+7. confidence 0-1。
+""".strip()
+        payload = {"candidates": candidates[:60]}
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=0.0,
+                max_tokens=2600,
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=1,
+            backoff_base=1.0,
         )
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")

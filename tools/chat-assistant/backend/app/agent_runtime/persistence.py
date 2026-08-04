@@ -83,6 +83,40 @@ def _json_dumps(obj, **kwargs):
     return json.dumps(obj, ensure_ascii=False, default=_json_default, **kwargs)
 
 
+def _json_object(value):
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
+def _finding_rule_key(finding: dict) -> str:
+    policy = _json_object(finding.get("policyCitation") or finding.get("policy_citation"))
+    return str(
+        finding.get("ruleKey")
+        or finding.get("rule_key")
+        or policy.get("ruleKey")
+        or policy.get("rule_key")
+        or ""
+    ).strip()
+
+
+def _finding_clause_type(finding: dict) -> str:
+    policy = _json_object(finding.get("policyCitation") or finding.get("policy_citation"))
+    return str(
+        finding.get("clauseType")
+        or finding.get("clause_type")
+        or policy.get("clauseType")
+        or policy.get("clause_type")
+        or "OTHER"
+    ).strip().upper()
+
+
 async def _run_sync(fn, *args):
     """Run a synchronous DB call in the default thread-pool executor."""
     loop = asyncio.get_running_loop()
@@ -480,6 +514,12 @@ class MySqlTraceStore(TraceStore):
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    "SELECT id FROM agent_run WHERE id=%s FOR UPDATE",
+                    (run_id,),
+                )
+                if cur.fetchone() is None:
+                    raise ValueError(f"Agent run {run_id} not found while appending trace")
+                cur.execute(
                     "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS seq FROM agent_run_trace WHERE run_id=%s",
                     (run_id,),
                 )
@@ -810,6 +850,18 @@ class MySqlEvidenceStore(EvidenceStore):
 
 
 class MySqlReportStore(ReportStore):
+    _PROJECT_ACTION_TYPES = {
+        "CREATE_GITHUB_ISSUE",
+        "UPDATE_PROJECT_CONFIG",
+        "CREATE_GITHUB_MILESTONE",
+    }
+    _CONTRACT_ACTION_TYPES = {
+        "CREATE_NEGOTIATION_TASK",
+        "REQUEST_MATERIAL",
+        "REQUEST_LEGAL_REVIEW",
+        "SCHEDULE_REMINDER",
+    }
+
     async def save_report(
         self, project_id: int, run_id: int, task_type: str, artifact: dict
     ) -> int:
@@ -841,53 +893,185 @@ class MySqlReportStore(ReportStore):
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    """SELECT COALESCE(subject_type, 'PROJECT') AS subjectType,
+                              COALESCE(subject_id, project_id) AS subjectId
+                       FROM agent_run WHERE id=%s""",
+                    (run_id,),
+                )
+                run_subject = cur.fetchone()
+                if not run_subject:
+                    raise ValueError(f"Agent run {run_id} not found while saving report")
+                subject_type = str(run_subject.get("subjectType") or "PROJECT")
+                subject_id = int(run_subject.get("subjectId") or project_id)
+                report_status = artifact.get("healthStatus") if is_health else artifact.get("riskStatus")
+                report_score = artifact.get("healthScore", 0) if is_health else artifact.get("riskScore", 0)
+                report_dimensions = artifact.get("dimensions")
+                cur.execute(
                     """INSERT INTO agent_report
-                       (project_id, run_id, report_type, title, summary, health_status,
+                       (project_id, run_id, subject_type, subject_id,
+                        report_type, title, summary, health_status,
                         health_score, dimensions_json, risks_json, plan_json,
                         citations_json, scoring_version, evidence_hash, analysis_mode,
                         scoring_rationale_json, content_json, report_markdown, status)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'DRAFT')""",
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'DRAFT')""",
                     (
                         project_id,
                         run_id,
+                        subject_type,
+                        subject_id,
                         report_type,
                         artifact.get("title", ""),
                         artifact.get("summary", ""),
-                        artifact.get("healthStatus") if is_health else None,
-                        artifact.get("healthScore", 0) if is_health else 0,
-                        _json_dumps(artifact.get("dimensions")) if is_health and artifact.get("dimensions") else None,
+                        report_status,
+                        report_score,
+                        _json_dumps(report_dimensions) if report_dimensions else None,
                         _json_dumps(artifact.get("risks")),
                         _json_dumps(artifact.get("plan")),
                         _json_dumps(artifact.get("citations")),
-                        artifact.get("scoringVersion") if is_health else None,
+                        artifact.get("scoringVersion"),
                         artifact.get("evidenceHash"),
                         artifact.get("analysisMode"),
-                        _json_dumps(artifact.get("scoringRationale")) if is_health and artifact.get("scoringRationale") else None,
+                        _json_dumps(artifact.get("scoringRationale")) if artifact.get("scoringRationale") else None,
                         _json_dumps(artifact.get("content", artifact)),
                         artifact.get("reportMarkdown", ""),
                     ),
                 )
                 report_id = int(cur.lastrowid)
 
+                if subject_type == "CONTRACT_CASE":
+                    findings = artifact.get("findings")
+                    if isinstance(findings, list):
+                        cur.execute(
+                            "DELETE FROM contract_review_finding WHERE run_id=%s",
+                            (run_id,),
+                        )
+                        for finding in findings:
+                            if not isinstance(finding, dict):
+                                continue
+                            title = str(
+                                finding.get("title")
+                                or finding.get("ruleTitle")
+                                or "合同审查发现"
+                            ).strip()
+                            if not title:
+                                continue
+                            rule_key = _finding_rule_key(finding)
+                            clause_type = _finding_clause_type(finding)
+                            cur.execute(
+                                """INSERT INTO contract_review_finding
+                                   (case_id, run_id, rule_id, rule_key, clause_type,
+                                    severity, status, title, description, impact,
+                                    remediation_advice, negotiation_advice,
+                                    verification_points, contract_citation,
+                                    policy_citation, suggested_action)
+                                   VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                (
+                                    subject_id,
+                                    run_id,
+                                    finding.get("ruleId"),
+                                    rule_key or None,
+                                    clause_type or None,
+                                    str(finding.get("severity") or "MEDIUM").upper(),
+                                    title[:512],
+                                    str(finding.get("description") or finding.get("detail") or ""),
+                                    str(finding.get("impact") or finding.get("businessImpact") or ""),
+                                    str(
+                                        finding.get("remediationAdvice")
+                                        or finding.get("recommendedRevision")
+                                        or finding.get("remediation")
+                                        or ""
+                                    ),
+                                    str(
+                                        finding.get("negotiationAdvice")
+                                        or finding.get("negotiationPosition")
+                                        or ""
+                                    ),
+                                    _json_dumps(finding.get("verificationPoints"))
+                                    if isinstance(finding.get("verificationPoints"), list) else None,
+                                    _json_dumps(finding.get("contractCitation"))
+                                    if isinstance(finding.get("contractCitation"), dict) else None,
+                                    _json_dumps(finding.get("policyCitation"))
+                                    if isinstance(finding.get("policyCitation"), dict) else None,
+                                    str(finding.get("suggestedAction") or "") or None,
+                                ),
+                            )
+                    if task_type == "CONTRACT_REVIEW":
+                        cur.execute(
+                            """SELECT COUNT(*) AS cnt FROM contract_review_finding
+                               WHERE case_id=%s AND run_id=%s AND status='OPEN'""",
+                            (subject_id, run_id),
+                        )
+                        open_findings = int((cur.fetchone() or {}).get("cnt") or 0)
+                        next_status = "NEEDS_REVISION" if open_findings > 0 else "PENDING_APPROVAL"
+                        cur.execute(
+                            """UPDATE contract_case
+                               SET status=%s, last_run_id=%s, last_run_at=NOW()
+                               WHERE id=%s AND deleted=0""",
+                            (next_status, run_id, subject_id),
+                        )
+                    if task_type == "FULFILLMENT_CHECK":
+                        timeline_node_id = int(artifact.get("timelineNodeId") or 0)
+                        if timeline_node_id:
+                            cur.execute(
+                                """UPDATE contract_fulfillment_check
+                                   SET status='COMPLETED',
+                                       conclusion=%s,
+                                       risk_level=%s,
+                                       confidence_level=%s,
+                                       summary=%s,
+                                       requirement_json=%s,
+                                       evidence_snapshot_json=%s,
+                                       missing_evidence_json=%s,
+                                       explicit_consequence=%s,
+                                       ai_risk=%s,
+                                       suggested_actions_json=%s
+                                   WHERE run_id=%s
+                                     AND case_id=%s
+                                     AND timeline_node_id=%s""",
+                                (
+                                    str(artifact.get("conclusion") or "NEEDS_REVIEW"),
+                                    str(artifact.get("riskLevel") or "MEDIUM"),
+                                    str(artifact.get("confidenceLevel") or "LOW"),
+                                    str(artifact.get("summary") or ""),
+                                    _json_dumps(artifact.get("requirements")),
+                                    _json_dumps(artifact.get("evidenceSnapshot")),
+                                    _json_dumps(artifact.get("missingEvidence")),
+                                    str(artifact.get("explicitConsequence") or ""),
+                                    str(artifact.get("aiRisk") or ""),
+                                    _json_dumps(artifact.get("suggestedActions")),
+                                    run_id,
+                                    subject_id,
+                                    timeline_node_id,
+                                ),
+                            )
+
                 # ── B1: Action Proposals ────────────────────────────
                 # Parse actionProposals from the LLM artifact and create
                 # one PENDING_APPROVAL row per proposal.
                 proposals = artifact.get("actionProposals")
                 if isinstance(proposals, list) and proposals:
+                    allowed_action_types = (
+                        MySqlReportStore._CONTRACT_ACTION_TYPES
+                        if subject_type == "CONTRACT_CASE"
+                        else MySqlReportStore._PROJECT_ACTION_TYPES
+                    )
                     for p in proposals:
                         if not isinstance(p, dict):
                             continue
-                        action_type = str(p.get("type", "CREATE_GITHUB_ISSUE"))
-                        if action_type not in ("CREATE_GITHUB_ISSUE",
-                                               "UPDATE_PROJECT_CONFIG",
-                                               "CREATE_GITHUB_MILESTONE"):
-                            action_type = "CREATE_GITHUB_ISSUE"
+                        action_type = str(p.get("type") or "").strip().upper()
+                        if action_type not in allowed_action_types:
+                            logger.warning(
+                                "Ignoring unsupported %s action type %s for run %s",
+                                subject_type, action_type, run_id,
+                            )
+                            continue
                         cur.execute(
                             """INSERT INTO agent_action
-                               (project_id, run_id, action_type, status, title, payload_json)
-                               VALUES (%s,%s,%s,'PENDING_APPROVAL',%s,%s)""",
+                               (project_id, run_id, subject_type, subject_id,
+                                action_type, status, title, payload_json)
+                               VALUES (%s,%s,%s,%s,%s,'PENDING_APPROVAL',%s,%s)""",
                             (
-                                project_id, run_id, action_type,
+                                project_id, run_id, subject_type, subject_id, action_type,
                                 str(p.get("title", artifact.get("title", ""))),
                                 _json_dumps({
                                     "description": str(p.get("description", "")),
@@ -904,14 +1088,15 @@ class MySqlReportStore(ReportStore):
                                 }),
                             ),
                         )
-                else:
+                elif subject_type == "PROJECT":
                     # Legacy fallback: single CREATE_GITHUB_ISSUE action
                     cur.execute(
                         """INSERT INTO agent_action
-                           (project_id, run_id, action_type, status, title, payload_json)
-                           VALUES (%s,%s,'CREATE_GITHUB_ISSUE','PENDING_APPROVAL',%s,%s)""",
+                           (project_id, run_id, subject_type, subject_id,
+                            action_type, status, title, payload_json)
+                           VALUES (%s,%s,%s,%s,'CREATE_GITHUB_ISSUE','PENDING_APPROVAL',%s,%s)""",
                         (
-                            project_id, run_id,
+                            project_id, run_id, subject_type, subject_id,
                             artifact.get("issueTitle", artifact.get("title", "")),
                             _json_dumps({
                                 "body": artifact.get("issueBody",

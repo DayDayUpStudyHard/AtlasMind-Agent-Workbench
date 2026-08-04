@@ -16,6 +16,72 @@ from .persistence import _conn, _run_sync, _normalize_value
 logger = logging.getLogger(__name__)
 
 
+_CONTRACT_SEARCH_TERMS = (
+    "付款", "支付", "发票", "工作日", "自然日", "验收", "交付", "续签", "终止",
+    "到期", "通知", "逾期", "违约", "赔偿", "保密", "个人信息", "数据",
+)
+
+
+def _rerank_contract_hits(query: str, hits: list[dict]) -> list[dict]:
+    terms = [term for term in _CONTRACT_SEARCH_TERMS if term in query]
+    if not terms:
+        return hits
+
+    def score(hit: dict) -> float:
+        text = " ".join([
+            str(hit.get("title") or ""),
+            str(hit.get("clauseNumber") or ""),
+            str(hit.get("snippet") or ""),
+            str(hit.get("content") or ""),
+            str(hit.get("clauseType") or ""),
+        ])
+        bonus = sum(1 for term in terms if term in text)
+        return bonus * 1000 + float(hit.get("score") or 0)
+
+    return sorted(hits, key=score, reverse=True)
+
+
+def _has_contract_terms(query: str) -> bool:
+    return any(term in query for term in _CONTRACT_SEARCH_TERMS)
+
+
+def _contract_query_terms(query: str) -> list[str]:
+    terms = [term for term in _CONTRACT_SEARCH_TERMS if term in query]
+    return terms or [query]
+
+
+def _merge_contract_hits(primary: list[dict], secondary: list[dict]) -> list[dict]:
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for hit in [*secondary, *primary]:
+        key = str(hit.get("clauseId") or hit.get("chunkId") or id(hit))
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(hit)
+    return merged
+
+
+def _merge_policy_items(*groups: list[dict], limit: int) -> list[dict]:
+    """Merge standard clauses and KB chunks without losing source identity."""
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for group in groups:
+        for item in group:
+            key = "%s:%s:%s" % (
+                item.get("sourceType") or "POLICY",
+                item.get("sourceId") or item.get("id") or "",
+                item.get("chunkId") or "",
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= limit:
+                return merged
+    return merged
+
+
 class ContractStore:
     """Read-only contract data access for Agent tools."""
 
@@ -92,13 +158,180 @@ class ContractStore:
                     return rows
         return await _run_sync(_get)
 
+    async def search_contract_clause(self, case_id: int, arguments: dict) -> list[dict]:
+        query = str(arguments.get("query", "")).strip()
+        top_k = max(1, min(12, int(arguments.get("topK", arguments.get("limit", 5)))))
+        if not query:
+            return []
+
+        def _fallback_keyword():
+            terms = _contract_query_terms(query)
+            likes = [f"%{term}%" for term in terms]
+            conditions = " OR ".join([
+                "(c.title LIKE %s OR c.content LIKE %s OR c.clause_number LIKE %s)"
+                for _ in likes
+            ])
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT c.id AS clauseId, c.document_id AS documentId,
+                                  c.clause_number AS clauseNumber, c.title, c.content,
+                                  c.clause_type AS clauseType, c.page_number AS pageNumber
+                           FROM contract_clause c
+                           WHERE c.case_id=%s
+                             AND ({conditions})
+                           ORDER BY c.id ASC LIMIT %s""",
+                        [case_id] + [like for like in likes for _ in range(3)] + [max(top_k, 20)],
+                    )
+                    rows = [_normalize_value(r) for r in cur.fetchall()]
+            return [
+                {
+                    **row,
+                    "sourceType": "CONTRACT_CLAUSE",
+                    "snippet": str(row.get("content") or "")[:220],
+                    "score": 0,
+                    "retrievalType": "MYSQL_KEYWORD_FALLBACK",
+                }
+                for row in rows
+            ]
+
+        try:
+            from app.services.embedding_service import EmbeddingService
+            from app.services.es_service import ESService
+            embedding = EmbeddingService()
+            es = ESService()
+            candidate_k = max(top_k * 4, 20)
+            vector = embedding.embed(query) if embedding.configured else None
+            hits = es.search_contract_by_embedding(vector, case_id, candidate_k) if vector else []
+            retrieval_type = "VECTOR" if hits else ""
+            if not hits:
+                hits = es.search_contract_by_keyword(query, case_id, candidate_k)
+                retrieval_type = "KEYWORD" if hits else ""
+        except Exception as exc:
+            logger.warning("contract ES search failed, fallback to MySQL: %s", exc)
+            hits = []
+            retrieval_type = ""
+
+        keyword_hits = await _run_sync(_fallback_keyword) if _has_contract_terms(query) else []
+        if keyword_hits:
+            hits = _merge_contract_hits(hits, keyword_hits)
+
+        if not hits:
+            return keyword_hits or await _run_sync(_fallback_keyword)
+        hits = _rerank_contract_hits(query, hits)[:top_k]
+
+        clause_ids = [h.get("clauseId") for h in hits if h.get("clauseId")]
+        if not clause_ids:
+            return hits
+
+        def _enrich():
+            placeholders = ",".join(["%s"] * len(clause_ids))
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT id AS clauseId, document_id AS documentId,
+                                   clause_number AS clauseNumber, title, content,
+                                   clause_type AS clauseType, page_number AS pageNumber
+                            FROM contract_clause
+                            WHERE case_id=%s AND id IN ({placeholders})""",
+                        [case_id] + clause_ids,
+                    )
+                    rows = {r["clauseId"]: _normalize_value(r) for r in cur.fetchall()}
+            enriched = []
+            for hit in hits:
+                parent = rows.get(hit.get("clauseId"), {})
+                enriched.append({
+                    **hit,
+                    **parent,
+                    "snippet": hit.get("snippet") or str(parent.get("content") or "")[:220],
+                    "retrievalType": retrieval_type,
+                })
+            return enriched
+        return await _run_sync(_enrich)
+
+    async def get_clause_detail(self, case_id: int, arguments: dict) -> dict:
+        clause_id = int(arguments.get("clauseId", 0))
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id AS clauseId, document_id AS documentId,
+                                  clause_number AS clauseNumber, title, content,
+                                  clause_type AS clauseType, page_number AS pageNumber,
+                                  semantic_elements AS semanticElements
+                           FROM contract_clause
+                           WHERE case_id=%s AND id=%s
+                           LIMIT 1""",
+                        (case_id, clause_id),
+                    )
+                    row = _normalize_value(cur.fetchone() or {})
+                    if isinstance(row.get("semanticElements"), str):
+                        try:
+                            row["semanticElements"] = json.loads(row["semanticElements"])
+                        except Exception:
+                            pass
+                    return row
+        return await _run_sync(_get)
+
+    async def list_timeline(self, case_id: int, arguments: dict) -> list[dict]:
+        limit = max(1, min(80, int(arguments.get("limit", 30))))
+        return await self._timeline(case_id, "", limit)
+
+    async def search_timeline(self, case_id: int, arguments: dict) -> list[dict]:
+        query = str(arguments.get("query", "")).strip()
+        limit = max(1, min(50, int(arguments.get("limit", 20))))
+        return await self._timeline(case_id, query, limit)
+
+    async def _timeline(self, case_id: int, query: str, limit: int) -> list[dict]:
+        def _get():
+            params: list[Any] = [case_id]
+            where = "n.case_id=%s"
+            if query:
+                like = f"%{query}%"
+                where += """ AND (
+                    n.label LIKE %s OR n.node_type LIKE %s OR n.condition_text LIKE %s
+                    OR n.business_meaning LIKE %s OR c.title LIKE %s OR c.content LIKE %s
+                )"""
+                params.extend([like, like, like, like, like, like])
+            params.append(limit)
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT n.id, n.document_id AS documentId, n.clause_id AS clauseId,
+                                   n.node_type AS nodeType, n.label, n.node_date AS nodeDate,
+                                   n.condition_text AS conditionText,
+                                   n.responsible_party AS responsibleParty,
+                                   n.business_meaning AS businessMeaning,
+                                   n.citation_json AS citationJson, n.confidence,
+                                   n.source, n.status,
+                                   c.clause_number AS clauseNumber, c.title AS clauseTitle
+                            FROM contract_timeline_node n
+                            LEFT JOIN contract_clause c ON c.id=n.clause_id
+                            WHERE {where}
+                            ORDER BY COALESCE(n.node_date, '9999-12-31'), n.id
+                            LIMIT %s""",
+                        params,
+                    )
+                    rows = [_normalize_value(r) for r in cur.fetchall()]
+                    for row in rows:
+                        if isinstance(row.get("citationJson"), str):
+                            try:
+                                row["citationJson"] = json.loads(row["citationJson"])
+                            except Exception:
+                                pass
+                    return rows
+        return await _run_sync(_get)
+
     # ── Policy knowledge search ────────────────────────────────────
 
     async def search_policy(self, case_id: int, arguments: dict) -> list[dict]:
-        query = str(arguments.get("query", "")).lower()
+        query = str(arguments.get("query", "")).strip()
         clause_type = str(arguments.get("clauseType", ""))
         limit = max(1, min(10, int(arguments.get("limit", 5))))
-        def _get():
+        standard_limit = max(1, min(3, limit // 2 or 1))
+        kb_limit = max(1, limit - standard_limit)
+
+        def _standard():
             with _conn() as conn:
                 with conn.cursor() as cur:
                     sql = """SELECT id, clause_type AS clauseType, title, content,
@@ -112,9 +345,95 @@ class ContractStore:
                     cur.execute(sql, params)
                     rows = [_normalize_value(r) for r in cur.fetchall()]
             if query:
-                rows = [r for r in rows if query in str(r.get("title","") + str(r.get("content","")).lower())]
-            return rows[:limit]
-        return await _run_sync(_get)
+                q = query.lower()
+                rows = [
+                    r for r in rows
+                    if q in (str(r.get("title") or "") + " " + str(r.get("content") or "")).lower()
+                ]
+            result = []
+            for row in rows[:standard_limit]:
+                result.append({
+                    **row,
+                    "sourceType": "CONTRACT_STANDARD_CLAUSE",
+                    "sourceId": row.get("id"),
+                    "snippet": str(row.get("content") or "")[:220],
+                    "retrievalType": "MYSQL_STANDARD_CLAUSE",
+                })
+            return result
+
+        async def _kb_es_search() -> list[dict]:
+            if not query:
+                return []
+            try:
+                from app.services.embedding_service import EmbeddingService
+                from app.services.es_service import ESService
+                embedding = EmbeddingService()
+                es = ESService()
+                vector = embedding.embed(query) if embedding.configured else None
+                hits = es.search_kb_by_embedding(vector, kb_limit) if vector else []
+                retrieval_type = "KB_VECTOR" if hits else ""
+                if not hits:
+                    hits = es.search_kb_by_keyword(query, kb_limit)
+                    retrieval_type = "KB_KEYWORD" if hits else ""
+                return [
+                    {
+                        **hit,
+                        "sourceType": "KB_DOCUMENT",
+                        "sourceId": hit.get("sourceId") or hit.get("documentId"),
+                        "retrievalType": retrieval_type,
+                    }
+                    for hit in hits[:kb_limit]
+                ]
+            except Exception as exc:
+                logger.warning("policy KB ES search failed, fallback to MySQL: %s", exc)
+                return []
+
+        def _kb_mysql_fallback() -> list[dict]:
+            if not query:
+                return []
+            terms = _contract_query_terms(query)
+            likes = [f"%{term}%" for term in terms if term]
+            if not likes:
+                likes = [f"%{query}%"]
+            conditions = " OR ".join([
+                "(d.title LIKE %s OR c.section_title LIKE %s OR c.chunk_text LIKE %s)"
+                for _ in likes
+            ])
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"""SELECT c.id AS chunkId, c.document_id AS sourceId,
+                                  c.space_id AS spaceId, d.title,
+                                  c.section_title AS sectionTitle,
+                                  c.source_page AS page, c.chunk_text AS content
+                           FROM kb_document_chunk c
+                           JOIN kb_document d ON d.id=c.document_id
+                           WHERE COALESCE(c.deleted,0)=0
+                             AND COALESCE(d.deleted,0)=0
+                             AND d.status='READY'
+                             AND ({conditions})
+                           ORDER BY c.document_id DESC, c.chunk_index ASC
+                           LIMIT %s""",
+                        [like for like in likes for _ in range(3)] + [kb_limit],
+                    )
+                    rows = [_normalize_value(r) for r in cur.fetchall()]
+            return [
+                {
+                    **row,
+                    "sourceType": "KB_DOCUMENT",
+                    "documentId": row.get("sourceId"),
+                    "snippet": str(row.get("content") or "")[:220],
+                    "score": 0,
+                    "retrievalType": "MYSQL_KB_KEYWORD_FALLBACK",
+                }
+                for row in rows
+            ]
+
+        standard = await _run_sync(_standard)
+        kb_hits = await _kb_es_search()
+        if not kb_hits:
+            kb_hits = await _run_sync(_kb_mysql_fallback)
+        return _merge_policy_items(standard, kb_hits, limit=limit)
 
     # ── Standard clause matching ───────────────────────────────────
 
@@ -294,10 +613,11 @@ class ContractStore:
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """SELECT id, rule_key AS ruleKey, title, severity, status,
-                                  clause_type AS clauseType
-                           FROM contract_review_finding
-                           WHERE case_id=%s AND status='OPEN'""",
+                        """SELECT f.id, r.rule_key AS ruleKey, f.title, f.severity,
+                                  f.status, r.clause_type AS clauseType
+                           FROM contract_review_finding f
+                           LEFT JOIN contract_review_rule r ON r.id=f.rule_id
+                           WHERE f.case_id=%s AND f.status='OPEN'""",
                         (case_id,),
                     )
                     return [_normalize_value(r) for r in cur.fetchall()]
@@ -342,10 +662,106 @@ class ContractStore:
             return obs
         return await _run_sync(_get)
 
-    async def verify_evidence(self, obligation_id: int) -> dict:
+    async def verify_evidence(
+        self, case_id: int, obligation_id: int = 0, timeline_node_id: int = 0
+    ) -> dict:
         def _get():
             with _conn() as conn:
                 with conn.cursor() as cur:
+                    if timeline_node_id:
+                        cur.execute(
+                            """SELECT n.id, n.case_id AS caseId, n.node_type AS nodeType,
+                                      n.label, n.node_date AS nodeDate,
+                                      n.condition_text AS conditionText,
+                                      n.business_meaning AS businessMeaning,
+                                      n.responsible_party AS responsibleParty,
+                                      n.citation_json AS citationJson,
+                                      c.clause_number AS clauseNumber,
+                                      c.title AS clauseTitle, c.content AS clauseContent
+                               FROM contract_timeline_node n
+                               LEFT JOIN contract_clause c ON c.id=n.clause_id
+                               WHERE n.id=%s AND n.case_id=%s
+                               LIMIT 1""",
+                            (timeline_node_id, case_id),
+                        )
+                        node = _normalize_value(cur.fetchone() or {})
+                        if not node:
+                            return {"error": "Timeline node not found", "timelineNodeId": timeline_node_id}
+                        if isinstance(node.get("citationJson"), str):
+                            try:
+                                node["citationJson"] = json.loads(node["citationJson"])
+                            except Exception:
+                                pass
+                        cur.execute(
+                            """SELECT id AS documentId, document_type AS documentType,
+                                      file_name AS fileName, file_size AS fileSize,
+                                      version, parse_status AS parseStatus,
+                                      content_hash AS contentHash, create_time AS createTime
+                               FROM contract_document
+                               WHERE case_id=%s
+                                 AND document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                                 AND parse_status <> 'FAILED'
+                               ORDER BY FIELD(document_type,'FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING'),
+                                        version DESC, id DESC
+                               LIMIT 30""",
+                            (case_id,),
+                        )
+                        evidence = [_normalize_value(r) for r in cur.fetchall()]
+                        missing = []
+                        node_text = " ".join([
+                            str(node.get("label") or ""),
+                            str(node.get("businessMeaning") or ""),
+                            str(node.get("conditionText") or ""),
+                            str(node.get("clauseContent") or ""),
+                        ])
+                        required_by_type = {
+                            "PAYMENT": ["付款记录或银行回单", "发票或结算凭证"],
+                            "DELIVERY": ["交付报告或成果物", "签收/接收记录"],
+                            "ACCEPTANCE": ["验收单或验收会议纪要", "测试数据或验收标准对照"],
+                            "NOTICE": ["书面通知记录"],
+                            "RENEWAL": ["续签商谈记录或审批意见"],
+                            "TERMINATION": ["解除/终止通知或双方确认"],
+                        }
+                        node_type = str(node.get("nodeType") or "OTHER").upper()
+                        missing.extend(required_by_type.get(node_type, []))
+                        if "验收" in node_text and "验收单或验收会议纪要" not in missing:
+                            missing.append("验收单或验收会议纪要")
+                        if ("付款" in node_text or "支付" in node_text or "发票" in node_text) and "付款记录或银行回单" not in missing:
+                            missing.append("付款记录或银行回单")
+                        if ("交付" in node_text or "完成" in node_text or "服务" in node_text) and "交付报告或成果物" not in missing:
+                            missing.append("交付报告或成果物")
+                        if evidence:
+                            conclusion = "NEEDS_REVIEW"
+                            summary = "已找到履约证据，需按合同要求逐项人工复核。"
+                            missing_after = missing
+                        else:
+                            conclusion = "INSUFFICIENT_EVIDENCE"
+                            summary = "当前未找到可用于该节点的履约证据，无法判断是否满足合同要求。"
+                            missing_after = missing or ["履约证据文件"]
+                        return {
+                            "timelineNodeId": timeline_node_id,
+                            "node": node,
+                            "requirementItems": [
+                                {
+                                    "requirement": node.get("businessMeaning") or node.get("label") or "合同时间节点要求",
+                                    "sourceQuote": (node.get("citationJson") or {}).get("quote")
+                                        if isinstance(node.get("citationJson"), dict) else "",
+                                    "required": True,
+                                }
+                            ],
+                            "evidenceDocuments": evidence,
+                            "missingEvidence": missing_after,
+                            "conclusion": conclusion,
+                            "riskLevel": "MEDIUM" if evidence else "HIGH",
+                            "confidenceLevel": "LOW" if not evidence else "MEDIUM",
+                            "summary": summary,
+                            "explicitConsequence": "",
+                            "aiRisk": "证据不足或证据未核验时，可能导致验收延期、付款延迟或争议升级；该风险为 AI 提示，不代表合同明确约定。",
+                            "suggestedActions": [
+                                {"title": item, "type": "REQUEST_MATERIAL"} for item in (missing_after or [])
+                            ][:5],
+                        }
+
                     cur.execute(
                         """SELECT o.id, o.title, o.status, o.evidence_required,
                                   d.id AS docId, d.file_name AS docFileName

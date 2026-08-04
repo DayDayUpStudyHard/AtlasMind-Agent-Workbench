@@ -2,8 +2,10 @@ package com.atlasmind.controller;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.atlasmind.common.Result;
+import com.atlasmind.dto.StoreResult;
 import com.atlasmind.entity.User;
 import com.atlasmind.service.ContractCaseService;
+import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.connection.RedisConnection;
@@ -11,6 +13,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
@@ -32,6 +35,7 @@ import java.util.concurrent.Executors;
 public class ContractWorkspaceController {
 
     private final ContractCaseService contractCaseService;
+    private final FileStorageService fileStorageService;
     private final UserService userService;
     private final StringRedisTemplate redisTemplate;
     private final JdbcTemplate jdbcTemplate;
@@ -44,6 +48,16 @@ public class ContractWorkspaceController {
         return Result.ok(contractCaseService.portfolio());
     }
 
+    @GetMapping("/work-queues/summary")
+    public Result<Map<String, Object>> workQueueSummary() {
+        return Result.ok(contractCaseService.workQueueSummary());
+    }
+
+    @GetMapping("/work-queues")
+    public Result<List<Map<String, Object>>> workQueue(@RequestParam(defaultValue = "REVIEW") String type) {
+        return Result.ok(contractCaseService.listWorkQueue(type));
+    }
+
     @GetMapping
     public Result<List<Map<String, Object>>> list(@RequestParam(required = false) Map<String, Object> filters) {
         return Result.ok(contractCaseService.listCases(filters));
@@ -52,6 +66,39 @@ public class ContractWorkspaceController {
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> request) {
         return Result.ok(contractCaseService.createCase(request));
+    }
+
+    @PostMapping("/intakes")
+    public Result<Map<String, Object>> createIntake(@RequestBody Map<String, Object> request) {
+        return Result.ok(contractCaseService.createIntake(request, StpUtil.getLoginIdAsLong()));
+    }
+
+    @PostMapping(value = "/intakes/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<Map<String, Object>> createFileIntake(@RequestParam("file") MultipartFile file)
+            throws IOException {
+        StoreResult stored = fileStorageService.store(file);
+        return Result.ok(contractCaseService.createFileIntake(Map.of(
+                "fileName", file.getOriginalFilename() == null ? "" : file.getOriginalFilename(),
+                "filePath", stored.getUrl(),
+                "fileSize", file.getSize()
+        ), StpUtil.getLoginIdAsLong()));
+    }
+
+    @GetMapping("/intakes/{intakeId}")
+    public Result<Map<String, Object>> getIntake(@PathVariable Long intakeId) {
+        return Result.ok(contractCaseService.getIntake(intakeId, StpUtil.getLoginIdAsLong()));
+    }
+
+    @PostMapping("/intakes/{intakeId}/retry")
+    public Result<Map<String, Object>> retryIntake(@PathVariable Long intakeId) {
+        return Result.ok(contractCaseService.retryIntake(intakeId, StpUtil.getLoginIdAsLong()));
+    }
+
+    @PostMapping("/intakes/{intakeId}/confirm")
+    public Result<Map<String, Object>> confirmIntake(
+            @PathVariable Long intakeId, @RequestBody Map<String, Object> request) {
+        return Result.ok(contractCaseService.confirmIntake(
+                intakeId, request, StpUtil.getLoginIdAsLong()));
     }
 
     @GetMapping("/{caseId}")
@@ -74,6 +121,12 @@ public class ContractWorkspaceController {
         return Result.ok(contractCaseService.listDocuments(caseId));
     }
 
+    @GetMapping("/{caseId}/documents/{documentId}/content")
+    public Result<Map<String, Object>> documentContent(
+            @PathVariable Long caseId, @PathVariable Long documentId) {
+        return Result.ok(contractCaseService.getDocumentContent(caseId, documentId));
+    }
+
     @PostMapping("/{caseId}/runs")
     public Result<Map<String, Object>> startRun(@PathVariable Long caseId, @RequestBody(required = false) Map<String, Object> request) {
         return Result.ok(contractCaseService.startRun(caseId, request == null ? Map.of() : request));
@@ -89,12 +142,34 @@ public class ContractWorkspaceController {
         return Result.ok(contractCaseService.getRun(runId));
     }
 
+    @PatchMapping("/findings/{findingId}")
+    public Result<Map<String, Object>> updateFinding(
+            @PathVariable Long findingId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.updateFinding(
+                findingId, request == null ? Map.of() : request));
+    }
+
     @PostMapping("/runs/{runId}/actions/{actionId}/approval")
     public Result<Map<String, Object>> approve(
             @PathVariable Long runId, @PathVariable Long actionId,
             @RequestBody(required = false) Map<String, Object> request) {
         return Result.ok(contractCaseService.approveAction(runId, actionId,
                 request == null ? Map.of() : request, currentActor()));
+    }
+
+    @PostMapping("/{caseId}/timeline/{timelineNodeId}/fulfillment-checks")
+    public Result<Map<String, Object>> startTimelineFulfillmentCheck(
+            @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
+        return Result.ok(contractCaseService.startTimelineFulfillmentCheck(caseId, timelineNodeId));
+    }
+
+    @PatchMapping("/fulfillment-checks/{checkId}/confirmation")
+    public Result<Map<String, Object>> confirmFulfillmentCheck(
+            @PathVariable Long checkId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.confirmFulfillmentCheck(
+                checkId, request == null ? Map.of() : request, currentActor()));
     }
 
     // Obligations
