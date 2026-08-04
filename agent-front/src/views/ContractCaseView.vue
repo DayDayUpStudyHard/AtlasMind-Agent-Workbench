@@ -154,6 +154,29 @@
                   <article v-for="check in fulfillmentHistory(node)" :key="check.id">
                     <strong>#{{ check.id }} · {{ fulfillmentConclusionLabel(check.conclusion) }}</strong>
                     <p>{{ check.summary || check.runCurrentStep || '等待 Agent 生成结果' }}</p>
+                    <div v-if="requirementRows(check).length" class="history-grid">
+                      <div v-for="(row, index) in requirementRows(check)" :key="index">
+                        <span>{{ row.required === false ? '辅助项' : '必需项' }}</span>
+                        <p><b>要求：</b>{{ row.requirement || '待人工复核合同要求' }}</p>
+                        <p><b>证据：</b>{{ row.evidence || '暂无充分证据' }}</p>
+                        <p><b>判断：</b>{{ row.judgement || row.judgment || '需人工复核' }}</p>
+                        <p><b>缺口：</b>{{ row.gap || '暂无明确缺口' }}</p>
+                      </div>
+                    </div>
+                    <div v-if="arrayField(check.evidenceSnapshotJson).length" class="history-snapshots">
+                      <span>证据快照</span>
+                      <small v-for="item in arrayField(check.evidenceSnapshotJson)" :key="item.documentId || item.fileName || item.snippet">
+                        {{ evidenceSnapshotLabel(item) }}
+                      </small>
+                    </div>
+                    <div v-if="arrayField(check.missingEvidenceJson).length" class="history-snapshots warn">
+                      <span>补证清单</span>
+                      <small v-for="item in arrayField(check.missingEvidenceJson)" :key="item">{{ item }}</small>
+                    </div>
+                    <div v-if="check.explicitConsequence || check.aiRisk" class="history-consequence">
+                      <p v-if="check.explicitConsequence"><b>合同明确后果：</b>{{ check.explicitConsequence }}</p>
+                      <p v-if="check.aiRisk"><b>AI 推断，仅供参考：</b>{{ stripAiRiskPrefix(check.aiRisk) }}</p>
+                    </div>
                     <small>{{ formatDate(check.createTime) }} · {{ check.runStatus || check.status }}</small>
                   </article>
                 </details>
@@ -176,7 +199,7 @@
       <div v-for="doc in availableKnowledge" :key="doc.id" class="knowledge-row">
         <span :class="'knowledge-scope ' + scopeClass(doc.contractUsageScope)">{{ knowledgeScopeLabel(doc.contractUsageScope) }}</span>
         <strong>{{ doc.title }}</strong>
-        <small>{{ doc.contractUsageSummary || '用于合同风险审查与履约核验' }}</small>
+        <small>{{ knowledgeChangeSummary(doc) }}</small>
       </div>
     </section>
 
@@ -867,9 +890,10 @@ function timelineEnrichmentReason(node) {
 }
 function timelineConsequence(node) {
   const check = latestFulfillmentCheck(node) || {}
+  const enrichment = timelineCitation(node)?.timelineEnrichment || {}
   return {
-    explicit: check.explicitConsequence || '',
-    ai: check.aiRisk || '',
+    explicit: check.explicitConsequence || enrichment.explicitConsequence || '',
+    ai: check.aiRisk || enrichment.aiRisk || '',
   }
 }
 function relativeDateResult(node) {
@@ -955,15 +979,26 @@ function evidenceSnapshotLabel(item) {
   const parts = [
     item.fileName || item.title || `文档#${item.documentId || ''}`,
     item.version != null ? `v${item.version}` : '',
+    item.contentHash ? `hash ${String(item.contentHash).slice(0, 10)}` : '',
+    item.matchReason || '',
     item.snippet || item.contentSnippet || item.contentHash || '',
   ].filter(Boolean)
   return parts.join(' · ')
+}
+function stripAiRiskPrefix(value) {
+  return String(value || '').replace(/^AI 推断，仅供参考[:：]\s*/, '')
 }
 function knowledgeScopeLabel(scope) {
   return { GLOBAL:'全部合同', SPECIFIC_CASES:'指定合同', DISABLED:'不用于合同' }[scope] || '不用于合同'
 }
 function scopeClass(scope) {
   return String(scope || 'DISABLED').toLowerCase().replace(/_/g, '-')
+}
+function knowledgeChangeSummary(doc) {
+  const summary = doc.contractUsageSummary || '用于合同风险审查与履约核验'
+  const updated = formatDate(doc.contractUsageUpdatedAt)
+  const space = doc.spaceName ? ` · ${doc.spaceName}` : ''
+  return `${summary}${space}${updated ? ' · 最近变更 ' + updated : ''}`
 }
 function timelineSourceLabel(node) {
   const source = node.source || node.sourceType || ''
@@ -1147,6 +1182,16 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-history article strong{display:block;color:var(--atlas-text);font-size:12px}
 .fulfillment-history article p{margin:5px 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .fulfillment-history article small{display:block;color:var(--atlas-subtle);font-size:10px}
+.history-grid{display:grid;gap:6px;margin-top:8px}
+.history-grid div{padding:7px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
+.history-grid span,.history-snapshots span{display:block;margin-bottom:4px;color:var(--atlas-primary);font-size:9px;font-weight:900}
+.history-grid p{margin:3px 0!important;color:var(--atlas-text)!important}
+.history-snapshots{margin-top:8px;padding:7px;background:rgba(66,111,166,.05);border:1px solid rgba(66,111,166,.14);border-radius:4px}
+.history-snapshots.warn{background:rgba(179,92,86,.06);border-color:rgba(179,92,86,.14)}
+.history-snapshots.warn span{color:#b35c56}
+.history-snapshots small{margin-top:3px;line-height:1.45}
+.history-consequence{margin-top:8px;padding:7px;background:var(--atlas-surface);border-left:3px solid var(--atlas-warning)}
+.history-consequence p{margin:3px 0!important;color:var(--atlas-text)!important}
 .fulfillment-confirm{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
 .fulfillment-empty{margin:8px 0 0;color:var(--atlas-subtle);font-size:11px;line-height:1.55}
 

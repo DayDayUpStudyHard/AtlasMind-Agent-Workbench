@@ -684,7 +684,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
   "requirements":[
     {"requirement":"合同要求","evidence":"已找到证据或空","judgement":"满足/不满足/证据不足/需复核","gap":"缺口或问题","required":true}
   ],
-  "evidenceSnapshot":[{"documentId":0,"fileName":"string","version":0,"snippet":"string"}],
+  "evidenceSnapshot":[{"documentId":0,"fileName":"string","version":0,"contentHash":"string","snippet":"string","matchReason":"string"}],
   "missingEvidence":["string"],
   "explicitConsequence":"合同原文明示后果；没有则写合同未明确约定",
   "aiRisk":"AI 推断风险，必须标注仅供参考",
@@ -796,6 +796,8 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
       "label": "string",
       "responsibleParty": "OUR_ENTITY | COUNTERPARTY | BOTH | UNKNOWN",
       "businessMeaning": "string",
+      "explicitConsequence": "string",
+      "aiRisk": "string",
       "reason": "string",
       "confidence": 0.0
     }
@@ -810,6 +812,8 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 5. label 要尽量短，保留履约含义。
 6. businessMeaning 要像给业务人员看的话，尽量写成“谁应在什么时间/条件下完成什么事”。
 7. confidence 0-1。
+8. explicitConsequence 只能写合同原文明确约定的后果；没有明确后果时返回空字符串。
+9. aiRisk 是基于节点类型推断的管理风险，必须以“AI 推断，仅供参考：”开头，不能冒充合同约定。
 """.strip()
         payload = {"candidates": candidates[:60]}
         response = self._call_llm_with_retry(

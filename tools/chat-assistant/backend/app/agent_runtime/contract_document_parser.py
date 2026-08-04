@@ -909,13 +909,25 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
                 node["confidence"] = min(0.99, max(float(node.get("confidence") or 0), float(result.get("confidence") or 0)))
             except (TypeError, ValueError):
                 pass
+            explicit_consequence = str(result.get("explicitConsequence") or "").strip()[:500]
+            ai_risk = str(result.get("aiRisk") or "").strip()[:500]
             node["source"] = "LLM_ENRICHED"
             node["citation"]["timelineEnrichment"] = {
                 "keep": result.get("keep", True),
                 "reason": str(result.get("reason") or "")[:300],
+                "explicitConsequence": explicit_consequence,
+                "aiRisk": _normalize_ai_risk(ai_risk or _rule_ai_risk(node)),
             }
             if node["confidence"] < 0.8:
                 node["status"] = "NEEDS_REVIEW"
+        else:
+            explicit_consequence = _rule_explicit_consequence(
+                str(node.get("citation", {}).get("quote") or "")
+            )
+            if explicit_consequence:
+                node["citation"].setdefault("timelineEnrichment", {})
+                node["citation"]["timelineEnrichment"]["explicitConsequence"] = explicit_consequence
+                node["citation"]["timelineEnrichment"]["aiRisk"] = _normalize_ai_risk(_rule_ai_risk(node))
         enriched.append(node)
     enriched.extend(nodes[60:])
     return enriched, {
@@ -924,6 +936,45 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
         "returned": len(result_by_id),
         "dropped": dropped,
     }
+
+
+def _rule_explicit_consequence(quote: str) -> str:
+    text = re.sub(r"\s+", " ", str(quote or "")).strip()
+    if not text:
+        return ""
+    consequence_terms = (
+        "违约金", "解除合同", "解除本合同", "终止合同", "赔偿",
+        "不承担违约责任", "承担违约责任", "逾期", "扣除", "罚款",
+    )
+    if not any(term in text for term in consequence_terms):
+        return ""
+    return text[:260]
+
+
+def _rule_ai_risk(node: dict) -> str:
+    node_type = str(node.get("nodeType") or "").upper()
+    if node_type == "PAYMENT":
+        risk = "付款、开票或结算材料不完整时，可能影响付款审批、账期计算或争议处理。"
+    elif node_type in {"DELIVERY", "SERVICE_END", "SERVICE_START"}:
+        risk = "交付或服务进度证据不足时，可能影响验收、付款或后续违约责任认定。"
+    elif node_type == "ACCEPTANCE":
+        risk = "验收标准或验收记录不足时，可能导致验收通过性和付款条件存在争议。"
+    elif node_type in {"TERMINATION", "RENEWAL", "CONTRACT_END"}:
+        risk = "到期、续签或解除节点缺少跟踪时，可能错过通知期限或形成履约争议。"
+    elif node_type == "NOTICE":
+        risk = "通知证据不足时，可能无法证明已按合同约定履行告知义务。"
+    else:
+        risk = "该节点缺少履约跟踪时，可能影响合同执行证明和争议处理。"
+    return f"AI 推断，仅供参考：{risk}"
+
+
+def _normalize_ai_risk(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    if text.startswith("AI 推断，仅供参考"):
+        return text[:500]
+    return f"AI 推断，仅供参考：{text}"[:500]
 
 
 def _timeline_clause_excerpt(content: str, quote: str, limit: int = 220) -> str:

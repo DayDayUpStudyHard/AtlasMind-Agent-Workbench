@@ -1,6 +1,7 @@
 package com.atlasmind.controller;
 
 import cn.dev33.satoken.stp.StpUtil;
+import com.atlasmind.annotation.OperationLog;
 import com.atlasmind.common.Result;
 import com.atlasmind.dto.StoreResult;
 import com.atlasmind.entity.User;
@@ -159,12 +160,14 @@ public class ContractWorkspaceController {
     }
 
     @PostMapping("/{caseId}/timeline/{timelineNodeId}/fulfillment-checks")
+    @OperationLog(value = "发起合同履约核验", type = "CREATE")
     public Result<Map<String, Object>> startTimelineFulfillmentCheck(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
         return Result.ok(contractCaseService.startTimelineFulfillmentCheck(caseId, timelineNodeId));
     }
 
     @PatchMapping("/fulfillment-checks/{checkId}/confirmation")
+    @OperationLog(value = "人工确认合同履约核验", type = "UPDATE")
     public Result<Map<String, Object>> confirmFulfillmentCheck(
             @PathVariable Long checkId,
             @RequestBody(required = false) Map<String, Object> request) {
@@ -179,6 +182,7 @@ public class ContractWorkspaceController {
     }
 
     @PutMapping("/{caseId}/timeline/{timelineNodeId}/evidence-links")
+    @OperationLog(value = "调整合同时间节点证据", type = "UPDATE")
     public Result<Map<String, Object>> saveTimelineEvidenceLinks(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId,
             @RequestBody(required = false) Map<String, Object> request) {
@@ -203,6 +207,7 @@ public class ContractWorkspaceController {
     }
 
     @PostMapping("/{caseId}/fulfillment-evidence")
+    @OperationLog(value = "上传合同履约证据", type = "CREATE")
     public Result<Map<String, Object>> uploadFulfillmentEvidence(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
         return Result.ok(contractCaseService.uploadFulfillmentEvidence(caseId, request));
     }

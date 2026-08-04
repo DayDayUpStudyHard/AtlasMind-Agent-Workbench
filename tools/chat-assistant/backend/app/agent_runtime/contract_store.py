@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 from .persistence import _conn, _run_sync, _normalize_value
@@ -20,6 +21,39 @@ _CONTRACT_SEARCH_TERMS = (
     "付款", "支付", "发票", "工作日", "自然日", "验收", "交付", "续签", "终止",
     "到期", "通知", "逾期", "违约", "赔偿", "保密", "个人信息", "数据",
 )
+
+
+def _evidence_terms(text: str) -> list[str]:
+    terms: list[str] = []
+    for term in _CONTRACT_SEARCH_TERMS:
+        if term in text and term not in terms:
+            terms.append(term)
+    for match in re.finditer(r"\d{1,4}\s*(?:个?工作日|个?自然日|日|天|个月|月|年)", text):
+        value = re.sub(r"\s+", "", match.group(0))
+        if value not in terms:
+            terms.append(value)
+    return terms[:12]
+
+
+def _best_evidence_snippet(content: str, terms: list[str], limit: int = 260) -> tuple[str, list[str]]:
+    text = re.sub(r"\s+", " ", str(content or "")).strip()
+    if not text:
+        return "", []
+    best_index = -1
+    matched: list[str] = []
+    for term in terms:
+        if not term:
+            continue
+        index = text.find(term)
+        if index >= 0:
+            if best_index < 0 or index < best_index:
+                best_index = index
+            matched.append(term)
+    if best_index < 0:
+        return text[:limit], []
+    start = max(0, best_index - 90)
+    end = min(len(text), best_index + limit)
+    return text[start:end], matched[:6]
 
 
 def _rerank_contract_hits(query: str, hits: list[dict]) -> list[dict]:
@@ -760,7 +794,7 @@ class ContractStore:
                                       file_name AS fileName, file_size AS fileSize,
                                       d.version, d.parse_status AS parseStatus,
                                       d.content_hash AS contentHash,
-                                      LEFT(COALESCE(d.content_text,''), 700) AS contentSnippet,
+                                      d.content_text AS contentText,
                                       d.create_time AS createTime,
                                       CASE WHEN l.id IS NULL THEN 0 ELSE 1 END AS manuallyLinked
                                FROM contract_document d
@@ -807,6 +841,17 @@ class ContractStore:
                             missing.append("付款记录或银行回单")
                         if ("交付" in node_text or "完成" in node_text or "服务" in node_text) and "交付报告或成果物" not in missing:
                             missing.append("交付报告或成果物")
+                        terms = _evidence_terms(node_text)
+                        for item in evidence:
+                            snippet, matched_terms = _best_evidence_snippet(
+                                str(item.pop("contentText", "") or ""), terms
+                            )
+                            item["snippet"] = snippet
+                            item["matchedTerms"] = matched_terms
+                            item["matchReason"] = (
+                                "人工绑定证据" if item.get("manuallyLinked")
+                                else ("按节点关键词匹配" if matched_terms else "本合同候选证据")
+                            )
                         if evidence:
                             conclusion = "NEEDS_REVIEW"
                             summary = "已找到履约证据，需按合同要求逐项人工复核。"
@@ -832,8 +877,14 @@ class ContractStore:
                             "riskLevel": "MEDIUM" if evidence else "HIGH",
                             "confidenceLevel": "LOW" if not evidence else "MEDIUM",
                             "summary": summary,
-                            "explicitConsequence": "",
-                            "aiRisk": "证据不足或证据未核验时，可能导致验收延期、付款延迟或争议升级；该风险为 AI 提示，不代表合同明确约定。",
+                            "explicitConsequence": (
+                                (node.get("citationJson") or {}).get("timelineEnrichment", {}).get("explicitConsequence")
+                                if isinstance(node.get("citationJson"), dict) else ""
+                            ) or "",
+                            "aiRisk": (
+                                (node.get("citationJson") or {}).get("timelineEnrichment", {}).get("aiRisk")
+                                if isinstance(node.get("citationJson"), dict) else ""
+                            ) or "AI 推断，仅供参考：证据不足或证据未核验时，可能导致验收延期、付款延迟或争议升级。",
                             "suggestedActions": [
                                 {"title": item, "type": "REQUEST_MATERIAL"} for item in (missing_after or [])
                             ][:5],

@@ -95,6 +95,34 @@ def _json_object(value):
     return {}
 
 
+def _sanitize_fulfillment_requirements(value):
+    if not isinstance(value, list):
+        return value
+    sanitized = []
+    for item in value:
+        if not isinstance(item, dict):
+            sanitized.append(item)
+            continue
+        row = dict(item)
+        has_contract_source = bool(
+            row.get("sourceQuote")
+            or row.get("contractQuote")
+            or row.get("contractCitation")
+            or row.get("citation")
+        )
+        if row.get("required") is True and not has_contract_source:
+            row["required"] = False
+            gap = str(row.get("gap") or "").strip()
+            note = "缺少合同原文依据，已按辅助项处理，需人工复核。"
+            row["gap"] = f"{gap}；{note}" if gap else note
+        judgement = str(row.get("judgement") or row.get("judgment") or "")
+        requirement = str(row.get("requirement") or "")
+        if any(term in requirement + judgement for term in ("满意", "按甲方要求", "符合要求", "另行确认")):
+            row.setdefault("judgement", "条款不明确，需要人工复核")
+        sanitized.append(row)
+    return sanitized
+
+
 def _finding_rule_key(finding: dict) -> str:
     policy = _json_object(finding.get("policyCitation") or finding.get("policy_citation"))
     return str(
@@ -1033,7 +1061,9 @@ class MySqlReportStore(ReportStore):
                                     str(artifact.get("riskLevel") or "MEDIUM"),
                                     str(artifact.get("confidenceLevel") or "LOW"),
                                     str(artifact.get("summary") or ""),
-                                    _json_dumps(artifact.get("requirements")),
+                                    _json_dumps(_sanitize_fulfillment_requirements(
+                                        artifact.get("requirements")
+                                    )),
                                     _json_dumps(artifact.get("evidenceSnapshot")),
                                     _json_dumps(artifact.get("missingEvidence")),
                                     str(artifact.get("explicitConsequence") or ""),
