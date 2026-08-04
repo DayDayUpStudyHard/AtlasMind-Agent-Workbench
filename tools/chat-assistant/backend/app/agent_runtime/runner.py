@@ -817,7 +817,8 @@ class AgentRunner:
                     with conn.cursor() as cur:
                         cur.execute(
                             """SELECT id, title, contract_type, our_entity, counterparty,
-                                      amount, currency, effective_date, expiry_date, department, status
+                                      amount, currency, signed_date, effective_date,
+                                      expiry_date, department, status
                                FROM contract_case WHERE id=%s AND deleted=0 FOR UPDATE""",
                             (case_id,),
                         )
@@ -883,7 +884,7 @@ class AgentRunner:
             meta = {}
             fields = validated.get("fields") or {}
             for key in ("contractTitle", "contractType", "amount", "currency",
-                         "effectiveDate", "expiryDate", "department"):
+                         "signedDate", "effectiveDate", "expiryDate", "department"):
                 v = (fields.get(key) or {}).get("value")
                 if v is not None and v != "":
                     meta[key] = v

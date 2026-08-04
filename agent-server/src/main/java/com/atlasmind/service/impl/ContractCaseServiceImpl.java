@@ -205,8 +205,10 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     public List<Map<String, Object>> listCases(Map<String, Object> filters) {
         StringBuilder sql = new StringBuilder("""
                 SELECT id, case_key AS caseKey, title, contract_type AS contractType,
-                       status, counterparty, amount, currency, effective_date AS effectiveDate,
-                       expiry_date AS expiryDate, department, priority, owner_id AS ownerId,
+                       status, our_entity AS ourEntity, counterparty, our_side AS ourSide,
+                       amount, currency, effective_date AS effectiveDate,
+                       expiry_date AS expiryDate, signed_date AS signedDate,
+                       department, priority, owner_id AS ownerId,
                        last_run_id AS lastRunId, last_run_at AS lastRunAt,
                        create_time AS createTime, update_time AS updateTime
                 FROM contract_case WHERE deleted=0
@@ -231,8 +233,10 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         Map<String, Object> c = first(jdbcTemplate.queryForList("""
                 SELECT id, case_key AS caseKey, title, contract_type AS contractType,
                        status, description, our_entity AS ourEntity, counterparty,
+                       our_side AS ourSide,
                        amount, currency, effective_date AS effectiveDate,
-                       expiry_date AS expiryDate, department, owner_id AS ownerId,
+                       expiry_date AS expiryDate, signed_date AS signedDate,
+                       department, owner_id AS ownerId,
                        priority, tags, approved_version_id AS approvedVersionId,
                        signed_version_id AS signedVersionId,
                        last_run_id AS lastRunId, last_run_at AS lastRunAt,
@@ -315,14 +319,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
         Long id = insert("""
                 INSERT INTO contract_case (case_key, title, contract_type, description,
-                    our_entity, counterparty, amount, currency, effective_date, expiry_date,
+                    our_entity, counterparty, our_side, amount, currency, effective_date, expiry_date, signed_date,
                     department, owner_id, priority, tags, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DRAFT')
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DRAFT')
                 """, caseKey, title, str(request, "contractType"),
                 str(request, "description"), str(request, "ourEntity"),
-                str(request, "counterparty"),
+                str(request, "counterparty"), normalizeOurSide(str(request, "ourSide")),
                 request.get("amount"), str(request, "currency"),
-                request.get("effectiveDate"), request.get("expiryDate"),
+                request.get("effectiveDate"), request.get("expiryDate"), request.get("signedDate"),
                 str(request, "department"), request.get("ownerId"),
                 str(request, "priority"), str(request, "tags"));
 
@@ -492,10 +496,12 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         caseRequest.put("description", str(request, "description").trim());
         caseRequest.put("ourEntity", ourEntity);
         caseRequest.put("counterparty", counterparty);
+        caseRequest.put("ourSide", normalizeOurSide(str(request, "ourSide")));
         caseRequest.put("amount", amount);
         caseRequest.put("currency", currency);
         caseRequest.put("effectiveDate", effectiveDate);
         caseRequest.put("expiryDate", expiryDate);
+        caseRequest.put("signedDate", dateOrNull(request.get("signedDate"), "签订日期"));
         caseRequest.put("department", str(request, "department").trim());
         caseRequest.put("ownerId", userId);
         caseRequest.put("priority", priority);
@@ -516,13 +522,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             jdbcTemplate.update("""
                     UPDATE contract_case
                     SET title=?, contract_type=?, description=?, our_entity=?,
-                        counterparty=?, amount=?, currency=?, effective_date=?,
-                        expiry_date=?, department=?, owner_id=?, priority=?,
+                        counterparty=?, our_side=?, amount=?, currency=?, effective_date=?,
+                        expiry_date=?, signed_date=?, department=?, owner_id=?, priority=?,
                         status='READY_FOR_REVIEW'
                     WHERE id=? AND deleted=0
                     """,
                     title, contractType, str(request, "description").trim(), ourEntity,
-                    counterparty, amount, currency, effectiveDate, expiryDate,
+                    counterparty, normalizeOurSide(str(request, "ourSide")), amount, currency, effectiveDate, expiryDate,
+                    dateOrNull(request.get("signedDate"), "签订日期"),
                     str(request, "department").trim(), userId, priority, caseId);
             jdbcTemplate.update("DELETE FROM contract_party WHERE case_id=?", caseId);
             jdbcTemplate.update("INSERT INTO contract_party (case_id, party_name, party_role) VALUES (?,?,'COUNTERPARTY')",
@@ -551,10 +558,12 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         for (String f : fields) {
             if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
         }
+        if (request.containsKey("ourSide")) { sets.add("our_side=?"); params.add(normalizeOurSide(str(request, "ourSide"))); }
         String[] numFields = {"amount", "ownerId"};
         for (String f : numFields) {
             if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
         }
+        if (request.containsKey("signedDate")) { sets.add("signed_date=?"); params.add(dateOrNull(request.get("signedDate"), "签订日期")); }
         if (sets.isEmpty()) return getCase(caseId);
         params.add(caseId);
         jdbcTemplate.update("UPDATE contract_case SET " + String.join(",", sets) + " WHERE id=?", params.toArray());
@@ -721,6 +730,114 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 WHERE id=?
                 """, result, note, actor == null || actor.isBlank() ? "authenticated-user" : actor, checkId);
         return getCase(numberAsLong(check.get("caseId")));
+    }
+
+    @Override
+    public Map<String, Object> getTimelineEvidenceLinks(Long caseId, Long timelineNodeId) {
+        ensureTimelineNode(caseId, timelineNodeId);
+        List<Map<String, Object>> available = jdbcTemplate.queryForList("""
+                SELECT d.id, d.document_type AS documentType, d.file_name AS fileName,
+                       d.file_size AS fileSize, d.version, d.parse_status AS parseStatus,
+                       d.content_hash AS contentHash, d.update_time AS updateTime,
+                       EXISTS (
+                         SELECT 1 FROM contract_timeline_evidence_link l
+                         WHERE l.case_id=d.case_id
+                           AND l.timeline_node_id=?
+                           AND l.document_id=d.id
+                           AND l.check_id IS NULL
+                           AND COALESCE(l.deleted,0)=0
+                       ) AS linked
+                FROM contract_document d
+                WHERE d.case_id=?
+                  AND d.document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                  AND COALESCE(d.deleted,0)=0
+                  AND d.parse_status <> 'FAILED'
+                ORDER BY linked DESC,
+                         FIELD(d.document_type,'FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING'),
+                         d.version DESC, d.id DESC
+                """, timelineNodeId, caseId);
+        List<Long> linkedDocumentIds = available.stream()
+                .filter(row -> Boolean.TRUE.equals(row.get("linked"))
+                        || "1".equals(String.valueOf(row.get("linked"))))
+                .map(row -> numberAsLong(row.get("id")))
+                .toList();
+        return Map.of(
+                "caseId", caseId,
+                "timelineNodeId", timelineNodeId,
+                "available", available,
+                "linkedDocumentIds", linkedDocumentIds
+        );
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> saveTimelineEvidenceLinks(
+            Long caseId, Long timelineNodeId, Map<String, Object> request) {
+        ensureTimelineNode(caseId, timelineNodeId);
+        Set<Long> requestedIds = new LinkedHashSet<>();
+        Object rawIds = request.get("documentIds");
+        if (rawIds instanceof Collection<?> collection) {
+            for (Object value : collection) {
+                Long id = numberAsLongOrNull(value);
+                if (id != null) requestedIds.add(id);
+            }
+        }
+        if (requestedIds.size() > 50) throw new IllegalArgumentException("一次最多绑定 50 份证据");
+
+        Map<Long, Map<String, Object>> allowed = new HashMap<>();
+        if (!requestedIds.isEmpty()) {
+            String placeholders = String.join(",", Collections.nCopies(requestedIds.size(), "?"));
+            List<Object> params = new ArrayList<>();
+            params.add(caseId);
+            params.addAll(requestedIds);
+            List<Map<String, Object>> documents = jdbcTemplate.queryForList("""
+                    SELECT id, version, content_hash AS contentHash
+                    FROM contract_document
+                    WHERE case_id=?
+                      AND id IN (%s)
+                      AND document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                      AND COALESCE(deleted,0)=0
+                      AND parse_status <> 'FAILED'
+                    """.formatted(placeholders), params.toArray());
+            for (Map<String, Object> document : documents) {
+                allowed.put(numberAsLong(document.get("id")), document);
+            }
+            if (allowed.size() != requestedIds.size()) {
+                throw new IllegalArgumentException("存在不可用于该合同的证据文件");
+            }
+        }
+
+        jdbcTemplate.update("""
+                UPDATE contract_timeline_evidence_link
+                SET deleted=1
+                WHERE case_id=? AND timeline_node_id=? AND check_id IS NULL
+                """, caseId, timelineNodeId);
+        for (Long documentId : requestedIds) {
+            Map<String, Object> document = allowed.get(documentId);
+            Map<String, Object> existing = first(jdbcTemplate.queryForList("""
+                    SELECT id FROM contract_timeline_evidence_link
+                    WHERE case_id=? AND timeline_node_id=? AND document_id=?
+                      AND check_id IS NULL
+                    ORDER BY id DESC LIMIT 1
+                    """, caseId, timelineNodeId, documentId));
+            if (existing == null) {
+                jdbcTemplate.update("""
+                        INSERT INTO contract_timeline_evidence_link
+                            (case_id, timeline_node_id, document_id, check_id,
+                             link_source, relation_type, evidence_version, evidence_hash, deleted)
+                        VALUES (?,?,?,NULL,'MANUAL','FULFILLMENT_EVIDENCE',?,?,0)
+                        """, caseId, timelineNodeId, documentId,
+                        document.get("version"), document.get("contentHash"));
+            } else {
+                jdbcTemplate.update("""
+                        UPDATE contract_timeline_evidence_link
+                        SET deleted=0, link_source='MANUAL',
+                            evidence_version=?, evidence_hash=?, update_time=NOW()
+                        WHERE id=?
+                        """, document.get("version"), document.get("contentHash"), existing.get("id"));
+            }
+        }
+        return getTimelineEvidenceLinks(caseId, timelineNodeId);
     }
 
     @Override
@@ -1292,14 +1409,20 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        fc.create_time AS createTime, fc.update_time AS updateTime,
                        r.status AS runStatus, r.progress AS runProgress,
                        r.current_step AS runCurrentStep,
-                       EXISTS (
+                       (EXISTS (
                          SELECT 1 FROM contract_document d
                          WHERE d.case_id=fc.case_id
                            AND d.document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
                            AND COALESCE(d.deleted,0)=0
                            AND d.parse_status <> 'FAILED'
                            AND d.update_time > COALESCE(fc.update_time, fc.create_time)
-                       ) AS needsRecheck
+                       ) OR EXISTS (
+                         SELECT 1 FROM contract_timeline_evidence_link l
+                         WHERE l.case_id=fc.case_id
+                           AND l.timeline_node_id=fc.timeline_node_id
+                           AND l.check_id IS NULL
+                           AND l.update_time > COALESCE(fc.update_time, fc.create_time)
+                       )) AS needsRecheck
                 FROM contract_fulfillment_check fc
                 LEFT JOIN agent_run r ON r.id=fc.run_id
                 WHERE fc.case_id=?
@@ -1518,5 +1641,18 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if (value == null || String.valueOf(value).isBlank()) return null;
         try { return LocalDate.parse(String.valueOf(value)); }
         catch (Exception e) { throw new IllegalArgumentException(fieldName + "格式错误"); }
+    }
+
+    private String normalizeOurSide(String value) {
+        String side = strValue(value).toUpperCase(Locale.ROOT);
+        return switch (side) {
+            case "A", "PARTY_A", "甲方" -> "A";
+            case "B", "PARTY_B", "乙方" -> "B";
+            default -> null;
+        };
+    }
+
+    private String strValue(Object value) {
+        return value == null ? "" : String.valueOf(value).trim();
     }
 }

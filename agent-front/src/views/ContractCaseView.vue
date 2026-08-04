@@ -28,6 +28,7 @@
       <div><span>合同类型</span><strong>{{ typeLabel(c.contractType) }}</strong></div>
       <div><span>金额</span><strong>{{ c.amount ? c.amount + ' ' + (c.currency||'CNY') : '待填写' }}</strong></div>
       <div><span>部门</span><strong>{{ c.department || '待填写' }}</strong></div>
+      <div><span>签订日期</span><strong>{{ c.signedDate || '待填写' }}</strong></div>
       <div><span>生效日期</span><strong>{{ c.effectiveDate || '待填写' }}</strong></div>
       <div><span>到期日期</span><strong>{{ c.expiryDate || '待填写' }}</strong></div>
     </section>
@@ -97,13 +98,16 @@
                   <span>履约核验</span>
                   <strong>{{ fulfillmentConclusionLabel(latestFulfillmentCheck(node)?.conclusion) }}</strong>
                 </div>
-                <button
-                  class="quiet-button tiny"
-                  :disabled="running || fulfillmentCheckRunning(node)"
-                  @click="startTimelineFulfillmentCheck(node)"
-                >
-                  {{ fulfillmentCheckRunning(node) ? '核验中' : '发起核验' }}
-                </button>
+                <div class="fulfillment-actions">
+                  <button class="quiet-button tiny" @click="openEvidenceLinks(node)">调整证据</button>
+                  <button
+                    class="quiet-button tiny"
+                    :disabled="running || fulfillmentCheckRunning(node)"
+                    @click="startTimelineFulfillmentCheck(node)"
+                  >
+                    {{ fulfillmentCheckRunning(node) ? '核验中' : '发起核验' }}
+                  </button>
+                </div>
               </div>
               <div v-if="latestFulfillmentCheck(node)" class="fulfillment-result">
                 <p>{{ latestFulfillmentCheck(node).summary || '等待核验结果生成。' }}</p>
@@ -122,6 +126,16 @@
                     <span>AI 推断，仅供参考，不代表合同约定</span>
                     <p>{{ latestFulfillmentCheck(node).aiRisk }}</p>
                   </div>
+                </div>
+                <div v-if="requirementRows(latestFulfillmentCheck(node)).length" class="fulfillment-requirements">
+                  <small>合同要求 · 证据 · 判断 · 缺口</small>
+                  <article v-for="(row, index) in requirementRows(latestFulfillmentCheck(node))" :key="index">
+                    <div><span>合同要求</span><p>{{ row.requirement || '待人工复核合同要求' }}</p></div>
+                    <div><span>证据</span><p>{{ row.evidence || '暂无充分证据' }}</p></div>
+                    <div><span>判断</span><p>{{ row.judgement || row.judgment || '需人工复核' }}</p></div>
+                    <div><span>缺口</span><p>{{ row.gap || '暂无明确缺口' }}</p></div>
+                    <em>{{ row.required === false ? '辅助项' : '必需项' }}</em>
+                  </article>
                 </div>
                 <div v-if="arrayField(latestFulfillmentCheck(node).missingEvidenceJson).length" class="fulfillment-list">
                   <small>缺失证据</small>
@@ -304,6 +318,10 @@
               <input v-model="intakeFields.currency" placeholder="CNY" />
             </div>
             <div class="intake-field">
+              <label>签订日期</label>
+              <input v-model="intakeFields.signedDate" type="date" />
+            </div>
+            <div class="intake-field">
               <label>生效日期</label>
               <input v-model="intakeFields.effectiveDate" type="date" />
             </div>
@@ -343,6 +361,36 @@
           <el-button @click="showIntakeModal = false">暂不处理</el-button>
           <el-button type="primary" @click="doConfirmIntake" :loading="confirming">
             确认无误，更新合同信息
+          </el-button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Evidence link modal -->
+    <div v-if="evidenceDialog.visible" class="modal-overlay" @click.self="closeEvidenceLinks">
+      <div class="modal-content evidence-link-modal">
+        <div class="modal-head">
+          <div>
+            <h3>调整节点证据</h3>
+            <small>{{ evidenceDialog.node?.label || '合同时间节点' }}</small>
+          </div>
+          <button class="quiet-button small" @click="closeEvidenceLinks">✕ 关闭</button>
+        </div>
+        <div class="evidence-link-body">
+          <p>证据可以先上传到合同文件，不必一开始绑定节点。这里的绑定只影响下一次履约核验，不会自动调用 Agent。</p>
+          <div v-if="evidenceDialog.loading" class="blank-state">正在读取证据列表</div>
+          <div v-else-if="!evidenceDialog.available.length" class="blank-state">暂无可用履约证据。请先上传履约证据、附件、资质或报价文件。</div>
+          <label v-for="doc in evidenceDialog.available" :key="doc.id" class="evidence-link-row">
+            <input type="checkbox" :value="doc.id" v-model="evidenceDialog.selectedIds" />
+            <span>{{ docTypeLabel(doc.documentType) }}</span>
+            <strong>{{ doc.fileName }}</strong>
+            <small>v{{ doc.version }} · {{ parseStatusLabel(doc) }}</small>
+          </label>
+        </div>
+        <div class="modal-foot intake-actions">
+          <el-button @click="closeEvidenceLinks">取消</el-button>
+          <el-button type="primary" :loading="evidenceDialog.saving" @click="saveEvidenceLinks">
+            保存绑定
           </el-button>
         </div>
       </div>
@@ -438,6 +486,14 @@ const intakeFields = ref(null)
 const confirming = ref(false)
 const selectedTask = ref('VERSION_REVIEW')
 const timelineBaseSelection = reactive({})
+const evidenceDialog = reactive({
+  visible: false,
+  loading: false,
+  saving: false,
+  node: null,
+  available: [],
+  selectedIds: [],
+})
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 
@@ -558,6 +614,7 @@ function checkPendingIntake() {
     contractType: (fields.contractType || {}).value || c.value?.contractType || 'OTHER',
     amount: c.value?.amount || (fields.amount || {}).value || null,
     currency: (fields.currency || {}).value || c.value?.currency || 'CNY',
+    signedDate: ((fields.signedDate || {}).value || c.value?.signedDate || '').toString().slice(0, 10),
     effectiveDate: ((fields.effectiveDate || {}).value || c.value?.effectiveDate || '').toString().slice(0, 10),
     expiryDate: ((fields.expiryDate || {}).value || c.value?.expiryDate || '').toString().slice(0, 10),
     department: (fields.department || {}).value || c.value?.department || '',
@@ -587,8 +644,10 @@ async function doConfirmIntake() {
       contractType: f.contractType,
       ourEntity: ourEntity || '',
       counterparty: counterparty || '',
+      ourSide: f.ourSide === 'partyA' ? 'A' : (f.ourSide === 'partyB' ? 'B' : ''),
       amount: f.amount || null,
       currency: f.currency || 'CNY',
+      signedDate: f.signedDate || null,
       effectiveDate: f.effectiveDate || null,
       expiryDate: f.expiryDate || null,
       department: f.department || '',
@@ -677,6 +736,53 @@ async function startTimelineFulfillmentCheck(node) {
     running.value = false
   }
 }
+async function openEvidenceLinks(node) {
+  if (!canFulfillmentCheck(node)) {
+    message.warning('该时间节点缺少可绑定的合同条款记录')
+    return
+  }
+  evidenceDialog.visible = true
+  evidenceDialog.loading = true
+  evidenceDialog.node = node
+  evidenceDialog.available = []
+  evidenceDialog.selectedIds = []
+  try {
+    const response = await api.get(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/evidence-links`)
+    const data = response.data.data || {}
+    evidenceDialog.available = Array.isArray(data.available) ? data.available : []
+    evidenceDialog.selectedIds = Array.isArray(data.linkedDocumentIds)
+      ? data.linkedDocumentIds.map(id => Number(id))
+      : []
+  } catch (e) {
+    message.error(e.response?.data?.message || '证据列表加载失败')
+    evidenceDialog.visible = false
+  } finally {
+    evidenceDialog.loading = false
+  }
+}
+function closeEvidenceLinks() {
+  evidenceDialog.visible = false
+  evidenceDialog.node = null
+  evidenceDialog.available = []
+  evidenceDialog.selectedIds = []
+}
+async function saveEvidenceLinks() {
+  const node = evidenceDialog.node
+  if (!node?.sourceId || evidenceDialog.saving) return
+  evidenceDialog.saving = true
+  try {
+    await api.put(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/evidence-links`, {
+      documentIds: evidenceDialog.selectedIds.map(id => Number(id)).filter(Boolean)
+    })
+    message.success('证据绑定已保存。下次履约核验会优先使用这些证据。')
+    closeEvidenceLinks()
+    await refreshCase()
+  } catch (e) {
+    message.error(e.response?.data?.message || '证据绑定保存失败')
+  } finally {
+    evidenceDialog.saving = false
+  }
+}
 async function confirmFulfillmentCheck(check, result) {
   if (!check?.id) return
   const note = window.prompt('请填写人工确认说明。AI 只提供建议，最终结果以人工确认为准。')
@@ -707,6 +813,9 @@ function arrayField(value) {
     }
   }
   return []
+}
+function requirementRows(check) {
+  return arrayField(check?.requirementJson).map(item => typeof item === 'object' ? item : { requirement: String(item) })
 }
 function fulfillmentConclusionLabel(value) {
   return {
@@ -781,7 +890,7 @@ function relativeDateResult(node) {
     addCandidate('effectiveDate', '合同生效日', c.value?.effectiveDate)
   }
   if (raw.includes('签订合同后') || raw.includes('签署后') || raw.includes('签订后')) {
-    if (c.value?.signedAt) addCandidate('signedAt', '合同签订日', c.value.signedAt)
+    if (c.value?.signedDate) addCandidate('signedDate', '合同签订日', c.value.signedDate)
   }
   if (raw.includes('合同期内') || raw.includes('有效期内')) {
     if (c.value?.effectiveDate) addCandidate('effectiveDate', '合同生效日', c.value.effectiveDate)
@@ -846,7 +955,7 @@ function evidenceSnapshotLabel(item) {
   const parts = [
     item.fileName || item.title || `文档#${item.documentId || ''}`,
     item.version != null ? `v${item.version}` : '',
-    item.snippet || '',
+    item.snippet || item.contentSnippet || item.contentHash || '',
   ].filter(Boolean)
   return parts.join(' · ')
 }
@@ -1017,10 +1126,18 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-head span{display:block;margin-bottom:3px;color:#3f7f5d;font-size:10px;font-weight:900}
 .fulfillment-head strong{display:block;color:var(--atlas-text);font-size:13px;line-height:1.35}
 .fulfillment-box .quiet-button.tiny{margin-left:0;flex:0 0 auto}
+.fulfillment-actions{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}
 .fulfillment-result{margin-top:8px}
 .fulfillment-result>p{margin:0;color:var(--atlas-muted);font-size:12px;line-height:1.6}
 .fulfillment-tags{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
 .fulfillment-tags span{padding:2px 6px;background:rgba(66,111,166,.06);border:1px solid rgba(66,111,166,.14);border-radius:3px;color:var(--atlas-primary);font-size:10px;font-weight:800}
+.fulfillment-requirements{margin-top:9px;padding:8px;background:rgba(63,127,93,.06);border:1px solid rgba(63,127,93,.16);border-radius:4px}
+.fulfillment-requirements>small{display:block;margin-bottom:6px;color:#3f7f5d;font-size:10px;font-weight:900}
+.fulfillment-requirements article{position:relative;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:7px;margin-top:7px;padding:8px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
+.fulfillment-requirements article:first-of-type{margin-top:0}
+.fulfillment-requirements article div span{display:block;margin-bottom:3px;color:var(--atlas-subtle);font-size:9px;font-weight:900}
+.fulfillment-requirements article div p{margin:0;color:var(--atlas-text);font-size:11px;line-height:1.55;word-break:break-word}
+.fulfillment-requirements article em{position:absolute;right:7px;top:6px;color:var(--atlas-primary);font-size:9px;font-style:normal;font-weight:900}
 .fulfillment-list{margin-top:9px;padding:8px;background:rgba(179,92,86,.06);border:1px solid rgba(179,92,86,.14);border-radius:4px}
 .fulfillment-list small{display:block;margin-bottom:4px;color:#b35c56;font-size:10px;font-weight:900}
 .fulfillment-list ul{margin:0;padding-left:16px;color:var(--atlas-text);font-size:11px;line-height:1.6}
@@ -1110,6 +1227,16 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .contract-text-body{flex:1;overflow:auto;padding:20px;margin:0;font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;line-height:1.8;color:var(--atlas-text);white-space:pre-wrap;word-break:break-word;background:var(--atlas-bg)}
 .modal-foot{padding:10px 20px;border-top:1px solid var(--atlas-border)}
 .modal-foot small{color:var(--atlas-subtle);font-size:10px}
+.evidence-link-modal .modal-head{display:flex;justify-content:space-between;align-items:flex-start;padding:16px 20px;border-bottom:1px solid var(--atlas-border)}
+.evidence-link-modal .modal-head h3{margin:0;font-size:16px;color:var(--atlas-text)}
+.evidence-link-modal .modal-head small{display:block;margin-top:3px;color:var(--atlas-subtle);font-size:11px;line-height:1.5}
+.evidence-link-body{padding:16px 20px;overflow:auto}
+.evidence-link-body>p{margin:0 0 12px;color:var(--atlas-muted);font-size:12px;line-height:1.6}
+.evidence-link-row{display:grid;grid-template-columns:20px auto 1fr auto;gap:8px;align-items:center;padding:9px 0;border-bottom:1px solid var(--atlas-border);font-size:12px;cursor:pointer}
+.evidence-link-row input{width:14px;height:14px}
+.evidence-link-row span{padding:2px 6px;border-radius:3px;background:rgba(66,111,166,.06);color:var(--atlas-primary);font-size:9px;font-weight:900}
+.evidence-link-row strong{min-width:0;color:var(--atlas-text);word-break:break-word}
+.evidence-link-row small{color:var(--atlas-subtle);font-size:10px;white-space:nowrap}
 
 /* Intake confirmation modal */
 .intake-confirm{max-width:680px;width:95vw}

@@ -154,10 +154,17 @@
           </div>
 
           <div class="field-pair">
+            <label class="review-field" :class="fieldClass('signedDate')" @click="activateField('signedDate')">
+              <span>签订日期 <FieldState :label="fieldStateLabel('signedDate')" /></span>
+              <input v-model="form.signedDate" type="date" @input="markEdited('signedDate')" />
+            </label>
             <label class="review-field" :class="fieldClass('effectiveDate')" @click="activateField('effectiveDate')">
               <span>生效日期 <FieldState :label="fieldStateLabel('effectiveDate')" /></span>
               <input v-model="form.effectiveDate" type="date" @input="markEdited('effectiveDate')" />
             </label>
+          </div>
+
+          <div class="field-pair">
             <label class="review-field" :class="fieldClass('expiryDate')" @click="activateField('expiryDate')">
               <span>到期日期 <FieldState :label="fieldStateLabel('expiryDate')" /></span>
               <input v-model="form.expiryDate" type="date" @input="markEdited('expiryDate')" />
@@ -213,7 +220,7 @@ let pollTimer = null
 const source = reactive({ fileName: '', contentText: '' })
 const form = reactive({
   title: '', contractType: 'OTHER', partyA: '', partyB: '', ourSide: '',
-  amount: '', currency: 'CNY', effectiveDate: '', expiryDate: '',
+  amount: '', currency: 'CNY', signedDate: '', effectiveDate: '', expiryDate: '',
   department: '', priority: 'NORMAL', description: '',
 })
 
@@ -348,6 +355,7 @@ function hydrateForm() {
   form.partyB = fieldValue(fields.partyB) || ''
   form.amount = fieldValue(fields.amount) ?? ''
   form.currency = fieldValue(fields.currency) || 'CNY'
+  form.signedDate = fieldValue(fields.signedDate) || ''
   form.effectiveDate = fieldValue(fields.effectiveDate) || ''
   form.expiryDate = fieldValue(fields.expiryDate) || ''
   form.department = fieldValue(fields.department) || ''
@@ -385,7 +393,9 @@ async function confirmIntake() {
     const response = await api.post(`/api/workspace/contracts/intakes/${intake.value.id}/confirm`, {
       title: form.title.trim(), contractType: form.contractType,
       ourEntity: ourEntity.trim(), counterparty: counterparty.trim(),
+      ourSide: form.ourSide,
       amount: form.amount === '' ? null : Number(form.amount), currency: form.currency,
+      signedDate: form.signedDate || null,
       effectiveDate: form.effectiveDate || null, expiryDate: form.expiryDate || null,
       department: form.department.trim(), priority: form.priority,
       description: form.description.trim(),

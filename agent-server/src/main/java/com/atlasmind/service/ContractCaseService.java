@@ -55,6 +55,10 @@ public interface ContractCaseService {
 
     Map<String, Object> confirmFulfillmentCheck(Long checkId, Map<String, Object> request, String actor);
 
+    Map<String, Object> getTimelineEvidenceLinks(Long caseId, Long timelineNodeId);
+
+    Map<String, Object> saveTimelineEvidenceLinks(Long caseId, Long timelineNodeId, Map<String, Object> request);
+
     // Obligation management
     List<Map<String, Object>> listObligations(Long caseId);
     Map<String, Object> createObligation(Long caseId, Map<String, Object> request);

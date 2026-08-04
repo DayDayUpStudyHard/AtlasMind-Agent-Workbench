@@ -93,7 +93,9 @@ class ContractStore:
                 with conn.cursor() as cur:
                     cur.execute(
                         """SELECT id, case_key AS caseKey, title, contract_type AS contractType,
-                                  status, counterparty, amount, currency, department,
+                                  status, our_entity AS ourEntity, counterparty,
+                                  our_side AS ourSide, amount, currency, department,
+                                  signed_date AS signedDate,
                                   effective_date AS effectiveDate, expiry_date AS expiryDate
                            FROM contract_case WHERE id=%s AND deleted=0""",
                         (case_id,),
@@ -754,21 +756,34 @@ class ContractStore:
                             except Exception:
                                 pass
                         cur.execute(
-                            """SELECT id AS documentId, document_type AS documentType,
+                            """SELECT d.id AS documentId, d.document_type AS documentType,
                                       file_name AS fileName, file_size AS fileSize,
-                                      version, parse_status AS parseStatus,
-                                      content_hash AS contentHash, create_time AS createTime
-                               FROM contract_document
-                               WHERE case_id=%s
-                                 AND document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
-                                 AND COALESCE(deleted,0)=0
-                                 AND parse_status <> 'FAILED'
-                               ORDER BY FIELD(document_type,'FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING'),
-                                        version DESC, id DESC
+                                      d.version, d.parse_status AS parseStatus,
+                                      d.content_hash AS contentHash,
+                                      LEFT(COALESCE(d.content_text,''), 700) AS contentSnippet,
+                                      d.create_time AS createTime,
+                                      CASE WHEN l.id IS NULL THEN 0 ELSE 1 END AS manuallyLinked
+                               FROM contract_document d
+                               LEFT JOIN contract_timeline_evidence_link l
+                                 ON l.case_id=d.case_id
+                                AND l.timeline_node_id=%s
+                                AND l.document_id=d.id
+                                AND l.check_id IS NULL
+                                AND COALESCE(l.deleted,0)=0
+                               WHERE d.case_id=%s
+                                 AND d.document_type IN ('FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING')
+                                 AND COALESCE(d.deleted,0)=0
+                                 AND d.parse_status <> 'FAILED'
+                               ORDER BY manuallyLinked DESC,
+                                        FIELD(d.document_type,'FULFILLMENT_EVIDENCE','ATTACHMENT','CERTIFICATE','PRICING'),
+                                        d.version DESC, d.id DESC
                                LIMIT 30""",
-                            (case_id,),
+                            (timeline_node_id, case_id),
                         )
                         evidence = [_normalize_value(r) for r in cur.fetchall()]
+                        linked_evidence = [item for item in evidence if item.get("manuallyLinked")]
+                        if linked_evidence:
+                            evidence = linked_evidence + [item for item in evidence if not item.get("manuallyLinked")]
                         missing = []
                         node_text = " ".join([
                             str(node.get("label") or ""),

@@ -172,6 +172,20 @@ public class ContractWorkspaceController {
                 checkId, request == null ? Map.of() : request, currentActor()));
     }
 
+    @GetMapping("/{caseId}/timeline/{timelineNodeId}/evidence-links")
+    public Result<Map<String, Object>> timelineEvidenceLinks(
+            @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
+        return Result.ok(contractCaseService.getTimelineEvidenceLinks(caseId, timelineNodeId));
+    }
+
+    @PutMapping("/{caseId}/timeline/{timelineNodeId}/evidence-links")
+    public Result<Map<String, Object>> saveTimelineEvidenceLinks(
+            @PathVariable Long caseId, @PathVariable Long timelineNodeId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.saveTimelineEvidenceLinks(
+                caseId, timelineNodeId, request == null ? Map.of() : request));
+    }
+
     // Obligations
     @GetMapping("/{caseId}/obligations")
     public Result<List<Map<String, Object>>> obligations(@PathVariable Long caseId) {

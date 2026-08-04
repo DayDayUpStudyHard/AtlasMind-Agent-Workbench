@@ -178,6 +178,11 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         jdbcTemplate.execute("""
+                ALTER TABLE contract_case
+                    ADD COLUMN IF NOT EXISTS signed_date DATE,
+                    ADD COLUMN IF NOT EXISTS our_side VARCHAR(8)
+                """);
+        jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_document_job_trace (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     job_id BIGINT NOT NULL,

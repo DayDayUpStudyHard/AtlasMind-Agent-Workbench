@@ -699,6 +699,8 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 3. 证据不足时 conclusion=INSUFFICIENT_EVIDENCE，不要推断完成。
 4. 条款如“甲方满意/按甲方要求”缺少客观标准，conclusion=UNCLEAR_TERMS。
 5. 图片或视频证据未经过多模态识别时，不能作为已完成的充分证据。
+6. 必须按 case.ourSide、case.ourEntity、case.counterparty 分析我方立场；不要在本次核验中重新切换甲乙方角色。
+7. 如果 case.ourSide=A，我方是合同甲方；如果 case.ourSide=B，我方是合同乙方。站在我方角度说明验收、付款、交付或违约风险。
 """.strip()
         payload = {
             "case": case,
@@ -745,6 +747,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
     "partyB": {"value": "string|null", "confidence": 0.0, "citations": [{"quote": "包含乙方名称的原文"}]},
     "amount": {"value": 0.0, "confidence": 0.0, "citations": [{"quote": "金额原文"}]},
     "currency": {"value": "CNY|USD|EUR|GBP|JPY|HKD|null", "confidence": 0.0, "citations": [{"quote": "币种原文"}]},
+    "signedDate": {"value": "YYYY-MM-DD|null", "confidence": 0.0, "citations": [{"quote": "签订/签署日期原文"}]},
     "effectiveDate": {"value": "YYYY-MM-DD|null", "confidence": 0.0, "citations": [{"quote": "日期原文"}]},
     "expiryDate": {"value": "YYYY-MM-DD|null", "confidence": 0.0, "citations": [{"quote": "日期原文"}]}
   }

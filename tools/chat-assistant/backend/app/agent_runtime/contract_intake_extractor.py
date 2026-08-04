@@ -26,6 +26,7 @@ FIELD_KEYS = (
     "partyB",
     "amount",
     "currency",
+    "signedDate",
     "effectiveDate",
     "expiryDate",
     "department",
@@ -179,6 +180,7 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         )
 
     for key, labels in (
+        ("signedDate", ("签订日期", "签订时间", "签署日期", "签署时间", "签约日期", "签约时间")),
         ("effectiveDate", ("生效日期", "合同生效日")),
         ("expiryDate", ("到期日期", "合同到期日", "终止日期")),
     ):
@@ -245,6 +247,7 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         hints["currency"] = _field("CNY", 0.88, _citation(text, actual_amount.group(0).strip()))
 
     for key, labels in (
+        ("signedDate", ("签订日期", "签订时间", "签署日期", "签署时间", "签约日期", "签约时间")),
         ("effectiveDate", ("生效日期", "合同生效日", "生效日")),
         ("expiryDate", ("到期日期", "合同到期日", "终止日期", "截止日期")),
     ):
@@ -267,7 +270,7 @@ def _normalize_field(key: str, raw: Any, text: str, fallback: dict) -> dict:
             value = None
     elif key == "amount":
         value = _normalize_amount(value)
-    elif key in {"effectiveDate", "expiryDate"}:
+    elif key in {"signedDate", "effectiveDate", "expiryDate"}:
         value = _normalize_date(value)
     elif key == "currency":
         value = str(value or "").strip().upper()
@@ -394,8 +397,11 @@ def _case_backfill_patch(validated: dict) -> dict[str, Any]:
     if currency:
         patch["currency"] = currency
 
+    signed_date = _candidate(validated, "signedDate")
     effective_date = _candidate(validated, "effectiveDate")
     expiry_date = _candidate(validated, "expiryDate")
+    if signed_date:
+        patch["signed_date"] = str(signed_date)
     if effective_date:
         patch["effective_date"] = str(effective_date)
     if expiry_date:
@@ -457,7 +463,7 @@ def _backfill_case_from_validated(cur, intake: dict, validated: dict) -> dict:
     patch = _case_backfill_patch(validated)
     cur.execute(
         """SELECT id, title, contract_type, our_entity, counterparty, amount,
-                  currency, effective_date, expiry_date, department, status
+                  currency, signed_date, effective_date, expiry_date, department, status
            FROM contract_case
            WHERE id=%s AND deleted=0
            FOR UPDATE""",
