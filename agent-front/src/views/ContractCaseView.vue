@@ -334,74 +334,143 @@
     <!-- Intake confirmation modal -->
     <div v-if="showIntakeModal && intakeFields" class="modal-overlay" @click.self="showIntakeModal = false">
       <div class="modal-content intake-confirm">
-        <div class="modal-head">
-          <h3>确认合同识别结果</h3>
-          <button class="quiet-button small" @click="showIntakeModal = false">✕ 关闭</button>
+        <header class="intake-review-hero">
+          <div>
+            <span>合同识别核对</span>
+            <h3>确认合同识别结果</h3>
+            <p>请优先确认我方主体和关键日期，确认后将覆盖合同详情中的基础信息。</p>
+          </div>
+          <button class="intake-close-button" @click="showIntakeModal = false" aria-label="关闭合同识别结果">关闭</button>
+        </header>
+
+        <div class="intake-review-strip">
+          <div>
+            <span>识别单</span>
+            <strong>#{{ intakeFields.intakeId }}</strong>
+          </div>
+          <div>
+            <span>需重点核对</span>
+            <strong>{{ intakeAttentionCount }} 项</strong>
+          </div>
+          <div>
+            <span>我方主体</span>
+            <strong>{{ intakeOurSideLabel }}</strong>
+          </div>
         </div>
-        <div class="intake-body">
-          <p class="intake-hint">AI 已从合同正文中提取以下字段。请核对并修正，特别是确认<strong>哪一方是我方主体</strong>。</p>
-          <div class="intake-grid">
-            <div class="intake-field">
-              <label>合同标题</label>
-              <input v-model="intakeFields.title" placeholder="合同标题" />
+
+        <div class="intake-body intake-review-body">
+          <section class="intake-review-main">
+            <div class="intake-section-title">
+              <span>01</span>
+              <div>
+                <strong>基础合同事实</strong>
+                <small>来自 AI 抽取，可在这里直接修正</small>
+              </div>
             </div>
-            <div class="intake-field">
-              <label>合同类型</label>
-              <select v-model="intakeFields.contractType">
-                <option value="SERVICE_PROCUREMENT">服务采购</option>
-                <option value="GOODS_PURCHASE">货物采购</option>
-                <option value="NDA">保密协议</option>
-                <option value="OTHER">其他</option>
-              </select>
+
+            <div class="intake-grid">
+              <div class="intake-field title-wide" :class="intakeFieldTone('contractTitle')">
+                <label>合同标题</label>
+                <input v-model="intakeFields.title" placeholder="合同标题" />
+                <small>{{ intakeFieldStateText('contractTitle') }}</small>
+              </div>
+              <div class="intake-field" :class="intakeFieldTone('contractType')">
+                <label>合同类型</label>
+                <select v-model="intakeFields.contractType">
+                  <option value="SERVICE_PROCUREMENT">服务采购</option>
+                  <option value="GOODS_PURCHASE">货物采购</option>
+                  <option value="NDA">保密协议</option>
+                  <option value="OTHER">其他</option>
+                </select>
+                <small>{{ intakeFieldStateText('contractType') }}</small>
+              </div>
+              <div class="intake-field" :class="intakeFieldTone('amount')">
+                <label>合同金额</label>
+                <input v-model.number="intakeFields.amount" type="number" placeholder="0" />
+                <small>{{ intakeFieldStateText('amount') }}</small>
+              </div>
+              <div class="intake-field" :class="intakeFieldTone('currency')">
+                <label>币种</label>
+                <input v-model="intakeFields.currency" placeholder="CNY" />
+                <small>{{ intakeFieldStateText('currency') }}</small>
+              </div>
             </div>
-            <div class="intake-field">
-              <label>合同金额</label>
-              <input v-model.number="intakeFields.amount" type="number" placeholder="0" />
+          </section>
+
+          <aside class="intake-side-panel">
+            <div class="intake-section-title">
+              <span>02</span>
+              <div>
+                <strong>确认我方主体</strong>
+                <small>风险审查和履约核验都按这个角色分析</small>
+              </div>
             </div>
-            <div class="intake-field">
-              <label>币种</label>
-              <input v-model="intakeFields.currency" placeholder="CNY" />
+
+            <div class="our-side-select" v-if="intakeFields.partyA && intakeFields.partyB">
+              <div class="side-options">
+                <label :class="['side-card', { active: intakeFields.ourSide === 'partyA' }]">
+                  <input type="radio" v-model="intakeFields.ourSide" value="partyA" />
+                  <span>甲方</span>
+                  <strong>{{ intakeFields.partyA }}</strong>
+                </label>
+                <label :class="['side-card', { active: intakeFields.ourSide === 'partyB' }]">
+                  <input type="radio" v-model="intakeFields.ourSide" value="partyB" />
+                  <span>乙方</span>
+                  <strong>{{ intakeFields.partyB }}</strong>
+                </label>
+              </div>
             </div>
-            <div class="intake-field">
-              <label>签订日期</label>
-              <input v-model="intakeFields.signedDate" type="date" />
+            <div v-else-if="intakeFields.partyA || intakeFields.partyB" class="our-side-single">
+              <label>我方主体</label>
+              <input v-model="intakeFields.ourEntity" placeholder="请输入我方公司全称" />
+              <label>相对方</label>
+              <input v-model="intakeFields.counterparty" placeholder="请输入对方公司全称" />
             </div>
-            <div class="intake-field">
-              <label>生效日期</label>
-              <input v-model="intakeFields.effectiveDate" type="date" />
+            <p class="intake-role-note">这里不是权限控制，而是合同视角。系统会据此判断我方义务、对方义务和履约风险。</p>
+          </aside>
+
+          <section class="intake-review-dates">
+            <div class="intake-section-title">
+              <span>03</span>
+              <div>
+                <strong>关键日期</strong>
+                <small>影响相对期限、履约提醒和后续核验</small>
+              </div>
             </div>
-            <div class="intake-field">
-              <label>到期日期</label>
-              <input v-model="intakeFields.expiryDate" type="date" />
+            <div class="intake-grid date-grid">
+              <div class="intake-field" :class="intakeFieldTone('signedDate')">
+                <label>签订日期</label>
+                <input v-model="intakeFields.signedDate" type="date" />
+                <small>{{ intakeFieldStateText('signedDate') }}</small>
+              </div>
+              <div class="intake-field" :class="intakeFieldTone('effectiveDate')">
+                <label>生效日期</label>
+                <input v-model="intakeFields.effectiveDate" type="date" />
+                <small>{{ intakeFieldStateText('effectiveDate') }}</small>
+              </div>
+              <div class="intake-field" :class="intakeFieldTone('expiryDate')">
+                <label>到期日期</label>
+                <input v-model="intakeFields.expiryDate" type="date" />
+                <small>{{ intakeFieldStateText('expiryDate') }}</small>
+              </div>
+            </div>
+          </section>
+
+          <section class="intake-review-business">
+            <div class="intake-section-title">
+              <span>04</span>
+              <div>
+                <strong>业务归属</strong>
+                <small>可留空，后续也可以在合同详情中补充</small>
+              </div>
             </div>
             <div class="intake-field">
               <label>所属部门</label>
               <input v-model="intakeFields.department" placeholder="如：采购部" />
             </div>
-          </div>
-          <!-- Our side selector -->
-          <div class="our-side-select" v-if="intakeFields.partyA && intakeFields.partyB">
-            <label>我方主体（选择哪一方是我们自己）</label>
-            <div class="side-options">
-              <label :class="['side-card', { active: intakeFields.ourSide === 'partyA' }]">
-                <input type="radio" v-model="intakeFields.ourSide" value="partyA" />
-                <strong>{{ intakeFields.partyA }}</strong>
-                <span>甲方</span>
-              </label>
-              <label :class="['side-card', { active: intakeFields.ourSide === 'partyB' }]">
-                <input type="radio" v-model="intakeFields.ourSide" value="partyB" />
-                <strong>{{ intakeFields.partyB }}</strong>
-                <span>乙方</span>
-              </label>
-            </div>
-          </div>
-          <div v-else-if="intakeFields.partyA || intakeFields.partyB" class="our-side-single">
-            <label>我方主体</label>
-            <input v-model="intakeFields.ourEntity" placeholder="请输入我方公司全称" />
-            <label style="margin-top:10px">相对方</label>
-            <input v-model="intakeFields.counterparty" placeholder="请输入对方公司全称" />
-          </div>
+          </section>
         </div>
+
         <div class="modal-foot intake-actions">
           <button class="quiet-button" @click="showIntakeModal = false">暂不处理</button>
           <button class="primary-button" @click="doConfirmIntake" :disabled="confirming">
@@ -550,6 +619,15 @@ const evidenceDialog = reactive({
 })
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
+const intakeAttentionCount = computed(() => {
+  const keys = ['contractTitle', 'contractType', 'amount', 'currency', 'signedDate', 'effectiveDate', 'expiryDate']
+  return keys.filter(key => intakeFieldTone(key) !== 'ok').length + (intakeFields.value?.ourSide ? 0 : 1)
+})
+const intakeOurSideLabel = computed(() => {
+  if (intakeFields.value?.ourSide === 'partyA') return '甲方'
+  if (intakeFields.value?.ourSide === 'partyB') return '乙方'
+  return '待确认'
+})
 
 const primaryAction = computed(() => {
   const status = c.value.status
@@ -669,6 +747,7 @@ function checkPendingIntake() {
 
   intakeFields.value = {
     intakeId: intake.id,
+    fieldMeta: fields,
     title: (fields.contractTitle || {}).value || c.value?.title || '',
     contractType: (fields.contractType || {}).value || c.value?.contractType || 'OTHER',
     amount: c.value?.amount || (fields.amount || {}).value || null,
@@ -684,6 +763,38 @@ function checkPendingIntake() {
     counterparty: counterparty || (ourSide === 'partyB' ? partyA : (ourSide === 'partyA' ? partyB : '')),
   }
   showIntakeModal.value = true
+}
+
+function intakeFieldMeta(key) {
+  return intakeFields.value?.fieldMeta?.[key] || null
+}
+
+function intakeFieldCurrentValue(key) {
+  const f = intakeFields.value || {}
+  const fieldMap = {
+    contractTitle: 'title',
+    contractType: 'contractType',
+    amount: 'amount',
+    currency: 'currency',
+    signedDate: 'signedDate',
+    effectiveDate: 'effectiveDate',
+    expiryDate: 'expiryDate',
+  }
+  return f[fieldMap[key]]
+}
+
+function intakeFieldTone(key) {
+  const value = intakeFieldCurrentValue(key)
+  if (value === null || value === undefined || value === '') return 'missing'
+  const confidence = Number(intakeFieldMeta(key)?.confidence || 0)
+  return confidence >= 0.85 ? 'ok' : 'check'
+}
+
+function intakeFieldStateText(key) {
+  const tone = intakeFieldTone(key)
+  if (tone === 'missing') return '待补充'
+  if (tone === 'check') return '建议人工核对'
+  return 'AI 已识别'
 }
 
 async function doConfirmIntake() {
@@ -1359,24 +1470,52 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .evidence-link-row small{color:var(--atlas-subtle);font-size:10px;white-space:nowrap}
 
 /* Intake confirmation modal */
-.intake-confirm{max-width:680px;width:95vw}
-.intake-body{padding:20px;overflow:auto;max-height:60vh}
-.intake-hint{color:var(--atlas-muted);font-size:13px;line-height:1.6;margin:0 0 16px}
-.intake-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
-.intake-field{display:flex;flex-direction:column;gap:4px}
-.intake-field label{font-size:11px;font-weight:700;color:var(--atlas-subtle);text-transform:uppercase}
-.intake-field input,.intake-field select{min-height:36px;padding:4px 10px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-text);font-size:13px}
-.intake-field input:focus,.intake-field select:focus{outline:0;border-color:var(--atlas-primary)}
-.our-side-select,.our-side-single{margin-top:16px;padding:14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
-.our-side-select>label,.our-side-single>label{display:block;font-size:12px;font-weight:800;color:var(--atlas-text);margin-bottom:8px}
-.side-options{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-.side-card{display:flex;align-items:center;gap:8px;padding:12px;border:2px solid var(--atlas-border);border-radius:6px;cursor:pointer;transition:border-color .15s}
-.side-card.active{border-color:var(--atlas-primary);background:rgba(66,111,166,.04)}
-.side-card input[type=radio]{accent-color:var(--atlas-primary)}
-.side-card strong{font-size:14px;color:var(--atlas-text)}
-.side-card span{font-size:11px;color:var(--atlas-subtle)}
-.our-side-single input{width:100%;min-height:36px;padding:4px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px}
-.intake-actions{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px}
+.intake-confirm{width:min(920px,calc(100vw - 32px));max-width:920px;overflow:hidden;border-radius:8px;border:1px solid #c8d3df;background:#fbfcfe;box-shadow:0 24px 80px rgba(30,45,60,.28)}
+.intake-review-hero{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;padding:22px 26px 20px;background:linear-gradient(135deg,#eef4fa 0%,#f8fbfd 62%,#f8f3ea 100%);border-bottom:1px solid var(--atlas-border)}
+.intake-review-hero span{display:block;color:var(--atlas-primary);font-size:10px;font-weight:900;letter-spacing:.04em}
+.intake-review-hero h3{margin:5px 0 7px;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:28px;line-height:1.2}
+.intake-review-hero p{max-width:560px;margin:0;color:var(--atlas-muted);font-size:13px;line-height:1.65}
+.intake-close-button{min-height:36px;padding:0 13px;border:1px solid var(--atlas-border);border-radius:4px;background:rgba(255,255,255,.72);color:var(--atlas-muted);font-size:12px;font-weight:900;cursor:pointer}
+.intake-close-button:hover{border-color:var(--atlas-primary);color:var(--atlas-primary)}
+.intake-review-strip{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border-bottom:1px solid var(--atlas-border);background:#fff}
+.intake-review-strip div{padding:13px 20px;border-right:1px solid var(--atlas-border)}
+.intake-review-strip div:last-child{border-right:0}
+.intake-review-strip span{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900}
+.intake-review-strip strong{display:block;color:var(--atlas-text);font-size:15px}
+.intake-body.intake-review-body{display:grid;grid-template-columns:minmax(0,1.45fr) minmax(280px,.9fr);gap:0;max-height:62vh;padding:0;overflow:auto;background:#f6f8fb}
+.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:20px 22px;border-bottom:1px solid var(--atlas-border)}
+.intake-review-main{background:#fbfcfe;border-right:1px solid var(--atlas-border)}
+.intake-side-panel{background:#f7fafc}
+.intake-review-dates{grid-column:1/-1;background:#fff}
+.intake-review-business{grid-column:1/-1;background:#f7fafc;border-bottom:0}
+.intake-section-title{display:flex;align-items:flex-start;gap:10px;margin-bottom:14px}
+.intake-section-title>span{display:inline-flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid #c8d9e8;border-radius:4px;background:#eef5fb;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.intake-section-title strong{display:block;color:var(--atlas-text);font-size:14px}
+.intake-section-title small{display:block;margin-top:3px;color:var(--atlas-muted);font-size:11px;line-height:1.45}
+.intake-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.intake-grid.date-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.intake-field{display:flex;min-width:0;flex-direction:column;gap:6px;padding:11px 12px;border:1px solid var(--atlas-border);border-left-width:3px;border-radius:6px;background:#fff}
+.intake-field.title-wide{grid-column:1/-1}
+.intake-field.ok{border-left-color:#3f7f5d}
+.intake-field.check{border-left-color:#b98536;background:#fffaf2}
+.intake-field.missing{border-left-color:#b35c56;background:#fff7f7}
+.intake-field label{font-size:11px;font-weight:900;color:var(--atlas-subtle)}
+.intake-field input,.intake-field select{width:100%;min-height:38px;box-sizing:border-box;padding:4px 8px;border:1px solid #cbd7e3;border-radius:4px;background:#fbfcfe;color:var(--atlas-text);font-size:13px}
+.intake-field input:focus,.intake-field select:focus{outline:2px solid rgba(66,111,166,.16);border-color:var(--atlas-primary)}
+.intake-field small{color:var(--atlas-muted);font-size:10px;font-weight:800}
+.intake-confirm .our-side-select,.intake-confirm .our-side-single{margin:0;padding:0;background:transparent;border:0}
+.intake-confirm .side-options{display:grid;grid-template-columns:1fr;gap:10px}
+.intake-confirm .side-card{position:relative;display:grid;grid-template-columns:18px 44px minmax(0,1fr);gap:10px;align-items:center;min-height:68px;padding:13px;border:1px solid #cbd7e3;border-radius:6px;background:#fff;cursor:pointer;transition:background-color .18s ease,border-color .18s ease,box-shadow .18s ease}
+.intake-confirm .side-card:hover{border-color:var(--atlas-primary);background:#f7fbff}
+.intake-confirm .side-card.active{border-color:var(--atlas-primary);background:#eef5fb;box-shadow:inset 0 0 0 1px var(--atlas-primary)}
+.intake-confirm .side-card input[type=radio]{width:16px;height:16px;accent-color:var(--atlas-primary)}
+.intake-confirm .side-card span{display:inline-flex;align-items:center;justify-content:center;height:24px;border-radius:4px;background:#edf2f7;color:var(--atlas-primary);font-size:11px;font-weight:900}
+.intake-confirm .side-card strong{min-width:0;color:var(--atlas-text);font-size:14px;line-height:1.45;word-break:break-word}
+.intake-confirm .our-side-single{display:grid;gap:8px}
+.intake-confirm .our-side-single label{color:var(--atlas-subtle);font-size:11px;font-weight:900}
+.intake-confirm .our-side-single input{width:100%;min-height:38px;padding:4px 10px;border:1px solid var(--atlas-border);border-radius:4px;background:#fff;font-size:13px}
+.intake-role-note{margin:13px 0 0;padding:10px 12px;border-left:3px solid var(--atlas-primary);background:#fff;color:var(--atlas-muted);font-size:12px;line-height:1.65}
+.intake-actions{display:flex;justify-content:flex-end;gap:10px;padding:15px 22px;background:#fff;border-top:1px solid var(--atlas-border)}
 .blank-state{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px}
 .loading-block{display:flex;align-items:center;justify-content:center;gap:9px;min-height:50vh;color:var(--atlas-muted)}
 .loader{width:20px;height:20px;border:3px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite}
@@ -1467,6 +1606,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 
 @media(max-width:700px){
   .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}
+  .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}
   .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}
 }
 </style>
