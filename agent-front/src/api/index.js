@@ -78,6 +78,10 @@ export function getRecentWorkspaceRuns() {
   return api.get('/api/workspace/runs/recent')
 }
 
+export function getRecentContractDocumentPipelines() {
+  return api.get('/api/workspace/contracts/document-pipelines/recent')
+}
+
 export function getContractPortfolio() { return api.get('/api/workspace/contracts/portfolio') }
 export function getContractWorkQueueSummary() { return api.get('/api/workspace/contracts/work-queues/summary') }
 export function getContractWorkQueue(type) { return api.get('/api/workspace/contracts/work-queues', { params: { type } }) }

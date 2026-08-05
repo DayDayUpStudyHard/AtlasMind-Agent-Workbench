@@ -247,15 +247,27 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
         c.put("parties", jdbcTemplate.queryForList(
                 "SELECT id, party_name AS partyName, party_role AS partyRole, contact_person AS contactPerson, contact_email AS contactEmail, risk_score AS riskScore FROM contract_party WHERE case_id=?", caseId));
-        c.put("documents", jdbcTemplate.queryForList(
+        List<Map<String, Object>> documents = jdbcTemplate.queryForList(
                 "SELECT id, document_type AS documentType, file_name AS fileName,"
                 + " file_size AS fileSize, version, parse_status AS parseStatus,"
-                + " parse_error AS parseError, page_count AS pageCount,"
+                + " parse_error AS parseError, parse_provider AS parseProvider,"
+                + " parse_quality AS parseQuality, parse_diagnostics_json AS parseDiagnostics,"
+                + " page_count AS pageCount,"
                 + " content_text IS NOT NULL AS hasInlineText,"
-                + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime"
-                + " FROM contract_document WHERE case_id=? AND COALESCE(deleted,0)=0 ORDER BY version DESC", caseId));
+                + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime,"
+                + " (SELECT j.id FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineJobId,"
+                + " (SELECT j.status FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineStatus,"
+                + " (SELECT j.stage FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineStage,"
+                + " (SELECT j.progress FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineProgress,"
+                + " (SELECT j.error_message FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineError,"
+                + " (SELECT t.summary FROM contract_document_job_trace t"
+                + "  JOIN contract_document_job j ON j.id=t.job_id"
+                + "  WHERE j.document_id=d.id ORDER BY t.sequence_no DESC, t.id DESC LIMIT 1) AS pipelineAction"
+                + " FROM contract_document d WHERE d.case_id=? AND COALESCE(d.deleted,0)=0 ORDER BY d.version DESC", caseId);
+        parseJsonFields(documents, "parseDiagnostics");
+        c.put("documents", documents);
         List<Map<String, Object>> findings = jdbcTemplate.queryForList("""
-                SELECT f.id, f.rule_id AS ruleId,
+                SELECT f.id, f.run_id AS runId, f.rule_id AS ruleId,
                        COALESCE(f.rule_key, r.rule_key) AS ruleKey,
                        COALESCE(f.clause_type, r.clause_type) AS clauseType,
                        f.severity, f.status, f.title, f.description, f.impact,
@@ -263,23 +275,48 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        f.negotiation_advice AS negotiationAdvice,
                        f.verification_points AS verificationPoints,
                        f.contract_citation AS contractCitation,
-                       f.policy_citation AS policyCitation,
-                       f.suggested_action AS suggestedAction,
-                       f.create_time AS createTime, f.update_time AS updateTime
+                        f.policy_citation AS policyCitation,
+                        f.suggested_action AS suggestedAction,
+                        f.detail_json AS detailJson,
+                        f.create_time AS createTime, f.update_time AS updateTime
                 FROM contract_review_finding f
                 LEFT JOIN contract_review_rule r ON r.id=f.rule_id
                 WHERE f.case_id=?
+                  AND f.run_id=(
+                      SELECT MAX(ar.id) FROM agent_run ar
+                      WHERE ar.subject_type='CONTRACT_CASE'
+                        AND ar.subject_id=?
+                        AND ar.run_type='CONTRACT_REVIEW'
+                        AND ar.status='COMPLETED'
+                  )
                 ORDER BY FIELD(f.severity,'HIGH','MEDIUM','LOW'), f.id DESC
                 LIMIT 30
-                """, caseId);
-        parseJsonFields(findings, "contractCitation", "policyCitation", "verificationPoints");
+                """, caseId, caseId);
+        parseJsonFields(findings, "contractCitation", "policyCitation", "verificationPoints", "detailJson");
         c.put("findings", findings);
         c.put("obligations", jdbcTemplate.queryForList(
                 "SELECT id, title, obligation_type AS obligationType, responsible_user_id AS responsibleUserId, due_date AS dueDate, status FROM contract_obligation WHERE case_id=? ORDER BY due_date ASC", caseId));
+        List<Map<String, Object>> lifecycleConditions = jdbcTemplate.queryForList("""
+                SELECT lc.id, lc.document_id AS documentId, lc.clause_id AS clauseId,
+                       lc.condition_type AS conditionType, lc.end_mode AS endMode,
+                       lc.logic_operator AS logicOperator, lc.summary,
+                       lc.conditions_json AS conditions, lc.citation_json AS citation,
+                       lc.confidence, lc.source, lc.status, lc.manual_override AS manualOverride,
+                       lc.create_time AS createTime, lc.update_time AS updateTime
+                FROM contract_lifecycle_condition lc
+                WHERE lc.case_id=? AND lc.condition_type='CONTRACT_END'
+                ORDER BY lc.manual_override DESC, lc.id DESC
+                """, caseId);
+        parseJsonFields(lifecycleConditions, "conditions", "citation");
+        c.put("lifecycleConditions", lifecycleConditions);
         c.put("timelineNodes", buildTimelineNodes(c));
         c.put("availableKnowledge", knowledgeBaseService.listContractKnowledge(caseId));
+        c.put("analysisWorkflow", latestAnalysisWorkflow(caseId));
         c.put("runs", jdbcTemplate.queryForList(
-                "SELECT id, run_type AS runType, status, progress, current_step AS currentStep, create_time AS createTime FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
+                "SELECT id, run_type AS runType, status, progress, current_step AS currentStep, "
+                        + "workflow_id AS workflowId, workflow_stage AS workflowStage, "
+                        + "evidence_snapshot_hash AS evidenceSnapshotHash, create_time AS createTime "
+                        + "FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
         List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
                 SELECT id, report_type AS reportType, title, summary,
                        health_status AS riskStatus, health_score AS riskScore,
@@ -407,6 +444,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     (status, source_type, file_name, content_text, content_hash, case_id, created_by)
                 VALUES ('FILE_PARSING','FILE',?,?,?,?,?)
                 """, fileName, "", sha256(""), caseId, userId);
+        linkAnalysisWorkflow(caseId, intakeId, numberAsLong(uploadResult.get("uploadedDocumentId")));
 
         Map<String, Object> result = getIntake(intakeId, userId);
         result.put("case", getCase(caseId));
@@ -429,6 +467,24 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if (intake == null) throw new IllegalArgumentException("合同识别任务不存在");
         Object validated = parseJson(intake.remove("validatedJson"));
         intake.put("validated", validated == null ? Map.of() : validated);
+        Long caseId = numberAsLongOrNull(intake.get("caseId"));
+        if (caseId != null) {
+            Map<String, Object> pipeline = first(jdbcTemplate.queryForList("""
+                    SELECT j.id AS pipelineJobId, j.status AS pipelineStatus,
+                           j.stage AS pipelineStage, j.progress AS pipelineProgress,
+                           j.error_message AS pipelineError,
+                           (SELECT t.summary
+                            FROM contract_document_job_trace t
+                            WHERE t.job_id=j.id
+                            ORDER BY t.sequence_no DESC, t.id DESC LIMIT 1) AS pipelineAction
+                    FROM contract_document d
+                    JOIN contract_document_job j ON j.document_id=d.id
+                    WHERE d.case_id=? AND d.document_type='MAIN'
+                    ORDER BY j.id DESC
+                    LIMIT 1
+                    """, caseId));
+            if (pipeline != null) intake.putAll(pipeline);
+        }
         return intake;
     }
 
@@ -543,6 +599,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SET status='CONFIRMED', confirmed_json=?, case_id=?, error_message=NULL
                 WHERE id=?
                 """, json(caseRequest), caseId, intakeId);
+        markAnalysisWorkflowConfirmed(caseId, intakeId);
 
         return Map.of("intakeId", intakeId, "status", "CONFIRMED", "case", getCase(caseId));
     }
@@ -603,6 +660,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     "inline:text", contentText.length(), newVersion, contentText);
             createDocumentPipelineJob(caseId, documentId, "UPLOADED", 5, "合同正文已上传，等待文档处理流水线调度",
                     Map.of("fileName", fileName, "documentType", documentType, "source", "inline-text"));
+            if ("MAIN".equals(documentType)) {
+                createAnalysisWorkflow(caseId, null, documentId, newVersion);
+            }
             dispatchDocumentParsingAfterCommit(documentId);
         } else {
             documentId = insert("""
@@ -612,6 +672,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     filePath, request.get("fileSize"), newVersion);
             createDocumentPipelineJob(caseId, documentId, "UPLOADED", 5, "合同文件已登记，等待 Python Document Worker 解析",
                     Map.of("fileName", fileName, "documentType", documentType, "filePath", filePath));
+            if ("MAIN".equals(documentType)) {
+                createAnalysisWorkflow(caseId, null, documentId, newVersion);
+            }
             dispatchDocumentParsingAfterCommit(documentId);
         }
         Map<String, Object> result = getCase(caseId);
@@ -638,13 +701,48 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
     @Override
     public List<Map<String, Object>> listDocuments(Long caseId) {
-        return jdbcTemplate.queryForList(
+        List<Map<String, Object>> documents = jdbcTemplate.queryForList(
                 "SELECT id, document_type AS documentType, file_name AS fileName,"
                 + " file_size AS fileSize, version, parse_status AS parseStatus,"
-                + " parse_error AS parseError, page_count AS pageCount,"
+                + " parse_error AS parseError, parse_provider AS parseProvider,"
+                + " parse_quality AS parseQuality, parse_diagnostics_json AS parseDiagnostics,"
+                + " page_count AS pageCount,"
                 + " content_text IS NOT NULL AS hasInlineText,"
-                + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime"
-                + " FROM contract_document WHERE case_id=? AND COALESCE(deleted,0)=0 ORDER BY version DESC", caseId);
+                + " CHAR_LENGTH(content_text) AS textLength, create_time AS createTime,"
+                + " (SELECT j.id FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineJobId,"
+                + " (SELECT j.status FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineStatus,"
+                + " (SELECT j.stage FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineStage,"
+                + " (SELECT j.progress FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineProgress,"
+                + " (SELECT j.error_message FROM contract_document_job j WHERE j.document_id=d.id ORDER BY j.id DESC LIMIT 1) AS pipelineError,"
+                + " (SELECT t.summary FROM contract_document_job_trace t"
+                + "  JOIN contract_document_job j ON j.id=t.job_id"
+                + "  WHERE j.document_id=d.id ORDER BY t.sequence_no DESC, t.id DESC LIMIT 1) AS pipelineAction"
+                + " FROM contract_document d WHERE d.case_id=? AND COALESCE(d.deleted,0)=0 ORDER BY d.version DESC", caseId);
+        parseJsonFields(documents, "parseDiagnostics");
+        return documents;
+    }
+
+    @Override
+    public List<Map<String, Object>> listRecentDocumentPipelines() {
+        return jdbcTemplate.queryForList("""
+                SELECT j.id AS jobId, j.case_id AS caseId,
+                       c.case_key AS caseKey, c.title AS caseTitle,
+                       j.document_id AS documentId, d.file_name AS fileName,
+                       d.document_type AS documentType, d.parse_status AS parseStatus,
+                       j.status, j.stage, j.progress,
+                       j.error_message AS errorMessage,
+                       j.started_at AS startedAt, j.finished_at AS finishedAt,
+                       j.create_time AS createTime, j.update_time AS updateTime,
+                       (SELECT t.summary
+                        FROM contract_document_job_trace t
+                        WHERE t.job_id=j.id
+                        ORDER BY t.sequence_no DESC, t.id DESC LIMIT 1) AS currentAction
+                FROM contract_document_job j
+                JOIN contract_case c ON c.id=j.case_id AND c.deleted=0
+                LEFT JOIN contract_document d ON d.id=j.document_id
+                ORDER BY j.id DESC
+                LIMIT 12
+                """);
     }
 
     // ── Agent Run delegation ───────────────────────────────────────
@@ -659,19 +757,55 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         String taskType = str(request, "taskType");
         if (taskType.isBlank()) taskType = "CONTRACT_REVIEW";
 
+        Long workflowId = null;
+        String workflowStage = null;
+        String evidenceSnapshotHash = null;
+        Map<String, Object> inputJson = new HashMap<>();
+        Object rawInput = request.get("inputJson");
+        if (rawInput instanceof Map<?, ?> map) {
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (entry.getKey() != null) inputJson.put(String.valueOf(entry.getKey()), entry.getValue());
+            }
+        } else {
+            Object parsedInput = parseJson(rawInput);
+            if (parsedInput instanceof Map<?, ?> map) {
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    if (entry.getKey() != null) inputJson.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+        }
+
+        if ("CONTRACT_REVIEW".equals(taskType)) {
+            Map<String, Object> workflow = prepareReviewWorkflow(caseId);
+            workflowId = numberAsLong(workflow.get("id"));
+            workflowStage = "RISK_REVIEW";
+            evidenceSnapshotHash = str(workflow, "evidenceSnapshotHash");
+            Map<String, Object> analysisWorkflow = new LinkedHashMap<>();
+            analysisWorkflow.put("workflowId", workflowId);
+            analysisWorkflow.put("stage", workflowStage);
+            analysisWorkflow.put("documentId", workflow.get("documentId"));
+            analysisWorkflow.put("documentVersion", workflow.get("documentVersion"));
+            analysisWorkflow.put("evidenceSnapshotHash", evidenceSnapshotHash);
+            analysisWorkflow.put("confirmedVersion", workflow.get("confirmedVersion"));
+            inputJson.put("analysisWorkflow", analysisWorkflow);
+        }
+
         Long runId = insert("""
-                INSERT INTO agent_run (subject_type, subject_id, project_id, run_type, trigger_type, question, input_json, status, progress, current_step)
-                VALUES (?,?,0,?,?,?,?,'CREATED',0,'等待 Agent 调度')
+                INSERT INTO agent_run
+                    (subject_type, subject_id, project_id, run_type, trigger_type, question,
+                     input_json, workflow_id, workflow_stage, evidence_snapshot_hash,
+                     status, progress, current_step)
+                VALUES (?,?,0,?,?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
                 """, SUBJECT_TYPE, caseId, taskType,
                 str(request, "triggerType"), str(request, "question"),
-                json(request.get("inputJson")));
+                json(inputJson), workflowId, workflowStage, evidenceSnapshotHash);
 
         if ("FULFILLMENT_CHECK".equals(taskType)) {
             Object input = request.get("inputJson");
-            Map<String, Object> inputJson = input instanceof Map<?, ?> map
+            Map<String, Object> fulfillmentInput = input instanceof Map<?, ?> map
                     ? new HashMap<>((Map<String, Object>) map)
                     : new HashMap<>();
-            Long timelineNodeId = numberAsLongOrNull(inputJson.get("timelineNodeId"));
+            Long timelineNodeId = numberAsLongOrNull(fulfillmentInput.get("timelineNodeId"));
             if (timelineNodeId != null) {
                 ensureTimelineNode(caseId, timelineNodeId);
                 jdbcTemplate.update("""
@@ -688,6 +822,11 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     SET last_run_id=?, last_run_at=NOW(), status='REVIEWING'
                     WHERE id=? AND status IN ('DRAFT','MATERIAL_PENDING','READY_FOR_REVIEW','NEEDS_REVISION')
                     """, runId, caseId);
+            jdbcTemplate.update("""
+                    UPDATE contract_analysis_workflow
+                    SET status='REVIEWING', current_stage='RISK_REVIEW', review_run_id=?, last_error=NULL
+                    WHERE id=?
+                    """, runId, workflowId);
         } else {
             jdbcTemplate.update("UPDATE contract_case SET last_run_id=?, last_run_at=NOW() WHERE id=?", runId, caseId);
         }
@@ -846,6 +985,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     public List<Map<String, Object>> listRuns(Long caseId) {
         return jdbcTemplate.queryForList("""
                 SELECT id, run_type AS runType, status, progress, current_step AS currentStep,
+                       workflow_id AS workflowId, workflow_stage AS workflowStage,
+                       evidence_snapshot_hash AS evidenceSnapshotHash,
                        error_message AS errorMessage, create_time AS createTime
                 FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 20
                 """, SUBJECT_TYPE, caseId);
@@ -856,6 +997,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         Map<String, Object> run = first(jdbcTemplate.queryForList("""
                 SELECT id, subject_type AS subjectType, subject_id AS subjectId, run_type AS runType,
                        status, progress, current_step AS currentStep, error_message AS errorMessage,
+                       workflow_id AS workflowId, workflow_stage AS workflowStage,
+                       evidence_snapshot_hash AS evidenceSnapshotHash,
                        create_time AS createTime
                 FROM agent_run WHERE id=? AND subject_type=?
                 """, runId, SUBJECT_TYPE));
@@ -992,7 +1135,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             Map<String, Object> c = first(jdbcTemplate.queryForList(
                     "SELECT id, case_key AS caseKey, title, contract_type AS contractType FROM contract_case WHERE id=?", caseId));
             Map<String, Object> run = first(jdbcTemplate.queryForList(
-                    "SELECT question, input_json AS inputJson FROM agent_run WHERE id=?", runId));
+                    "SELECT question, input_json AS inputJson, workflow_id AS workflowId, "
+                            + "workflow_stage AS workflowStage, evidence_snapshot_hash AS evidenceSnapshotHash "
+                            + "FROM agent_run WHERE id=?", runId));
             Object taskInput = run == null ? Map.of() : parseJson(run.get("inputJson"));
             if (!(taskInput instanceof Map<?, ?>)) taskInput = Map.of();
             Map<String, Object> payload = new HashMap<>();
@@ -1006,6 +1151,11 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             payload.put("question", run == null ? "" : str(run, "question"));
             payload.put("actor", "java-service");
             payload.put("taskInput", taskInput);
+            if (run != null) {
+                payload.put("workflowId", run.get("workflowId"));
+                payload.put("workflowStage", run.get("workflowStage"));
+                payload.put("evidenceSnapshotHash", run.get("evidenceSnapshotHash"));
+            }
             payload.put("options", Map.of());
             aiGateway.startAgentRun(payload);
         } catch (Exception e) {
@@ -1083,6 +1233,121 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     }
 
     // ── DB helpers ─────────────────────────────────────────────────
+
+    private Long createAnalysisWorkflow(Long caseId, Long intakeId, Long documentId, Integer documentVersion) {
+        if (documentId != null) {
+            Map<String, Object> existing = first(jdbcTemplate.queryForList(
+                    "SELECT id FROM contract_analysis_workflow WHERE case_id=? AND document_id=? ORDER BY id DESC LIMIT 1",
+                    caseId, documentId));
+            if (existing != null) return numberAsLong(existing.get("id"));
+        }
+        return insert("""
+                INSERT INTO contract_analysis_workflow
+                    (case_id, intake_id, document_id, document_version, status, current_stage)
+                VALUES (?,?,?,?, 'PARSING', 'DOCUMENT_PARSE')
+                """, caseId, intakeId, documentId, documentVersion);
+    }
+
+    private void linkAnalysisWorkflow(Long caseId, Long intakeId, Long documentId) {
+        if (caseId == null || intakeId == null || documentId == null) return;
+        Map<String, Object> workflow = first(jdbcTemplate.queryForList(
+                "SELECT id FROM contract_analysis_workflow WHERE case_id=? AND document_id=? ORDER BY id DESC LIMIT 1",
+                caseId, documentId));
+        if (workflow != null) {
+            jdbcTemplate.update("UPDATE contract_analysis_workflow SET intake_id=? WHERE id=?",
+                    intakeId, workflow.get("id"));
+        }
+    }
+
+    private Map<String, Object> latestAnalysisWorkflow(Long caseId) {
+        Map<String, Object> workflow = first(jdbcTemplate.queryForList("""
+                SELECT id, case_id AS caseId, intake_id AS intakeId, document_id AS documentId,
+                       document_version AS documentVersion, evidence_snapshot_hash AS evidenceSnapshotHash,
+                       confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
+                       review_run_id AS reviewRunId, last_error AS lastError,
+                       confirmed_at AS confirmedAt, create_time AS createTime, update_time AS updateTime
+                FROM contract_analysis_workflow
+                WHERE case_id=?
+                ORDER BY id DESC LIMIT 1
+                """, caseId));
+        return workflow == null ? Map.of() : workflow;
+    }
+
+    private void markAnalysisWorkflowConfirmed(Long caseId, Long intakeId) {
+        Map<String, Object> workflow = first(jdbcTemplate.queryForList("""
+                SELECT id, document_id AS documentId
+                FROM contract_analysis_workflow
+                WHERE case_id=? AND (intake_id=? OR intake_id IS NULL)
+                ORDER BY id DESC LIMIT 1
+                """, caseId, intakeId));
+        if (workflow == null) return;
+
+        Map<String, Object> document = first(jdbcTemplate.queryForList("""
+                SELECT parse_status AS parseStatus
+                FROM contract_document WHERE id=? AND case_id=? AND COALESCE(deleted,0)=0
+                """, workflow.get("documentId"), caseId));
+        boolean ready = document != null && "READY".equalsIgnoreCase(str(document, "parseStatus"));
+        jdbcTemplate.update("""
+                UPDATE contract_analysis_workflow
+                SET intake_id=?, confirmed_version=confirmed_version+1,
+                    status=?, current_stage=?, confirmed_at=NOW(), last_error=NULL
+                WHERE id=?
+                """, intakeId, ready ? "READY_FOR_REVIEW" : "PARSING",
+                ready ? "RISK_REVIEW" : "DOCUMENT_PARSE", workflow.get("id"));
+    }
+
+    private Map<String, Object> prepareReviewWorkflow(Long caseId) {
+        Map<String, Object> workflow = latestAnalysisWorkflow(caseId);
+        if (workflow.isEmpty()) {
+            Map<String, Object> document = first(jdbcTemplate.queryForList("""
+                    SELECT id, version, content_hash AS contentHash, content_text AS contentText
+                    FROM contract_document
+                    WHERE case_id=? AND document_type='MAIN' AND parse_status='READY'
+                      AND COALESCE(deleted,0)=0
+                    ORDER BY version DESC, id DESC LIMIT 1
+                    """, caseId));
+            if (document == null) {
+                throw new IllegalArgumentException("合同文档尚未解析完成，暂不能发起风险审查");
+            }
+            Long workflowId = createAnalysisWorkflow(
+                    caseId, null, numberAsLong(document.get("id")),
+                    intValue(document.get("version"), 1));
+            jdbcTemplate.update("""
+                    UPDATE contract_analysis_workflow
+                    SET evidence_snapshot_hash=?, status='READY_FOR_REVIEW', current_stage='RISK_REVIEW'
+                    WHERE id=?
+                    """, str(document, "contentHash").isBlank()
+                            ? sha256(str(document, "contentText")) : str(document, "contentHash"), workflowId);
+            workflow = latestAnalysisWorkflow(caseId);
+        }
+
+        String status = str(workflow, "status").toUpperCase(Locale.ROOT);
+        String stage = str(workflow, "currentStage").toUpperCase(Locale.ROOT);
+        if ("PARSING".equals(status)) {
+            throw new IllegalArgumentException("合同文档仍在解析，完成后才能发起风险审查");
+        }
+        if ("WAITING_CONFIRMATION".equals(status)) {
+            throw new IllegalArgumentException("请先确认合同识别结果，再发起风险审查");
+        }
+        if ("FAILED".equals(status) && !"RISK_REVIEW".equals(stage)) {
+            throw new IllegalArgumentException("合同文档解析失败，请先重新解析合同");
+        }
+        if ("REVIEWING".equals(status)) {
+            Long activeRunId = numberAsLongOrNull(workflow.get("reviewRunId"));
+            if (activeRunId != null) {
+                Map<String, Object> activeRun = first(jdbcTemplate.queryForList(
+                        "SELECT status FROM agent_run WHERE id=?", activeRunId));
+                if (activeRun != null && Set.of("CREATED", "CONTEXT_BUILDING", "PLANNING",
+                        "ANALYZING", "VERIFYING").contains(str(activeRun, "status").toUpperCase(Locale.ROOT))) {
+                    throw new IllegalArgumentException("合同风险审查已经在运行中，请等待当前任务完成");
+                }
+            }
+        }
+        if (str(workflow, "evidenceSnapshotHash").isBlank()) {
+            throw new IllegalArgumentException("合同证据快照尚未生成，暂不能发起风险审查");
+        }
+        return workflow;
+    }
 
     private int lockCaseAndNextDocumentVersion(Long caseId) {
         Map<String, Object> contractCase = first(jdbcTemplate.queryForList(

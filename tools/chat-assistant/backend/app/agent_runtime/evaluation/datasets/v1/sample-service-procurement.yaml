@@ -1,0 +1,39 @@
+# Sample eval case: Service procurement contract with payment risk
+caseId: SAMPLE-001
+contractType: SERVICE_PROCUREMENT
+title: "XX公司技术服务采购合同"
+description: "预付款比例偏高且缺乏履约担保条款的服务采购合同"
+contractText: |
+  技术服务合同
+
+  甲方：XX科技有限公司
+  乙方：YY技术服务有限公司
+
+  第一条 服务内容
+  乙方为甲方提供企业信息化系统开发与运维服务。
+
+  第二条 合同金额与支付
+  2.1 本合同总金额为人民币500万元。
+  2.2 甲方应于本合同签订后10个工作日内向乙方支付合同总金额的50%作为预付款。
+  2.3 剩余50%款项于项目验收合格后支付。
+
+  第三条 服务期限
+  本合同服务期限为自签订之日起24个月。
+
+  第四条 违约责任
+  任何一方违反本合同约定，应赔偿对方因此遭受的直接损失。
+
+  第五条 保密
+  双方应对合同履行过程中获悉的对方商业秘密予以保密。
+
+expectedFindings:
+  - title: "预付款缺少保障条件"
+    severity: HIGH
+    clauseType: PAYMENT
+    mustHaveContractCitation: true
+    mustHavePolicyCitation: true
+    keyTerms: ["预付款", "履约担保", "保障"]
+
+shouldNotFind: []
+
+expectedCitationCount: 2

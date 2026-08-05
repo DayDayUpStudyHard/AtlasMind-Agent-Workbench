@@ -236,6 +236,20 @@ CONTRACT_TOOL_DEFINITIONS: list[dict] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "listClauseInventory",
+            "description": "返回完整条款目录：总数、类型分布、每条ID/编号/标题/页数/字符数、缺失的关键条款类型。不受20条限制",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contractType": {"type": "string", "description": "合同类型：SERVICE_PROCUREMENT|GOODS_PURCHASE|NDA"},
+                },
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 CONTRACT_TOOL_NAMES = {t["function"]["name"] for t in CONTRACT_TOOL_DEFINITIONS}
@@ -247,6 +261,7 @@ _CONCURRENT_GROUP = {
     "listContractDocuments":    "read",
     "readContractClause":       "read",
     "getContractClauseDetail":  "read",
+    "listClauseInventory":      "read",
     "listContractTimeline":     "read",
     "searchContractClause":     "search",
     "searchContractTimeline":   "search",
@@ -302,6 +317,9 @@ class ContractToolRegistry:
 
         if tool_name == "getContractClauseDetail":
             return {"clause": await self.store.get_clause_detail(case_id, arguments)}
+
+        if tool_name == "listClauseInventory":
+            return {"inventory": await self.store.list_clause_inventory(case_id, arguments)}
 
         if tool_name == "searchContractTimeline":
             return {"nodes": await self.store.search_timeline(case_id, arguments)}

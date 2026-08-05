@@ -64,6 +64,11 @@ public class ContractWorkspaceController {
         return Result.ok(contractCaseService.listCases(filters));
     }
 
+    @GetMapping("/document-pipelines/recent")
+    public Result<List<Map<String, Object>>> recentDocumentPipelines() {
+        return Result.ok(contractCaseService.listRecentDocumentPipelines());
+    }
+
     @PostMapping
     public Result<Map<String, Object>> create(@RequestBody Map<String, Object> request) {
         return Result.ok(contractCaseService.createCase(request));

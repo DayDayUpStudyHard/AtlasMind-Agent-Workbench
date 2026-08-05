@@ -17,7 +17,15 @@ chunking, embedding, indexing, timeline extraction, and intake extraction.
 
 - LibreOffice / Writer, for `.doc` to `.docx` conversion.
 - Noto CJK fonts, for Chinese contract text rendering/conversion.
+- PaddleOCR, OpenCV and PDF rendering dependencies, for automatic PDF quality
+  escalation when the original text layer is malformed.
 - Python dependencies from `requirements.txt`.
+
+The PDF parser runs `pypdf` first. When its quality detector finds broken
+characters or malformed numbers, it automatically tries MinerU when configured
+and then PaddleOCR when available. The selected provider and attempts are
+stored in the internal parse diagnostics; the user-facing timeline keeps the
+candidate date and marks it as potentially inaccurate instead of hiding it.
 
 `docker-compose.yml` now runs `ai-service` and mounts the same `upload_data`
 volume used by `agent-server`:

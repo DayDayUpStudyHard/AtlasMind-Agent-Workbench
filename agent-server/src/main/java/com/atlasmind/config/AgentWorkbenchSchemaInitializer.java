@@ -178,6 +178,9 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 """);
         addColumnIfMissing("contract_case", "signed_date", "DATE");
         addColumnIfMissing("contract_case", "our_side", "VARCHAR(8)");
+        addColumnIfMissing("contract_document", "parse_provider", "VARCHAR(128)");
+        addColumnIfMissing("contract_document", "parse_quality", "VARCHAR(32)");
+        addColumnIfMissing("contract_document", "parse_diagnostics_json", "LONGTEXT");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_document_job_trace (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -237,6 +240,53 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_lifecycle_condition (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    document_id BIGINT NOT NULL,
+                    clause_id BIGINT,
+                    condition_type VARCHAR(64) NOT NULL DEFAULT 'CONTRACT_END',
+                    end_mode VARCHAR(32) NOT NULL DEFAULT 'CONDITIONAL',
+                    logic_operator VARCHAR(16) NOT NULL DEFAULT 'SINGLE',
+                    summary TEXT NOT NULL,
+                    conditions_json LONGTEXT NOT NULL,
+                    citation_json LONGTEXT,
+                    confidence DECIMAL(5,4),
+                    source VARCHAR(64) NOT NULL DEFAULT 'RULE_CANDIDATE',
+                    status VARCHAR(64) NOT NULL DEFAULT 'NEEDS_REVIEW',
+                    manual_override TINYINT NOT NULL DEFAULT 0,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_case_lifecycle (case_id, condition_type, create_time),
+                    KEY idx_document_lifecycle (document_id, clause_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_analysis_workflow (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    intake_id BIGINT,
+                    document_id BIGINT,
+                    document_version INT,
+                    evidence_snapshot_hash VARCHAR(128),
+                    confirmed_version INT NOT NULL DEFAULT 0,
+                    status VARCHAR(32) NOT NULL DEFAULT 'PARSING',
+                    current_stage VARCHAR(64) NOT NULL DEFAULT 'DOCUMENT_PARSE',
+                    review_run_id BIGINT,
+                    last_error TEXT,
+                    confirmed_at DATETIME,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    KEY idx_analysis_workflow_case (case_id, id),
+                    KEY idx_analysis_workflow_status (status, update_time),
+                    KEY idx_analysis_workflow_document (document_id, document_version),
+                    KEY idx_analysis_workflow_run (review_run_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        addColumnIfMissing("agent_run", "workflow_id", "BIGINT");
+        addColumnIfMissing("agent_run", "workflow_stage", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "evidence_snapshot_hash", "VARCHAR(128)");
+        jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_fulfillment_check (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     case_id BIGINT NOT NULL,
@@ -285,9 +335,140 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_document_node (document_id, timeline_node_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // ── Graph Runtime infrastructure tables ────────────────────────
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_graph_checkpoint (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    run_id BIGINT NOT NULL,
+                    graph_name VARCHAR(64) NOT NULL DEFAULT '',
+                    graph_version VARCHAR(32) NOT NULL DEFAULT 'v1',
+                    thread_id VARCHAR(128) NOT NULL,
+                    checkpoint_id VARCHAR(128) NOT NULL,
+                    state_revision INT NOT NULL DEFAULT 0,
+                    node_name VARCHAR(128) NOT NULL DEFAULT '',
+                    state_json LONGTEXT NOT NULL,
+                    state_hash CHAR(64) NOT NULL DEFAULT '',
+                    status VARCHAR(32) NOT NULL DEFAULT 'ACTIVE',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_thread (thread_id, status),
+                    INDEX idx_run (run_id),
+                    UNIQUE KEY uk_checkpoint (thread_id, checkpoint_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_node_execution (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    run_id BIGINT NOT NULL,
+                    node_name VARCHAR(128) NOT NULL,
+                    node_type VARCHAR(32) NOT NULL DEFAULT 'COMPUTE',
+                    attempt INT NOT NULL DEFAULT 1,
+                    status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
+                    input_hash CHAR(64) DEFAULT '',
+                    output_hash CHAR(64) DEFAULT '',
+                    started_at DATETIME NULL,
+                    finished_at DATETIME NULL,
+                    latency_ms BIGINT DEFAULT 0,
+                    llm_model VARCHAR(64) DEFAULT '',
+                    prompt_version VARCHAR(32) DEFAULT '',
+                    token_input INT DEFAULT 0,
+                    token_output INT DEFAULT 0,
+                    error_code VARCHAR(32) DEFAULT '',
+                    error_message TEXT,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_run_node (run_id, node_name, attempt),
+                    INDEX idx_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // ── Evaluation center tables ─────────────────────────────────
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_eval_dataset (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(200) NOT NULL,
+                    version VARCHAR(32) NOT NULL DEFAULT 'v1',
+                    description VARCHAR(1000) DEFAULT '',
+                    contract_type VARCHAR(64) DEFAULT 'SERVICE_PROCUREMENT',
+                    case_count INT DEFAULT 0,
+                    status VARCHAR(32) DEFAULT 'DRAFT',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_eval_case (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    dataset_id BIGINT NOT NULL,
+                    case_key VARCHAR(128) NOT NULL,
+                    title VARCHAR(512) DEFAULT '',
+                    contract_type VARCHAR(64) DEFAULT 'SERVICE_PROCUREMENT',
+                    contract_text LONGTEXT,
+                    expected_findings_json LONGTEXT,
+                    should_not_find_json LONGTEXT,
+                    expected_citation_count INT DEFAULT 0,
+                    status VARCHAR(32) DEFAULT 'ACTIVE',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_dataset (dataset_id),
+                    UNIQUE KEY uk_dataset_case (dataset_id, case_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_eval_run (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    dataset_id BIGINT NOT NULL,
+                    runtime_engine VARCHAR(32) NOT NULL DEFAULT 'legacy',
+                    graph_name VARCHAR(64) DEFAULT '',
+                    graph_version VARCHAR(32) DEFAULT '',
+                    llm_model VARCHAR(64) DEFAULT '',
+                    prompt_version VARCHAR(32) DEFAULT '',
+                    status VARCHAR(32) DEFAULT 'RUNNING',
+                    high_risk_recall DOUBLE DEFAULT 0,
+                    dual_citation_rate DOUBLE DEFAULT 0,
+                    false_positive_rate DOUBLE DEFAULT 0,
+                    schema_valid_rate DOUBLE DEFAULT 0,
+                    case_count INT DEFAULT 0,
+                    passed_count INT DEFAULT 0,
+                    summary_json LONGTEXT,
+                    started_at DATETIME NULL,
+                    finished_at DATETIME NULL,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_dataset (dataset_id),
+                    INDEX idx_status (status)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS agent_eval_result (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    run_id BIGINT NOT NULL,
+                    case_id BIGINT NOT NULL,
+                    success TINYINT DEFAULT 0,
+                    high_recall DOUBLE DEFAULT 0,
+                    dual_citation_rate DOUBLE DEFAULT 0,
+                    false_positives INT DEFAULT 0,
+                    analysis_mode VARCHAR(32) DEFAULT 'FULL',
+                    risk_score DOUBLE DEFAULT 0,
+                    finding_count INT DEFAULT 0,
+                    error_message TEXT,
+                    result_json LONGTEXT,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_run (run_id),
+                    UNIQUE KEY uk_run_case (run_id, case_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
         jdbcTemplate.update("""
                 INSERT IGNORE INTO system_config (config_key, config_value)
                 VALUES ('AGENT_RUNTIME', 'java')
+                """);
+        // ── Graph Runtime routing config seeds ─────────────────────────
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO system_config (config_key, config_value)
+                VALUES ('agent.runtime.default', 'legacy')
+                """);
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO system_config (config_key, config_value)
+                VALUES ('agent.runtime.CONTRACT_REVIEW', 'legacy')
+                """);
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO system_config (config_key, config_value)
+                VALUES ('agent.runtime.FULFILLMENT_CHECK', 'legacy')
                 """);
         jdbcTemplate.update("""
                 INSERT INTO agent_project

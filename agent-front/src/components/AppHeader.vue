@@ -18,7 +18,7 @@
         <div class="notification-wrap" @click.stop>
           <button type="button" class="notification-button" title="消息中心" aria-label="消息中心" @click="toggleNotificationPanel">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 7h18s-3 0-3-7"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
-            <span v-if="unreadCount > 0" class="notification-badge">{{ unreadCount > 99 ? '99+' : unreadCount }}</span>
+            <span v-if="notificationBadgeCount > 0" class="notification-badge">{{ notificationBadgeCount > 99 ? '99+' : notificationBadgeCount }}</span>
           </button>
           <div v-if="notificationOpen" class="notification-panel" @click.stop @wheel.stop>
             <!-- 外部模型状态（最顶部） -->
@@ -39,6 +39,39 @@
 
             <div class="panel-divider"></div>
 
+            <template v-if="documentPipelines.length">
+              <div class="panel-section-heading">
+                <strong>合同文件处理</strong>
+                <span class="section-note">后台继续</span>
+              </div>
+              <div class="document-pipeline-feed">
+                <div
+                  v-for="pipeline in documentPipelines"
+                  :key="pipeline.jobId"
+                  class="document-pipeline-row"
+                  :class="pipelineStatusClass(pipeline.status)"
+                  role="button"
+                  tabindex="0"
+                  @click="openDocumentPipeline(pipeline)"
+                  @keydown.enter="openDocumentPipeline(pipeline)"
+                >
+                  <span class="pipeline-dot" :class="pipelineStatusClass(pipeline.status)"></span>
+                  <div class="document-pipeline-copy">
+                    <strong>{{ pipeline.caseTitle || pipeline.fileName || `合同文件 #${pipeline.documentId}` }}</strong>
+                    <span>{{ pipelineActionLabel(pipeline) }}</span>
+                    <div v-if="pipelineIsActive(pipeline.status)" class="pipeline-progress">
+                      <i :style="{ width: `${pipeline.progress || 0}%` }"></i>
+                    </div>
+                  </div>
+                  <div class="document-pipeline-meta">
+                    <b>{{ pipelineIsActive(pipeline.status) ? `${pipeline.progress || 0}%` : pipelineStatusLabel(pipeline.status) }}</b>
+                    <time>{{ relativeTime(pipeline.updateTime || pipeline.createTime) }}</time>
+                  </div>
+                </div>
+              </div>
+              <div class="panel-divider"></div>
+            </template>
+
             <!-- Agent 运行中心 -->
             <div class="panel-section-heading">
               <strong>Agent 运行中心</strong>
@@ -58,7 +91,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
-import { getRecentWorkspaceRuns, getWorkspaceAiStatus, getWorkspaceUnreadCount } from '../api/index.js'
+import { getRecentContractDocumentPipelines, getRecentWorkspaceRuns, getWorkspaceAiStatus, getWorkspaceUnreadCount } from '../api/index.js'
 import RunFeed from './RunFeed.vue'
 
 const router = useRouter()
@@ -71,6 +104,7 @@ const unreadCount = ref(0)
 const aiStatus = ref(null)
 const aiStatusLoading = ref(false)
 const recentRuns = ref([])
+const documentPipelines = ref([])
 let refreshTimer = null
 
 const modelStatusItems = computed(() => {
@@ -85,6 +119,8 @@ const aiStatusMessage = computed(() => {
   const components = aiStatus.value?.components || {}
   return Object.values(components).find(item => item?.message)?.message || ''
 })
+const activeDocumentPipelineCount = computed(() => documentPipelines.value.filter(item => pipelineIsActive(item.status)).length)
+const notificationBadgeCount = computed(() => unreadCount.value + activeDocumentPipelineCount.value)
 
 if (typeof window !== 'undefined') {
   window.addEventListener('scroll', () => { scrolled.value = window.scrollY > 10 })
@@ -102,18 +138,30 @@ onBeforeUnmount(() => {
 
 async function refreshAll() {
   try {
-    const [countRes, runsRes] = await Promise.allSettled([
+    const [countRes, runsRes, pipelinesRes] = await Promise.allSettled([
       getWorkspaceUnreadCount(),
-      getRecentWorkspaceRuns()
+      getRecentWorkspaceRuns(),
+      getRecentContractDocumentPipelines(),
     ])
     if (countRes.status === 'fulfilled') unreadCount.value = Number(countRes.value.data.data?.count) || 0
     if (runsRes.status === 'fulfilled') recentRuns.value = runsRes.value.data.data || []
+    if (pipelinesRes.status === 'fulfilled') documentPipelines.value = pipelinesRes.value.data.data || []
   } catch { /* silent */ }
 }
 async function refreshHeaderData() {
-  try { const r = await getWorkspaceUnreadCount(); unreadCount.value = Number(r.data.data?.count) || 0 } catch {}
+  try {
+    const [countRes, pipelinesRes] = await Promise.allSettled([
+      getWorkspaceUnreadCount(),
+      getRecentContractDocumentPipelines(),
+    ])
+    if (countRes.status === 'fulfilled') unreadCount.value = Number(countRes.value.data.data?.count) || 0
+    if (pipelinesRes.status === 'fulfilled') documentPipelines.value = pipelinesRes.value.data.data || []
+  } catch {}
   if (notificationOpen.value) {
-    try { const r = await getRecentWorkspaceRuns(); recentRuns.value = r.data.data || [] } catch {}
+    try {
+      const r = await getRecentWorkspaceRuns()
+      recentRuns.value = r.data.data || []
+    } catch {}
   }
 }
 async function refreshAiStatus() {
@@ -128,9 +176,61 @@ function logout() { localStorage.removeItem('atlasmind-token'); router.push('/lo
 
 async function toggleNotificationPanel() {
   notificationOpen.value = !notificationOpen.value
-  if (notificationOpen.value) { await refreshHeaderData(); if (!aiStatus.value) await refreshAiStatus() }
+  if (notificationOpen.value) {
+    await refreshHeaderData()
+    await refreshAiStatus()
+  }
 }
 function closeNotificationPanel() { notificationOpen.value = false }
+
+function openDocumentPipeline(pipeline) {
+  if (pipeline?.caseId) router.push(`/contracts/${pipeline.caseId}`)
+}
+function pipelineIsActive(status) {
+  return !['READY', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(String(status || '').toUpperCase())
+}
+function pipelineStatusClass(status) {
+  const normalized = String(status || '').toUpperCase()
+  if (['READY', 'COMPLETED'].includes(normalized)) return 'done'
+  if (['FAILED', 'CANCELLED'].includes(normalized)) return 'error'
+  return 'active'
+}
+function pipelineStatusLabel(status) {
+  return { UPLOADED: '已提交', PROCESSING: '处理中', READY: '已完成', FAILED: '失败', CANCELLED: '已取消' }[String(status || '').toUpperCase()] || '处理中'
+}
+function pipelineActionLabel(pipeline) {
+  if (pipeline?.currentAction) return pipeline.currentAction
+  const stage = String(pipeline?.stage || '').toUpperCase()
+  const labels = {
+    UPLOADED: '正在准备合同文件',
+    DOCUMENT_START: '正在读取合同文件',
+    TEXT_PARSING: '正在读取合同文字',
+    PDF_PARSING: '正在读取合同文字',
+    PDF_RECOGNITION_OPTIMIZATION: '正在优化文字识别',
+    DOC_CONVERSION: '正在整理 Word 文档',
+    DOCX_PARSING: '正在读取 Word 文档',
+    CLAUSE_SPLITTING: '正在识别合同条款',
+    CLAUSE_PERSISTING: '正在保存条款证据',
+    TIMELINE_EXTRACTING: '正在提取合同时间节点',
+    LIFECYCLE_EXTRACTING: '正在识别合同结束条件',
+    EMBEDDING: '正在建立合同语义检索',
+    INDEXING: '正在整理合同检索索引',
+    READY: '合同解析已完成',
+    FAILED: '合同解析失败',
+  }
+  return labels[stage] || pipelineStatusLabel(pipeline?.status)
+}
+function relativeTime(value) {
+  if (!value) return '刚刚'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return String(value)
+  const minutes = Math.floor((Date.now() - date.getTime()) / 60000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours} 小时前`
+  return String(value).replace('T', ' ').slice(0, 16)
+}
 
 function onRunStatusChange({ run }) {
   const label = { HEALTH_ANALYSIS:'健康分析', PROJECT_ONBOARDING:'项目接手', ENGINEERING_DECISION:'研发决策' }[run.runType] || 'Agent 任务'
@@ -183,6 +283,20 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .model-status-row strong.ok{color:#3f7f5d}.model-status-row strong.error{color:#b35c56}.model-status-row strong.checking{color:var(--atlas-warning)}.model-status-row strong.unknown{color:var(--atlas-subtle)}
 .status-message{margin:8px 0 0;color:#b35c56;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
 .checked-time{display:block;margin-top:8px;color:var(--atlas-subtle);font-size:10px}
+.document-pipeline-feed{display:flex;flex-direction:column;margin-top:8px}
+.document-pipeline-row{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:9px 0;border-bottom:1px solid var(--atlas-border);cursor:pointer}
+.document-pipeline-row:last-child{border-bottom:0}
+.document-pipeline-row:hover{background:var(--atlas-surface-soft);margin:0 -8px;padding-left:8px;padding-right:8px}
+.pipeline-dot{width:7px;height:7px;flex:0 0 auto;margin-top:5px;border-radius:50%;background:var(--atlas-warning)}
+.pipeline-dot.active{animation:dot-pulse 1.5s ease-in-out infinite}
+.pipeline-dot.done{background:#3f7f5d}.pipeline-dot.error{background:#b35c56}
+.document-pipeline-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:3px}
+.document-pipeline-copy strong{overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
+.document-pipeline-copy span{overflow:hidden;color:var(--atlas-muted);font-size:10px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
+.document-pipeline-meta{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:3px;color:var(--atlas-subtle);font-size:10px}
+.document-pipeline-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.document-pipeline-row.error .document-pipeline-meta b{color:#b35c56}.document-pipeline-row.done .document-pipeline-meta b{color:#3f7f5d}
+.pipeline-progress{height:3px;margin-top:2px;overflow:hidden;background:var(--atlas-border)}
+.pipeline-progress i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
 
 .admin-link,.logout-button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 10px;color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;cursor:pointer;font-size:12px;font-weight:800;text-decoration:none;white-space:nowrap}
 .admin-link:hover,.logout-button:hover{color:var(--atlas-primary);border-color:var(--atlas-primary)}

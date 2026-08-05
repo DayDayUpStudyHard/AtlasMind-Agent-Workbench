@@ -278,6 +278,27 @@ class AgentRunner:
                 )
             citations = self.tools.citations_from(observations)
 
+            # ── Re-reflect after targeted retrieval ──
+            await self.trace_store.append_trace(
+                ctx.run_id, "REFLECTION_RERUN",
+                "补充检索完成，重新执行 Reflection",
+                {"citationCount": len(citations)},
+            )
+            reflection2 = await self._reflect(ctx, plan, observations, citations, planner_finished)
+            if reflection2.get("adequate"):
+                reflection = reflection2
+                await self.trace_store.append_trace(
+                    ctx.run_id, "REFLECTION_PASSED",
+                    "补充检索后质量门禁通过",
+                    reflection,
+                )
+            else:
+                await self.trace_store.append_trace(
+                    ctx.run_id, "REFLECTION_FAILED",
+                    "补充检索后质量门禁仍未通过",
+                    reflection2,
+                )
+
         if ctx.task_type == "HEALTH_ANALYSIS" and not scoring:
             await self._execute_tool(
                 ctx, policy, observations,
@@ -299,7 +320,13 @@ class AgentRunner:
         await self._check_cancelled(ctx.run_id)
         await self._update_progress(ctx, "PLANNING", 86,
                                     "执行器正在生成结构化产物")
-        raw_artifact = await self._generate_artifact(ctx, observations, citations, scoring)
+        limited = not passed
+        raw_artifact = await self._generate_artifact(
+            ctx, observations, citations, scoring, limited=limited,
+        )
+        raw_artifact = self._attach_contract_analysis_metadata(
+            ctx, raw_artifact,
+        )
         if "artifactError" in raw_artifact:
             await self.trace_store.append_trace(
                 ctx.run_id, "ARTIFACT_FAILED",
@@ -559,24 +586,58 @@ class AgentRunner:
         citations: list[dict],
         reason: str,
     ) -> dict[str, Any]:
-        adequate = len(citations) > 0
         contract_mode = AgentRunner._is_contract(ctx)
+        if contract_mode:
+            # Contract tasks: need both contract AND policy citations
+            contract_citations = sum(
+                1 for c in citations
+                if str(c.get("sourceType") or "").startswith("CONTRACT_")
+            )
+            policy_citations = sum(
+                1 for c in citations
+                if str(c.get("sourceType") or "").startswith(("KB_", "STANDARD_"))
+            )
+            adequate = contract_citations > 0 and policy_citations > 0
+        else:
+            adequate = len(citations) > 0
+
         if adequate:
             suggested = []
         elif contract_mode:
-            suggested = [
-                {"name": "readContractClause", "arguments": {"limit": 20}},
-                {"name": "searchPolicyKnowledge", "arguments": {"query": ctx.task_type, "limit": 8}},
-            ]
+            has_clauses = any(
+                str(o.get("toolName")) == "readContractClause" for o in observations
+            )
+            has_policy = any(
+                str(o.get("toolName")) == "searchPolicyKnowledge" for o in observations
+            )
+            suggested = []
+            if not has_clauses:
+                suggested.append(
+                    {"name": "readContractClause", "arguments": {"limit": 20}}
+                )
+            if not has_policy:
+                suggested.append(
+                    {"name": "searchPolicyKnowledge",
+                     "arguments": {"query": ctx.task_type, "limit": 8}}
+                )
+            if not suggested:
+                suggested = [
+                    {"name": "readContractClause", "arguments": {"limit": 20}},
+                    {"name": "searchPolicyKnowledge",
+                     "arguments": {"query": ctx.task_type, "limit": 8}},
+                ]
         else:
             suggested = [{"name": "searchProjectEvidence", "arguments": {"query": "", "limit": 12}}]
+
         return {
             "adequate": adequate,
             "summary": (
-                "本地反思确认已有可引用证据"
-                if adequate
-                else ("本地反思发现合同条款或制度证据为空" if contract_mode
-                      else "本地反思发现项目证据为空")
+                "本地反思确认已有可引用证据（合同+政策均覆盖）"
+                if adequate and contract_mode
+                else ("本地反思确认已有可引用证据"
+                      if adequate
+                      else ("本地反思发现合同条款或制度证据为空" if contract_mode
+                            else "本地反思发现项目证据为空"))
             ),
             "missingEvidence": [] if adequate else [
                 "合同条款或适用制度证据" if contract_mode else "项目仓库或绑定知识证据"
@@ -651,12 +712,46 @@ class AgentRunner:
 
     # -- artifact generation ----------------------------------------------
 
+    @staticmethod
+    def _attach_contract_analysis_metadata(
+        ctx: AgentTaskContext,
+        artifact: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Keep legacy reports tied to the parsed-analysis workflow snapshot.
+
+        LangGraph reports add this metadata while composing the artifact. The
+        legacy harness still supports existing deployments, so normalize its
+        output at the boundary before ReportStore persists it.
+        """
+        if not isinstance(artifact, dict) or not AgentRunner._is_contract(ctx):
+            return artifact
+
+        task_input = ctx.task_input if isinstance(ctx.task_input, dict) else {}
+        workflow = task_input.get("analysisWorkflow")
+        if not isinstance(workflow, dict):
+            workflow = {}
+
+        if workflow:
+            artifact.setdefault("analysisWorkflow", workflow)
+            evidence_hash = workflow.get("evidenceSnapshotHash")
+            if evidence_hash:
+                artifact.setdefault("evidenceHash", evidence_hash)
+
+            content = artifact.get("content")
+            if isinstance(content, dict):
+                content.setdefault("analysisWorkflow", workflow)
+                if evidence_hash:
+                    content.setdefault("evidenceHash", evidence_hash)
+
+        return artifact
+
     async def _generate_artifact(
         self,
         ctx: AgentTaskContext,
         observations: list[dict],
         citations: list[dict],
         scoring: dict[str, Any],
+        limited: bool = False,
     ) -> dict[str, Any]:
         try:
             # ── Project tasks ──────────────────────────────────
@@ -700,6 +795,10 @@ class AgentRunner:
                 unique_findings.setdefault(key, finding)
             findings = list(unique_findings.values())
             if ctx.task_type == "CONTRACT_REVIEW":
+                if limited:
+                    return self._fallback_review_artifact(
+                        ctx, contract_case, findings, citations, scoring or {},
+                    )
                 # ── Pre-review metadata extraction (LLM + rules) ──
                 meta = await self._ensure_contract_metadata(ctx, contract_case)
                 if meta:
@@ -979,6 +1078,74 @@ class AgentRunner:
                 "case": contract_case,
                 "verification": verification,
                 "manualConfirmationRequired": True,
+            },
+        }
+
+    @staticmethod
+    def _fallback_review_artifact(
+        ctx: AgentTaskContext,
+        contract_case: dict,
+        findings: list[dict],
+        citations: list[dict],
+        scoring: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Generate a scope-limited review report when the quality gate failed.
+
+        Only produces findings that have verifiable evidence in the observations.
+        Does NOT call the LLM — this is a deterministic limited report.
+        """
+        validated_findings = []
+        for finding in findings:
+            has_contract = bool(
+                finding.get("contractCitation")
+                or finding.get("contractCitationIds")
+            )
+            has_policy = bool(
+                finding.get("policyCitation")
+                or finding.get("policyCitationIds")
+            )
+            if has_contract or has_policy:
+                finding["evidenceStatus"] = (
+                    "DUAL_CITED" if (has_contract and has_policy)
+                    else "CONTRACT_ONLY" if has_contract
+                    else "POLICY_ONLY"
+                )
+                validated_findings.append(finding)
+
+        risk_score = scoring.get("riskScore") or scoring.get("score") or 0
+        risk_status = scoring.get("riskStatus") or "HIGH_RISK"
+
+        return {
+            "reportType": "CONTRACT_REVIEW_REPORT",
+            "title": "[范围受限] " + str(contract_case.get("title") or "合同审查报告"),
+            "summary": (
+                "本次审查因证据不足未能覆盖全部风险维度。以下报告仅包含已有确凿合同原文"
+                "和制度依据支撑的发现。建议补充缺失材料后重新发起完整审查。"
+                f"已验证发现 {len(validated_findings)} 条，"
+                f"引用 {len(citations)} 条。"
+            ),
+            "riskStatus": risk_status,
+            "riskScore": risk_score,
+            "analysisMode": "LIMITED",
+            "coverageLimitation": (
+                "质量门禁未通过：部分风险维度缺少合同条款或政策证据支持。"
+                "本报告不保证覆盖所有必查领域，请以完整审查报告为准。"
+            ),
+            "findings": validated_findings,
+            "actionProposals": [
+                {
+                    "type": "REQUEST_MATERIAL",
+                    "title": "补充审查材料",
+                    "description": "质量门禁未通过，建议补充合同全文、适用政策文档后重新审查",
+                    "priority": "HIGH",
+                }
+            ],
+            "citations": citations,
+            "content": {
+                "case": contract_case,
+                "scoring": scoring,
+                "limitedReport": True,
+                "qualityGatePassed": False,
             },
         }
 

@@ -50,6 +50,9 @@ class Settings:
     chat_max_tokens: int = int(os.getenv("CHAT_MAX_TOKENS", "2048"))
     chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
     project_analysis_timeout_seconds: float = float(os.getenv("PROJECT_ANALYSIS_TIMEOUT_SECONDS", "90"))
+    contract_timeline_llm_timeout_seconds: float = float(os.getenv("CONTRACT_TIMELINE_LLM_TIMEOUT_SECONDS", "20"))
+    contract_timeline_llm_max_candidates: int = int(os.getenv("CONTRACT_TIMELINE_LLM_MAX_CANDIDATES", "24"))
+    contract_timeline_llm_batch_size: int = int(os.getenv("CONTRACT_TIMELINE_LLM_BATCH_SIZE", "8"))
     retrieval_top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "5"))
     internal_token: str = os.getenv("CHAT_ASSISTANT_TOKEN", "")
     kb_chunk_insert_batch_size: int = int(os.getenv("KB_CHUNK_INSERT_BATCH_SIZE", "200"))
@@ -57,6 +60,7 @@ class Settings:
 
     # ====== OCR（扫描版 PDF，可选） ======
     pdf_parse_provider: str = os.getenv("PDF_PARSE_PROVIDER", "auto").strip().lower()
+    pdf_auto_reparse: bool = _bool_env("PDF_AUTO_REPARSE", "true")
     ocr_enabled: bool = _bool_env("OCR_ENABLED", "false")
     ocr_provider: str = os.getenv("OCR_PROVIDER", "paddle").strip().lower()
     ocr_lang: str = os.getenv("OCR_LANG", "ch")

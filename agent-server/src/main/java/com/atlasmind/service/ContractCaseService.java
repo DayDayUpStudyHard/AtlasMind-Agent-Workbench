@@ -39,6 +39,8 @@ public interface ContractCaseService {
 
     List<Map<String, Object>> listDocuments(Long caseId);
 
+    List<Map<String, Object>> listRecentDocumentPipelines();
+
     Map<String, Object> startRun(Long caseId, Map<String, Object> request);
 
     List<Map<String, Object>> listRuns(Long caseId);

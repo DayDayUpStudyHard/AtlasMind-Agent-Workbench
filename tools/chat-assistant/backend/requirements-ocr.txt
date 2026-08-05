@@ -3,5 +3,16 @@
 pymupdf>=1.24.0
 Pillow>=10.0.0
 numpy>=1.24,<2.0
+# PaddleOCR 2.10 declares all three distributions. They all publish the
+# same cv2 namespace, so keep their versions identical to avoid DLL drift.
+opencv-python-headless==4.10.0.84
+opencv-python==4.10.0.84
+opencv-contrib-python==4.10.0.84
 paddlepaddle>=2.6,<3.0
-paddleocr>=2.7,<3.0
+# PaddleOCR 2.x imports albumentations at module load time. Version 2.x can
+# pull a Torch-only path on Windows, which is unnecessary for this CPU OCR
+# worker and often fails before the Paddle runtime starts.
+paddleocr==2.10.0
+albumentations==1.4.24
+# albumentations 1.4.24 declares this exact companion version.
+albucore==0.0.23

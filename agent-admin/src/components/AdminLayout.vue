@@ -149,6 +149,7 @@ const menuItems = [
   { path: '/clauses', label: '标准条款库', icon: icons.knowledge },
   { path: '/knowledge', label: '知识来源', icon: icons.sync },
   { path: '/agent-runs', label: 'Agent 运行记录', icon: icons.run },
+  { path: '/eval', label: '评测中心', icon: icons.console },
   { path: '/reports', label: '报告与审批', icon: icons.report },
   { path: '/ai-observability', label: '可观测性', icon: icons.observe },
   { path: '/logs', label: '系统日志', icon: icons.log },

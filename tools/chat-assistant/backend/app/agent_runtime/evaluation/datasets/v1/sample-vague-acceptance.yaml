@@ -1,0 +1,33 @@
+# Sample eval case: Vague acceptance criteria
+caseId: SAMPLE-002
+contractType: SERVICE_PROCUREMENT
+title: "模糊验收条款的软件开发合同"
+description: "验收标准为主观判断（甲方满意），缺少客观可量化标准"
+contractText: |
+  软件开发委托合同
+
+  甲方：XX数据有限公司
+  乙方：ZZ软件技术有限公司
+
+  第一条 项目范围
+  乙方按照甲方需求开发数据中台系统。
+
+  第二条 验收标准
+  2.1 乙方完成开发后通知甲方验收。
+  2.2 甲方在收到验收通知后15个工作日内组织验收。
+  2.3 验收以甲方满意为标准。
+
+  第三条 付款方式
+  合同签订后支付30%，验收合格后支付70%。
+
+expectedFindings:
+  - title: "验收标准不明确"
+    severity: HIGH
+    clauseType: ACCEPTANCE
+    mustHaveContractCitation: true
+    mustHavePolicyCitation: true
+    keyTerms: ["甲方满意", "验收标准", "客观", "可量化"]
+
+shouldNotFind: []
+
+expectedCitationCount: 2

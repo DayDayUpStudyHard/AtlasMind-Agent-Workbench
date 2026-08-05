@@ -96,6 +96,59 @@ def _merge_contract_hits(primary: list[dict], secondary: list[dict]) -> list[dic
     return merged
 
 
+def _hit_key(hit: dict) -> str:
+    return str(hit.get("clauseId") or hit.get("chunkId") or hit.get("documentId") or "")
+
+
+def _fuse_contract_retrieval(
+    vector_hits: list[dict],
+    keyword_hits: list[dict],
+    limit: int,
+) -> tuple[list[dict], dict]:
+    """Fuse independent retrieval paths and expose agreement as evidence.
+
+    This is deliberately not a fallback chain. When ES is healthy, vector
+    results are compared with the existing MySQL keyword results. A hit is
+    marked validated only when both paths return the same clause/chunk identity.
+    """
+    buckets: dict[str, dict] = {}
+    paths = (
+        ("ES_VECTOR", vector_hits),
+        ("MYSQL_KEYWORD", keyword_hits),
+    )
+    for path_name, hits in paths:
+        for rank, raw in enumerate(hits or []):
+            key = _hit_key(raw)
+            if not key:
+                continue
+            bucket = buckets.setdefault(key, {"hit": dict(raw), "sources": {}, "ranks": {}})
+            bucket["sources"][path_name] = True
+            bucket["ranks"][path_name] = rank
+            bucket["hit"].update({k: v for k, v in raw.items() if v not in (None, "")})
+
+    vector_keys = {_hit_key(hit) for hit in vector_hits if _hit_key(hit)}
+    keyword_keys = {_hit_key(hit) for hit in keyword_hits if _hit_key(hit)}
+    vector_keyword_overlap = len(vector_keys & keyword_keys)
+    fused: list[dict] = []
+    for bucket in buckets.values():
+        hit = bucket["hit"]
+        sources = sorted(bucket["sources"])
+        hit["retrievalSources"] = sources
+        hit["crossValidated"] = len(sources) >= 2
+        hit["retrievalType"] = "ES_HYBRID_CROSS_CHECK" if len(sources) >= 2 else sources[0]
+        hit["retrievalAgreement"] = "MULTI_SOURCE" if len(sources) >= 2 else "SINGLE_SOURCE"
+        rank_bonus = sum(1.0 / (rank + 1) for rank in bucket["ranks"].values())
+        hit["fusionScore"] = round(rank_bonus + float(hit.get("score") or 0) * 0.001, 6)
+        fused.append(hit)
+    fused.sort(key=lambda item: (bool(item.get("crossValidated")), item.get("fusionScore", 0)), reverse=True)
+    return fused[:limit], {
+        "vectorCount": len(vector_hits),
+        "keywordCount": len(keyword_hits),
+        "vectorKeywordOverlap": vector_keyword_overlap,
+        "crossValidatedCount": sum(1 for hit in fused if hit.get("crossValidated")),
+    }
+
+
 def _merge_policy_items(*groups: list[dict], limit: int) -> list[dict]:
     """Merge standard clauses and KB chunks without losing source identity."""
     merged: list[dict] = []
@@ -236,24 +289,29 @@ class ContractStore:
             from app.services.es_service import ESService
             embedding = EmbeddingService()
             es = ESService()
-            candidate_k = max(top_k * 4, 20)
-            vector = embedding.embed(query) if embedding.configured else None
-            hits = es.search_contract_by_embedding(vector, case_id, candidate_k) if vector else []
-            retrieval_type = "VECTOR" if hits else ""
-            if not hits:
-                hits = es.search_contract_by_keyword(query, case_id, candidate_k)
-                retrieval_type = "KEYWORD" if hits else ""
+            es_available = es.ping()
         except Exception as exc:
-            logger.warning("contract ES search failed, fallback to MySQL: %s", exc)
-            hits = []
-            retrieval_type = ""
+            logger.warning("contract ES availability check failed: %s", exc)
+            es_available = False
 
-        keyword_hits = await _run_sync(_fallback_keyword) if _has_contract_terms(query) else []
-        if keyword_hits:
-            hits = _merge_contract_hits(hits, keyword_hits)
+        keyword_hits = await _run_sync(_fallback_keyword)
+        if not es_available:
+            # Explicit product rule: ES unavailable means the old MySQL path,
+            # never a pretend vector fallback.
+            return (keyword_hits or await _run_sync(_fallback_keyword))[:top_k]
 
+        candidate_k = max(top_k * 4, 20)
+        vector_hits: list[dict] = []
+        try:
+            vector = embedding.embed(query) if embedding.configured else None
+            vector_hits = es.search_contract_by_embedding(vector, case_id, candidate_k) if vector else []
+        except Exception as exc:
+            logger.warning("contract vector retrieval failed while ES is available: %s", exc)
+        hits, retrieval_validation = _fuse_contract_retrieval(
+            vector_hits, keyword_hits, max(top_k * 2, top_k)
+        )
         if not hits:
-            return keyword_hits or await _run_sync(_fallback_keyword)
+            return keyword_hits
         hits = _rerank_contract_hits(query, hits)[:top_k]
 
         clause_ids = [h.get("clauseId") for h in hits if h.get("clauseId")]
@@ -280,7 +338,8 @@ class ContractStore:
                     **hit,
                     **parent,
                     "snippet": hit.get("snippet") or str(parent.get("content") or "")[:220],
-                    "retrievalType": retrieval_type,
+                    "clauseText": str(parent.get("content") or hit.get("content") or ""),
+                    "retrievalValidation": retrieval_validation,
                 })
             return enriched
         return await _run_sync(_enrich)
@@ -690,6 +749,74 @@ class ContractStore:
                     })
 
             return findings
+        return await _run_sync(_get)
+
+    # ── Clause inventory (full listing, not limited to 20) ─────────────
+
+    async def list_clause_inventory(self, case_id: int, arguments: dict) -> dict:
+        """Return complete clause catalogue: counts, types, per-clause metadata.
+
+        Avoids the 20-clause limit of readContractClause — essential for
+        determining whether a key clause type is truly missing.
+        """
+        contract_type = str(arguments.get("contractType") or "SERVICE_PROCUREMENT")
+
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT COUNT(*) AS total
+                           FROM contract_clause WHERE case_id=%s""",
+                        (case_id,),
+                    )
+                    total = int((cur.fetchone() or {}).get("total", 0))
+
+                    cur.execute(
+                        """SELECT clause_type, COUNT(*) AS count
+                           FROM contract_clause WHERE case_id=%s
+                           GROUP BY clause_type""",
+                        (case_id,),
+                    )
+                    type_rows = [_normalize_value(r) for r in cur.fetchall()]
+                    clause_types = {str(r.get("clauseType") or "OTHER"): int(r.get("count", 0)) for r in type_rows}
+
+                    cur.execute(
+                        """SELECT id, clause_type AS clauseType,
+                                  clause_number AS clauseNumber, title,
+                                  COALESCE(CHAR_LENGTH(content), 0) AS charCount,
+                                  page_number AS page
+                           FROM contract_clause WHERE case_id=%s
+                           ORDER BY clause_number, id
+                           LIMIT 200""",
+                        (case_id,),
+                    )
+                    clauses = [_normalize_value(r) for r in cur.fetchall()]
+
+            unclassified = clause_types.get("OTHER", 0)
+
+            # Mandatory clause types for common contract types
+            _MANDATORY_BY_TYPE = {
+                "SERVICE_PROCUREMENT": [
+                    "PAYMENT", "LIABILITY", "ACCEPTANCE", "CONFIDENTIALITY",
+                    "TERMINATION",
+                ],
+                "GOODS_PURCHASE": [
+                    "PAYMENT", "LIABILITY", "ACCEPTANCE", "DELIVERY", "TERMINATION",
+                ],
+                "NDA": ["CONFIDENTIALITY", "LIABILITY", "TERMINATION"],
+            }
+            mandatory = _MANDATORY_BY_TYPE.get(contract_type, _MANDATORY_BY_TYPE["SERVICE_PROCUREMENT"])
+            missing_key_types = [t for t in mandatory if t not in clause_types]
+
+            return {
+                "totalCount": total,
+                "clauseTypes": clause_types,
+                "unclassifiedCount": unclassified,
+                "missingKeyTypes": missing_key_types,
+                "clauses": clauses,
+                "contractType": contract_type,
+            }
+
         return await _run_sync(_get)
 
     async def get_active_rules(self, rule_set: str) -> list[dict]:

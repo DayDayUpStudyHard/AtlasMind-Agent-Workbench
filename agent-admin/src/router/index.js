@@ -17,6 +17,7 @@ const routes = [
       { path: 'reports', name: 'ReportsApproval', component: () => import('../views/ReportsApproval.vue') },
       { path: 'ai-observability', name: 'AiObservability', component: () => import('../views/AiObservability.vue') },
       { path: 'logs', name: 'Logs', component: () => import('../views/LogView.vue') },
+      { path: 'eval', name: 'EvalCenter', component: () => import('../views/EvalCenter.vue') },
       { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue') }
     ]
   }

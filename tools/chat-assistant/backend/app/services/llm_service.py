@@ -298,13 +298,13 @@ class LLMService:
         harness can report the error immediately.
         """
         if _llm_circuit_breaker.is_open:
-            raise APIError("LLM circuit breaker is open — skipping call")
+            raise RuntimeError("LLM circuit breaker is open - skipping call")
 
         last_exc = None
         effective_max = max_retries
         for attempt in range(effective_max + 1):
             if _llm_circuit_breaker.is_open:
-                raise APIError("LLM circuit breaker is open — skipping call")
+                raise RuntimeError("LLM circuit breaker is open - skipping call")
 
             try:
                 result = fn()
@@ -460,7 +460,7 @@ class LLMService:
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
                 ],
                 temperature=temperature,
-                max_tokens=max(4096, settings.chat_max_tokens),
+                max_tokens=max(8192, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
                 stream=False,
             ),
@@ -632,6 +632,55 @@ class LLMService:
         content = response.choices[0].message.content if response.choices else ""
         return self._parse_json_object(content or "")
 
+    def plan_contract_risk_domains(self, case: dict, inventory: dict,
+                                   baseline_domains: list[dict],
+                                   run_id: int = 0) -> dict:
+        """Propose contract-specific review domains beyond the mandatory baseline."""
+        template, temperature = self._prompt("contract_risk_domain_planner", run_id)
+        payload = {
+            "case": case,
+            "clauseInventory": inventory,
+            "baselineDomains": [
+                {
+                    "domainKey": item.get("domainKey"),
+                    "domainName": item.get("domainName"),
+                    "objective": item.get("objective"),
+                }
+                for item in baseline_domains
+            ],
+        }
+        return self._structured_completion(template, payload, temperature=temperature)
+
+    def analyze_contract_risk_domain(self, case: dict, domain: dict,
+                                     evidence: list[dict],
+                                     rule_findings: list[dict],
+                                     run_id: int = 0) -> dict:
+        """Generate detailed, auditable findings for one bounded risk domain."""
+        template, temperature = self._prompt("contract_risk_domain_analysis", run_id)
+        payload = {
+            "case": case,
+            "domain": domain,
+            "availableEvidence": evidence[:18],
+            "deterministicRuleFindings": rule_findings[:10],
+        }
+        response = self._call_llm_with_retry(
+            lambda: self.analysis_client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": template},
+                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                ],
+                temperature=temperature,
+                max_tokens=max(8192, settings.chat_max_tokens),
+                response_format={"type": "json_object"},
+                stream=False,
+            ),
+            max_retries=2,
+            backoff_base=1.5,
+        )
+        content = response.choices[0].message.content if response.choices else ""
+        return self._parse_json_object(content or "")
+
     def contract_intake(self, case: dict, run_id: int = 0) -> dict:
         """Generate material checklist, template recommendation, and approval route."""
         template, temperature = self._prompt("contract_intake", run_id)
@@ -762,29 +811,48 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
             "deterministicHints": deterministic_hints,
             "contractExcerpt": text_excerpt,
         }
-        response = self._call_llm_with_retry(
-            lambda: self.analysis_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
-                ],
-                temperature=0.0,
-                max_tokens=2400,
-                response_format={"type": "json_object"},
-                stream=False,
-            ),
-            max_retries=2,
-            backoff_base=1.0,
+        errors: list[str] = []
+        for structured in (True, False):
+            try:
+                kwargs = {
+                    "model": self.model,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                    ],
+                    "temperature": 0.0,
+                    "max_tokens": 2400,
+                    "stream": False,
+                }
+                if structured:
+                    kwargs["response_format"] = {"type": "json_object"}
+                response = self._call_llm_with_retry(
+                    lambda kwargs=kwargs: self.analysis_client.chat.completions.create(**kwargs),
+                    max_retries=1,
+                    backoff_base=1.0,
+                )
+                return self._parse_structured_response(response, required_key="fields")
+            except AuthenticationError:
+                raise
+            except APIError:
+                raise
+            except ValueError as exc:
+                errors.append(str(exc)[:240])
+                if structured:
+                    logger.warning(
+                        "LLM contract metadata response was not usable; retrying without response_format: %s",
+                        exc,
+                    )
+
+        raise ValueError(
+            "Contract metadata response was not valid JSON: " + "; ".join(errors[-2:])
         )
-        content = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(content or "")
 
     def enrich_contract_timeline(self, candidates: list[dict]) -> dict:
-        """Classify timeline candidates without inventing new dates."""
+        """Classify timeline candidates using their complete source clauses."""
         system_prompt = """
 你是合同时间节点语义整理器。输入是一组已经由代码提取出来的时间候选。
-你只能基于候选里的 date、condition、quote、context、clauseTitle 做判断，不能发明新的日期。
+你只能基于候选里的 date、condition、matchedText、quote、clauseText、clauseTitle 做判断，不能发明新的日期。
 
 输出且只输出一个 JSON 对象：
 {
@@ -810,7 +878,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 1. 只能返回候选里已有的 candidateId。
 2. keep=false 仅表示这个候选不值得展示，不得新增候选。
 3. 如果候选明显是封面元信息、签订时间、印制说明或模板噪声，优先 keep=false。
-4. quote 是命中片段，context 是它附近的条款上下文；如果 context 比 quote 更完整，以 context 判断业务含义。
+4. matchedText 是规则定位锚点，quote 是命中片段，clauseText 是完整原文条款。必须以完整 clauseText 判断主语、触发条件、动作、材料和后果，不能只理解截取短句。
 5. label 要尽量短，保留履约含义。
 6. businessMeaning 要像给业务人员看的话，尽量写成“谁应在什么时间/条件下完成什么事”。
 7. confidence 0-1。
@@ -819,24 +887,82 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 10. contractRequirements 只列合同原文明确要求在该节点完成或提交的事项，例如实施方案、研究报告、验收材料；没有则返回空数组。
 11. aiSuggestions 只列为了履约留痕、验收或付款而建议准备的材料；不得冒充合同要求，且与 contractRequirements 不重复。
 """.strip()
-        payload = {"candidates": candidates[:60]}
-        response = self._call_llm_with_retry(
-            lambda: self.analysis_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
-                ],
-                temperature=0.0,
-                max_tokens=2600,
-                response_format={"type": "json_object"},
-                stream=False,
-            ),
-            max_retries=1,
-            backoff_base=1.0,
+        all_nodes: list[dict] = []
+        errors: list[str] = []
+        max_candidates = max(0, int(settings.contract_timeline_llm_max_candidates or 0))
+        batch_size = max(1, int(settings.contract_timeline_llm_batch_size or 8))
+        selected_candidates = candidates[:max_candidates]
+        if not selected_candidates:
+            return {"nodes": [], "errors": ["timeline enrichment disabled or no candidates"]}
+        timeline_client = self.analysis_client.with_options(
+            timeout=max(1.0, float(settings.contract_timeline_llm_timeout_seconds or 20))
         )
-        content = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(content or "")
+        for start in range(0, len(selected_candidates), batch_size):
+            payload = {
+                "candidates": [
+                    {**item, "clauseText": str(item.get("clauseText") or "")[:12000]}
+                    for item in selected_candidates[start:start + batch_size]
+                ]
+            }
+            parsed = None
+            for structured in (True, False):
+                try:
+                    kwargs = {
+                        "model": self.model,
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
+                        ],
+                        "temperature": 0.0,
+                        "max_tokens": max(4096, settings.chat_max_tokens),
+                        "stream": False,
+                    }
+                    if structured:
+                        kwargs["response_format"] = {"type": "json_object"}
+                    response = self._call_llm_with_retry(
+                        lambda kwargs=kwargs: timeline_client.chat.completions.create(**kwargs),
+                        max_retries=0,
+                        backoff_base=1.0,
+                    )
+                    message = response.choices[0].message if response.choices else None
+                    content = getattr(message, "content", "") or ""
+                    if not content.strip():
+                        raise ValueError("timeline enrichment returned empty content")
+                    parsed = self._parse_json_object(content)
+                    break
+                except (APIConnectionError, AuthenticationError) as exc:
+                    errors.append(str(exc)[:300])
+                    break
+                except Exception as exc:
+                    errors.append(str(exc)[:300])
+            if parsed is not None:
+                all_nodes.extend(item for item in (parsed.get("nodes") or []) if isinstance(item, dict))
+        if not all_nodes and errors:
+            raise ValueError("; ".join(errors[-2:]))
+        return {"nodes": all_nodes, "errors": errors}
+
+    def enrich_contract_lifecycle_conditions(self, candidates: list[dict]) -> dict:
+        """Ground event-driven contract end conditions in complete clauses."""
+        system_prompt = """
+你是合同结束条件整理器。每个候选都包含完整合同条款和规则初步拆出的条件。
+只整理明确以“本合同结束、终止或失效”为对象的约定；不得把履约保函、质保、证书或某项义务失效误认为合同失效。
+
+只输出 JSON：
+{"conditions":[{"candidateId":"string","keep":true,"endMode":"CONDITIONAL","logic":"ALL | ANY | SINGLE","summary":"string","events":[{"event":"string","sourceQuote":"string"}],"reason":"string","confidence":0.0}]}
+
+要求：
+1. sourceQuote 必须是 clauseText 中连续存在的原文。
+2. “且、并且、同时满足、全部完成”通常是 ALL；“任一、任何一项”通常是 ANY。
+3. summary 用业务语言说明合同何时结束，不生成不存在的具体日期。
+4. 条款对象不明确、原文乱码或只是其他对象失效时 keep=false。
+""".strip()
+        payload = {"candidates": candidates[:20]}
+        return self._structured_completion(
+            system_prompt,
+            payload,
+            temperature=0.0,
+            timeout_seconds=max(1.0, float(settings.contract_timeline_llm_timeout_seconds or 20)),
+        )
 
     def contract_approval(self, case: dict, findings: list[dict],
                           scoring: dict, run_id: int = 0) -> dict:
@@ -866,9 +992,14 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
         return self._parse_json_object(content or "")
 
     def _structured_completion(self, system_prompt: str, payload: dict,
-                               temperature: float = 0.1) -> dict:
+                               temperature: float = 0.1,
+                               timeout_seconds: float | None = None) -> dict:
+        client = self.analysis_client
+        if timeout_seconds is not None:
+            client = client.with_options(timeout=max(1.0, float(timeout_seconds)))
+
         def _call():
-            response = self.analysis_client.chat.completions.create(
+            response = client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -943,3 +1074,52 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
             f"Failed to parse JSON after {len(errors)} attempts: "
             + "; ".join(e[:120] for e in errors)
         )
+
+    @staticmethod
+    def _message_text(value) -> str:
+        """Normalize string and OpenAI content-part responses to plain text."""
+        if isinstance(value, str):
+            return value
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                else:
+                    text = getattr(item, "text", None)
+                if text:
+                    parts.append(str(text))
+            return "".join(parts)
+        return "" if value is None else str(value)
+
+    def _recover_json_from_reasoning(self, reasoning: str, required_key: str | None = None) -> dict | None:
+        """Recover a final JSON object when a reasoning model leaves content empty."""
+        if not reasoning.strip():
+            return None
+        starts = [match.start() for match in re.finditer(r"\{", reasoning)]
+        for start in reversed(starts):
+            try:
+                parsed = self._parse_json_object(reasoning[start:])
+            except ValueError:
+                continue
+            if required_key is None or required_key in parsed:
+                return parsed
+        return None
+
+    def _parse_structured_response(self, response, required_key: str | None = None) -> dict:
+        """Parse visible model output and safely recover reasoning-only JSON."""
+        if not getattr(response, "choices", None):
+            raise ValueError("LLM returned no choices")
+        message = response.choices[0].message
+        content = self._message_text(getattr(message, "content", None)).strip()
+        if content:
+            return self._parse_json_object(content)
+
+        reasoning = self._message_text(getattr(message, "reasoning_content", None))
+        recovered = self._recover_json_from_reasoning(reasoning, required_key)
+        if recovered is not None:
+            logger.warning(
+                "LLM returned empty visible content; recovered structured JSON from reasoning output"
+            )
+            return recovered
+        raise ValueError("LLM returned empty structured content")

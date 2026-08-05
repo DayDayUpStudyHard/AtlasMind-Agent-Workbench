@@ -59,7 +59,10 @@
       <span class="processing-kicker">{{ intakeStatusLabel }}</span>
       <h2>正在读取合同事实</h2>
       <p>{{ intake?.fileName }}</p>
+      <p class="processing-action">{{ intakePipelineAction }}</p>
       <div class="progress-track"><i :style="{ width: processingProgress + '%' }"></i></div>
+      <span class="processing-progress-label">{{ processingProgress }}%</span>
+      <router-link to="/contracts" class="processing-back">返回合同工作台，后台继续处理</router-link>
     </section>
 
     <section v-else-if="phase === 'FAILED'" class="failed-state">
@@ -242,13 +245,41 @@ const canIdentify = computed(() => !submitting.value && (
 const validated = computed(() => intake.value?.validated || {})
 const validatedFields = computed(() => validated.value.fields || {})
 const intakeStatusLabel = computed(() => {
+  const stage = String(intake.value?.pipelineStage || '').toUpperCase()
+  if (stage === 'PDF_RECOGNITION_OPTIMIZATION') return '正在优化 PDF 文字识别'
+  if (stage === 'DOC_CONVERSION') return '正在整理 Word 文档'
+  if (stage === 'DOCX_PARSING') return '正在读取 Word 文档'
+  if (stage === 'CLAUSE_SPLITTING' || stage === 'CLAUSE_PERSISTING') return '正在识别合同条款'
+  if (stage === 'TIMELINE_EXTRACTING') return '正在提取合同时间节点'
+  if (stage === 'LIFECYCLE_EXTRACTING') return '正在识别合同结束条件'
+  if (stage === 'EMBEDDING' || stage === 'INDEXING') return '正在建立合同检索能力'
   if (intake.value?.status === 'FILE_PARSING') return '正在解析合同文件'
   if (intake.value?.status === 'EXTRACTING') return '正在结构化提取'
   return '等待解析服务'
 })
 const processingProgress = computed(() => {
+  const value = Number(intake.value?.pipelineProgress)
+  if (Number.isFinite(value)) return Math.max(0, Math.min(100, value))
   if (intake.value?.status === 'FILE_PARSING') return 38
   return intake.value?.status === 'EXTRACTING' ? 68 : 24
+})
+const intakePipelineAction = computed(() => {
+  if (intake.value?.pipelineAction) return intake.value.pipelineAction
+  const labels = {
+    UPLOADED: '合同文件已提交，等待后台处理',
+    DOCUMENT_START: '正在读取合同文件',
+    PDF_PARSING: '正在读取 PDF 文字',
+    PDF_RECOGNITION_OPTIMIZATION: '正在优化 PDF 文字识别',
+    DOC_CONVERSION: '正在整理 Word 文档',
+    DOCX_PARSING: '正在读取 Word 文档',
+    CLAUSE_SPLITTING: '正在识别合同条款',
+    CLAUSE_PERSISTING: '正在保存条款证据',
+    TIMELINE_EXTRACTING: '正在提取合同时间节点',
+    LIFECYCLE_EXTRACTING: '正在识别合同结束条件',
+    EMBEDDING: '正在建立合同语义检索',
+    INDEXING: '正在整理合同检索索引',
+  }
+  return labels[String(intake.value?.pipelineStage || '').toUpperCase()] || '后台正在处理合同文件'
 })
 const reviewSummary = computed(() => {
   const count = validated.value.needsConfirmation?.length || 0
@@ -466,9 +497,9 @@ onBeforeUnmount(() => clearTimeout(pollTimer))
 .source-footer{display:flex;align-items:center;gap:14px;min-height:60px;padding:10px 14px;border-top:1px solid var(--atlas-border);color:var(--atlas-subtle);font-size:10px}.source-footer>span{white-space:nowrap}.inline-error{flex:1;color:#a9362f;font-size:11px}.identify-button{margin-left:auto;min-width:138px}
 .intake-docket{position:relative;align-self:start;padding:18px 0 0 24px}.docket-rule{position:absolute;top:22px;bottom:20px;left:9px;width:1px;background:var(--atlas-border-strong)}
 .docket-step{position:relative;display:grid;grid-template-columns:28px minmax(0,1fr);gap:10px;margin-bottom:28px}.docket-step>span{display:grid;place-items:center;width:20px;height:20px;margin-left:-24px;border:1px solid var(--atlas-primary);background:var(--atlas-bg);color:var(--atlas-primary);font-family:monospace;font-size:9px;font-weight:900}.docket-step strong{display:block;font-size:12px}.docket-step small{display:block;margin-top:4px;color:var(--atlas-muted);font-size:10px}
-.processing-state,.failed-state{display:flex;min-height:540px;flex-direction:column;align-items:center;justify-content:center;text-align:center}.processing-kicker,.failed-state>span{color:var(--atlas-primary);font-size:10px;font-weight:900}.processing-state h2,.failed-state h2{max-width:620px;margin:10px 0 8px;font-family:var(--atlas-font-display);font-size:28px;letter-spacing:0}.processing-state p{color:var(--atlas-muted);font-size:12px}
+.processing-state,.failed-state{display:flex;min-height:540px;flex-direction:column;align-items:center;justify-content:center;text-align:center}.processing-kicker,.failed-state>span{color:var(--atlas-primary);font-size:10px;font-weight:900}.processing-state h2,.failed-state h2{max-width:620px;margin:10px 0 8px;font-family:var(--atlas-font-display);font-size:28px;letter-spacing:0}.processing-state p{color:var(--atlas-muted);font-size:12px}.processing-state .processing-action{margin-top:4px;color:var(--atlas-primary);font-weight:800}.processing-progress-label{margin-top:8px;color:var(--atlas-primary);font-family:monospace;font-size:11px;font-weight:900}
 .document-pulse{display:grid;width:70px;height:86px;grid-template-rows:repeat(4,1fr);gap:7px;margin-bottom:24px;padding:18px 14px;border:1px solid var(--atlas-border-strong);background:var(--atlas-surface)}.document-pulse i{height:3px;background:var(--atlas-border);animation:scan 1.4s ease-in-out infinite}.document-pulse i:nth-child(2){animation-delay:.12s}.document-pulse i:nth-child(3){animation-delay:.24s}.document-pulse i:nth-child(4){animation-delay:.36s}
-.progress-track{width:min(360px,70vw);height:3px;margin-top:24px;background:var(--atlas-border)}.progress-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .4s ease}.failed-state>div{display:flex;gap:10px;margin-top:20px}
+.progress-track{width:min(360px,70vw);height:3px;margin-top:24px;background:var(--atlas-border)}.progress-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .4s ease}.processing-back{margin-top:24px;color:var(--atlas-primary);font-size:12px;text-decoration:none}.processing-back:hover{text-decoration:underline}.failed-state>div{display:flex;gap:10px;margin-top:20px}
 .review-workspace{display:grid;grid-template-columns:minmax(0,1fr) 430px;gap:0;margin-top:28px;border:1px solid var(--atlas-border);background:var(--atlas-surface)}
 .evidence-pane{display:flex;min-width:0;min-height:720px;flex-direction:column;border-right:1px solid var(--atlas-border)}.pane-header{display:flex;min-height:66px;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--atlas-border)}.pane-header span{display:block;color:var(--atlas-subtle);font-size:9px;font-weight:900}.pane-header strong{display:block;margin-top:4px;font-size:12px}.compact{min-height:30px!important;padding:0 10px!important;font-size:10px!important}
 .source-preview{flex:1;overflow:auto;max-height:760px;margin:0;padding:24px;white-space:pre-wrap;word-break:break-word;background:var(--atlas-bg);color:var(--atlas-text);font-family:'JetBrains Mono','Fira Code',monospace;font-size:12px;line-height:1.85}.source-preview mark{padding:2px 0;background:#fff0a8;color:#392f18}.evidence-footer{display:flex;min-height:42px;align-items:center;padding:0 16px;border-top:1px solid var(--atlas-border);color:var(--atlas-subtle);font-family:monospace;font-size:9px}

@@ -30,7 +30,69 @@
       <div><span>部门</span><strong>{{ c.department || '待填写' }}</strong></div>
       <div><span>签订日期</span><strong>{{ c.signedDate || '待填写' }}</strong></div>
       <div><span>生效日期</span><strong>{{ c.effectiveDate || '待填写' }}</strong></div>
-      <div><span>到期日期</span><strong>{{ c.expiryDate || '待填写' }}</strong></div>
+      <div><span>结束方式</span><strong>{{ c.expiryDate || (primaryLifecycleCondition ? '满足约定条件后结束' : '待填写') }}</strong></div>
+    </section>
+
+    <section v-if="analysisWorkflow.id" class="analysis-workflow-panel">
+      <div class="analysis-workflow-head">
+        <div>
+          <span class="section-kicker">合同分析流程</span>
+          <h3>解析、确认与风险审查</h3>
+          <p>风险审查会复用已经解析并确认的合同证据，不会重复 OCR 或重新切分全文。</p>
+        </div>
+        <strong :class="'workflow-status ' + workflowStatusClass(analysisWorkflow.status)">
+          {{ workflowStatusLabel(analysisWorkflow.status) }}
+        </strong>
+      </div>
+      <div class="analysis-workflow-stages">
+        <div v-for="stage in analysisStages" :key="stage.key" class="analysis-workflow-stage" :class="stage.state">
+          <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
+          <div>
+            <strong>{{ stage.label }}</strong>
+            <small>{{ stage.description }}</small>
+          </div>
+        </div>
+      </div>
+      <div class="analysis-workflow-foot">
+        <small v-if="analysisWorkflow.evidenceSnapshotHash">
+          证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
+        </small>
+        <button v-if="analysisWorkflow.status === 'WAITING_CONFIRMATION'" class="quiet-button small" @click="openIntakeConfirmation">
+          打开识别确认
+        </button>
+        <button v-else-if="analysisWorkflow.status === 'READY_FOR_REVIEW'" class="primary-button small" :disabled="running" @click="startRun('CONTRACT_REVIEW')">
+          开始风险审查
+        </button>
+      </div>
+    </section>
+
+    <section v-if="documentPipelineActive" class="document-progress-panel">
+      <div class="document-progress-copy">
+        <span class="section-kicker">合同文件处理</span>
+        <h3>{{ documentPipelineActive.fileName }}</h3>
+        <p>{{ documentPipelineAction(documentPipelineActive) }}。你可以返回合同工作台，任务会在后台继续。</p>
+      </div>
+      <div class="document-progress-value">
+        <strong>{{ documentPipelineProgress }}%</strong>
+        <span>当前进度</span>
+      </div>
+      <div class="document-progress-track"><i :style="{ width: `${documentPipelineProgress}%` }"></i></div>
+    </section>
+
+    <section v-if="primaryLifecycleCondition" class="contract-diagnostics">
+      <div v-if="primaryLifecycleCondition" class="contract-end-condition">
+        <div class="diagnostic-mark">结束条件</div>
+        <div>
+          <strong>{{ primaryLifecycleCondition.summary }}</strong>
+          <ol v-if="lifecycleEvents(primaryLifecycleCondition).length">
+            <li v-for="event in lifecycleEvents(primaryLifecycleCondition)" :key="event.sequence || event.event">
+              <span>{{ primaryLifecycleCondition.logicOperator === 'ALL' ? '必须满足' : '条件' }}</span>
+              {{ event.event }}
+            </li>
+          </ol>
+          <small>来源：{{ lifecycleSourceLabel(primaryLifecycleCondition) }} · 最终结束状态需人工确认</small>
+        </div>
+      </div>
     </section>
 
     <section class="timeline-panel">
@@ -54,17 +116,20 @@
         >
           <div class="timeline-date-column">
             <strong>{{ timelineDateLabel(node) }}</strong>
-            <span v-if="relativeDateResult(node).baseUncertain" class="basis-warning">基准日期待确认</span>
+            <span v-if="timelineNeedsRecognition(node)" class="recognition-warning">日期/文字可能有误</span>
+            <span v-else-if="relativeDateResult(node).baseUncertain" class="basis-warning">基准日期待确认</span>
             <small v-else>{{ timelineDateKind(node) }}</small>
           </div>
           <div class="timeline-node-main">
             <span v-if="timelineTypeLabel(node.nodeType) !== (node.label || timelineTypeLabel(node.nodeType))" class="timeline-type">{{ timelineTypeLabel(node.nodeType) }}</span>
             <h4>{{ node.label || timelineTypeLabel(node.nodeType) }}</h4>
             <p class="timeline-action">{{ timelineAction(node) }}</p>
+            <p v-if="timelineQualityNote(node)" class="timeline-quality-note">{{ timelineQualityNote(node) }}</p>
             <div class="timeline-node-meta">
               <small>{{ timelineSourceLabel(node) }}</small>
               <small>{{ timelinePartyLabel(node.responsibleParty) }}</small>
               <small v-if="node.confidence != null">可信度 {{ confidenceLabel(node.confidence) }}</small>
+              <small v-if="timelineNeedsRecognition(node)">需要人工核对</small>
             </div>
           </div>
           <div class="timeline-row-actions" @click.stop>
@@ -83,6 +148,7 @@
             <span>{{ timelineTypeLabel(selectedTimelineNode.nodeType) }}</span>
             <h3 id="timeline-detail-title">{{ selectedTimelineNode.label || timelineTypeLabel(selectedTimelineNode.nodeType) }}</h3>
             <p>{{ timelineAction(selectedTimelineNode) }}</p>
+            <small v-if="timelineQualityNote(selectedTimelineNode)" class="detail-quality-note">{{ timelineQualityNote(selectedTimelineNode) }}</small>
           </div>
           <button class="modal-close" aria-label="关闭时间节点详情" @click="closeTimelineDetail">×</button>
         </header>
@@ -92,6 +158,7 @@
             <div>
               <span>预计时间</span>
               <strong>{{ timelineDateLabel(selectedTimelineNode) }}</strong>
+              <small v-if="timelineNeedsRecognition(selectedTimelineNode)" class="recognition-warning">当前识别的日期/数字可能有误，请核对合同原页</small>
               <small v-if="relativeDateResult(selectedTimelineNode).baseUncertain">基准日期不确定，当前结果为推定日期</small>
               <small v-else>{{ timelineDateKind(selectedTimelineNode) }}</small>
             </div>
@@ -138,7 +205,7 @@
             <div class="detail-section-title"><span>02</span><h4>原文依据</h4></div>
             <p class="evidence-location">{{ selectedTimelineNode.sourceTitle || '合同正文' }} · {{ timelineSourceLabel(selectedTimelineNode) }}</p>
             <blockquote class="full-contract-quote">{{ timelineFullQuote(selectedTimelineNode) || timelineQuote(selectedTimelineNode) }}</blockquote>
-            <p v-if="timelineCondition(selectedTimelineNode)" class="timeline-condition">命中条件：{{ timelineCondition(selectedTimelineNode) }}</p>
+            <p v-if="timelineCondition(selectedTimelineNode)" class="timeline-condition">合同期限：{{ timelineConditionDisplay(selectedTimelineNode) }}</p>
           </section>
 
           <section v-if="timelineConsequence(selectedTimelineNode).explicit || timelineConsequence(selectedTimelineNode).ai" class="detail-section">
@@ -311,6 +378,8 @@
           <span>{{ docTypeLabel(d.documentType) }}</span>
           <strong>{{ d.fileName }}</strong>
           <small>v{{ d.version }} · {{ d.hasInlineText ? parseStatusLabel(d) + ' · ' + (d.textLength || 0) + ' 字' : parseStatusLabel(d) }}</small>
+          <small v-if="documentPipelineStatusActive(d)" class="doc-pipeline-action">{{ documentPipelineAction(d) }} · {{ d.pipelineProgress || 0 }}%</small>
+          <div v-if="documentPipelineStatusActive(d)" class="doc-pipeline-track"><i :style="{ width: `${d.pipelineProgress || 0}%` }"></i></div>
           <button v-if="d.hasInlineText" class="quiet-button tiny" @click="openTextPreview(d)">预览</button>
         </div>
       </div>
@@ -521,53 +590,118 @@
     </section>
 
     <!-- Findings -->
-    <section class="side-section" data-section="findings" v-if="c.findings?.length">
-      <h3>审查发现 · {{ c.findings.length }} 条</h3>
-      <article v-for="f in c.findings" :key="f.id" class="finding-card">
-        <div class="finding-head">
-          <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
-          <span class="clause-pill">{{ clauseTypeLabel(f.clauseType) }}</span>
-          <small>{{ findingStatusLabel(f.status) }}</small>
+    <section class="risk-workbench" data-section="findings" v-if="c.findings?.length">
+      <header class="risk-workbench-head">
+        <div>
+          <span class="section-kicker">风险研判</span>
+          <h3>审查发现</h3>
+          <p>先处理高风险和关键动作，展开后查看完整论证、双重依据与谈判建议。</p>
         </div>
-        <strong>{{ f.title }}</strong>
-        <p v-if="f.description">{{ f.description }}</p>
-        <p v-if="f.impact" class="impact-text">影响：{{ f.impact }}</p>
-        <div class="advice-grid" v-if="f.remediationAdvice || f.negotiationAdvice">
-          <div v-if="f.remediationAdvice">
-            <span>修改建议</span>
-            <p>{{ f.remediationAdvice }}</p>
-          </div>
-          <div v-if="f.negotiationAdvice">
-            <span>谈判口径</span>
-            <p>{{ f.negotiationAdvice }}</p>
-          </div>
+        <div class="risk-counts" aria-label="风险数量汇总">
+          <span class="high"><strong>{{ findingCountBySeverity('HIGH') }}</strong> 高风险</span>
+          <span class="medium"><strong>{{ findingCountBySeverity('MEDIUM') }}</strong> 中风险</span>
+          <span class="low"><strong>{{ findingCountBySeverity('LOW') }}</strong> 低风险</span>
         </div>
-        <div class="verification-list" v-if="Array.isArray(f.verificationPoints) && f.verificationPoints.length">
-          <span>复核点</span>
-          <ul>
-            <li v-for="point in f.verificationPoints" :key="point">{{ point }}</li>
-          </ul>
-        </div>
-        <div class="citation-grid">
+      </header>
+
+      <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
+        <div class="risk-domain-head">
           <div>
-            <span>合同依据</span>
-            <small>{{ citationLabel(f.contractCitation) }}</small>
+            <span>{{ group.items.length }} 项发现</span>
+            <h4>{{ group.name }}</h4>
           </div>
-          <div>
-            <span>制度依据</span>
-            <small>{{ policyLabel(f.policyCitation, f.ruleKey) }}</small>
+          <small v-if="group.highCount">{{ group.highCount }} 项需优先处理</small>
+        </div>
+
+        <article v-for="f in group.items" :key="f.id" class="finding-card" :class="'finding-' + (f.severity || 'MEDIUM').toLowerCase()">
+          <div class="finding-summary-row">
+            <div class="finding-rank">
+              <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
+              <small>{{ findingStatusLabel(f.status) }}</small>
+            </div>
+            <div class="finding-summary-main">
+              <div class="finding-title-line">
+                <h5>{{ findingHeadline(f) }}</h5>
+                <span class="clause-pill">{{ findingDomainName(f) }}</span>
+              </div>
+              <p class="finding-one-line">{{ findingOneLine(f) }}</p>
+              <div class="finding-key-action">
+                <span>首要处理</span>
+                <strong>{{ findingKeyPoint(f) }}</strong>
+              </div>
+              <div class="finding-source-strip">
+                <span :class="{ active: findingHasContractBasis(f) }">合同原文{{ findingHasContractBasis(f) ? '已引用' : '待补充' }}</span>
+                <span :class="{ active: findingHasPolicyBasis(f) }">知识依据{{ findingHasPolicyBasis(f) ? '已引用' : '待补充' }}</span>
+                <span>可信度 {{ levelLabel(findingDetail(f).confidenceLevel) }}</span>
+                <span v-if="f.suggestedAction">{{ suggestedActionLabel(f.suggestedAction) }}</span>
+              </div>
+            </div>
+            <button
+              type="button"
+              class="finding-expand"
+              :aria-expanded="isFindingExpanded(f)"
+              :aria-controls="`finding-detail-${f.id}`"
+              @click="toggleFinding(f)"
+            >{{ isFindingExpanded(f) ? '收起详情' : '查看详情' }}</button>
           </div>
-        </div>
-        <div class="finding-action-line" v-if="f.suggestedAction">
-          <span>建议动作</span>
-          <strong>{{ suggestedActionLabel(f.suggestedAction) }}</strong>
-        </div>
-        <div class="finding-buttons" v-if="f.status === 'OPEN'">
-          <button class="quiet-button tiny" @click="updateFinding(f.id, 'REMEDIATED')">标记已修改</button>
-          <button class="quiet-button tiny" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
-          <button class="quiet-button tiny" @click="updateFinding(f.id, 'DISMISSED')">驳回</button>
-        </div>
-      </article>
+
+          <div v-if="isFindingExpanded(f)" :id="`finding-detail-${f.id}`" class="finding-detail">
+            <section v-if="findingExplanation(f)">
+              <span>风险解释</span>
+              <p>{{ findingExplanation(f) }}</p>
+            </section>
+            <section v-if="findingBusinessImpact(f)">
+              <span>可能影响</span>
+              <p>{{ findingBusinessImpact(f) }}</p>
+            </section>
+
+            <div class="finding-evidence-grid">
+              <section>
+                <span>合同依据</span>
+                <p>{{ findingContractBasis(f) }}</p>
+                <blockquote v-if="f.contractCitation?.snippet">{{ f.contractCitation.snippet }}</blockquote>
+              </section>
+              <section>
+                <span>知识库 / 标准条款依据</span>
+                <p>{{ findingKnowledgeBasis(f) }}</p>
+                <blockquote v-if="f.policyCitation?.snippet">{{ f.policyCitation.snippet }}</blockquote>
+              </section>
+            </div>
+
+            <div v-if="findingDetail(f).explicitConsequence || findingDetail(f).inferredConsequence" class="finding-consequence-grid">
+              <section v-if="findingDetail(f).explicitConsequence">
+                <span>合同明确后果</span>
+                <p>{{ findingDetail(f).explicitConsequence }}</p>
+              </section>
+              <section v-if="findingDetail(f).inferredConsequence" class="ai-inference">
+                <span>AI 推断，仅供参考，不代表合同约定</span>
+                <p>{{ findingDetail(f).inferredConsequence }}</p>
+              </section>
+            </div>
+
+            <div class="advice-grid" v-if="findingRevisionAdvice(f) || f.negotiationAdvice">
+              <section v-if="findingRevisionAdvice(f)">
+                <span>条款修改建议</span>
+                <p>{{ findingRevisionAdvice(f) }}</p>
+              </section>
+              <section v-if="f.negotiationAdvice">
+                <span>谈判口径</span>
+                <p>{{ f.negotiationAdvice }}</p>
+              </section>
+            </div>
+
+            <section v-if="findingReviewQuestions(f).length" class="verification-list">
+              <span>人工复核问题</span>
+              <ul><li v-for="point in findingReviewQuestions(f)" :key="point">{{ point }}</li></ul>
+            </section>
+            <div class="finding-buttons" v-if="f.status === 'OPEN'">
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'REMEDIATED')">标记已修改</button>
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'DISMISSED')">驳回</button>
+            </div>
+          </div>
+        </article>
+      </section>
     </section>
 
     <!-- Obligations -->
@@ -584,7 +718,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
 import api from '../api/index.js'
@@ -596,6 +730,7 @@ import {
 
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const running = ref(false)
+const expandedFindings = reactive(new Set())
 const showUpload = ref(false)
 const uploading = ref(false)
 const upload = ref({ mode: 'file', docType: 'MAIN', fileName: '', filePath: '', contentText: '', file: null })
@@ -617,8 +752,61 @@ const evidenceDialog = reactive({
   available: [],
   selectedIds: [],
 })
+let caseRefreshTimer = null
+let caseRefreshInFlight = false
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
+const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
+const analysisStages = computed(() => {
+  const workflow = analysisWorkflow.value
+  const status = String(workflow.status || '').toUpperCase()
+  const current = String(workflow.currentStage || '').toUpperCase()
+  const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
+    || ['HUMAN_CONFIRMATION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
+  const confirmDone = ['READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
+    || ['RISK_REVIEW', 'REPORT_READY'].includes(current)
+  const reviewDone = status === 'COMPLETED' || current === 'REPORT_READY'
+  const failedStage = status === 'FAILED' ? current : ''
+  return [
+    { index: '01', key: 'DOCUMENT_PARSE', label: '文档解析', description: '读取正文并建立条款证据', state: failedStage === 'DOCUMENT_PARSE' ? 'error' : parseDone ? 'done' : status === 'PARSING' ? 'active' : 'pending' },
+    { index: '02', key: 'HUMAN_CONFIRMATION', label: '人工确认', description: '核对主体、日期和关键字段', state: failedStage === 'HUMAN_CONFIRMATION' ? 'error' : confirmDone ? 'done' : status === 'WAITING_CONFIRMATION' ? 'active' : 'pending' },
+    { index: '03', key: 'RISK_REVIEW', label: '风险审查', description: '检索证据并分析适用风险', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : status === 'READY_FOR_REVIEW' || status === 'REVIEWING' ? 'active' : 'pending' },
+    { index: '04', key: 'REPORT_READY', label: '报告生成', description: '保存报告、发现和处理建议', state: reviewDone ? 'done' : 'pending' },
+  ]
+})
+const primaryLifecycleCondition = computed(() => {
+  const values = Array.isArray(c.value.lifecycleConditions) ? c.value.lifecycleConditions : []
+  return values.find(item => item.manualOverride) || values[0] || null
+})
+const documentPipelineActive = computed(() => {
+  const documents = Array.isArray(c.value.documents) ? c.value.documents : []
+  return documents.find(document => {
+    const status = String(document.pipelineStatus || document.parseStatus || '').toUpperCase()
+    return ['UPLOADED', 'PROCESSING', 'PENDING', 'PARSING'].includes(status)
+  }) || null
+})
+const documentPipelineProgress = computed(() => {
+  const value = Number(documentPipelineActive.value?.pipelineProgress)
+  return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 0
+})
+const findingGroups = computed(() => {
+  const groups = new Map()
+  const severityOrder = { HIGH: 0, MEDIUM: 1, LOW: 2 }
+  for (const finding of Array.isArray(c.value.findings) ? c.value.findings : []) {
+    const detail = findingDetail(finding)
+    const key = detail.domainKey || finding.clauseType || 'OTHER'
+    if (!groups.has(key)) groups.set(key, { key, name: findingDomainName(finding), items: [], highCount: 0 })
+    const group = groups.get(key)
+    group.items.push(finding)
+    if (finding.severity === 'HIGH') group.highCount += 1
+  }
+  return Array.from(groups.values())
+    .map(group => ({
+      ...group,
+      items: group.items.sort((a, b) => (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)),
+    }))
+    .sort((a, b) => b.highCount - a.highCount || a.name.localeCompare(b.name, 'zh-CN'))
+})
 const intakeAttentionCount = computed(() => {
   const keys = ['contractTitle', 'contractType', 'amount', 'currency', 'signedDate', 'effectiveDate', 'expiryDate']
   return keys.filter(key => intakeFieldTone(key) !== 'ok').length + (intakeFields.value?.ourSide ? 0 : 1)
@@ -632,6 +820,12 @@ const intakeOurSideLabel = computed(() => {
 const primaryAction = computed(() => {
   const status = c.value.status
   const hasRunning = c.value.runs?.some(r => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(r.status))
+  if (analysisWorkflow.value.status === 'WAITING_CONFIRMATION' || status === 'INTAKE_CONFIRMING') {
+    return { label: '确认识别结果', taskType: null, disabled: false, openIntake: true }
+  }
+  if (analysisWorkflow.value.status === 'PARSING' || status === 'INTAKE_PARSING') {
+    return { label: '等待文档处理', taskType: null, disabled: true }
+  }
   if (hasRunning || status === 'REVIEWING') return { label: '查看审查进度', taskType: null, disabled: false, scrollTo: 'runs' }
   if (c.value.findings?.some(f => f.status === 'OPEN')) return { label: '处理审查发现', taskType: null, disabled: false, scrollTo: 'findings' }
   if (status === 'PENDING_APPROVAL') return { label: '生成审批意见', taskType: 'APPROVAL_DECISION', disabled: false }
@@ -640,7 +834,15 @@ const primaryAction = computed(() => {
   return { label: '开始合同审查', taskType: 'CONTRACT_REVIEW', disabled: false }
 })
 
-onMounted(loadCase)
+onMounted(() => {
+  loadCase()
+  caseRefreshTimer = window.setInterval(() => {
+    if (documentPipelineActive.value && !caseRefreshInFlight) refreshCase().catch(() => {})
+  }, 3500)
+})
+onBeforeUnmount(() => {
+  if (caseRefreshTimer) window.clearInterval(caseRefreshTimer)
+})
 
 async function loadCase() {
   loading.value = true
@@ -716,14 +918,19 @@ async function openTextPreview(document) {
 }
 
 async function refreshCase() {
-  const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
-  c.value = r.data.data
-  if (selectedTimelineNode.value) {
-    selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
-      String(node.sourceId || node.id) === String(selectedTimelineNode.value.sourceId || selectedTimelineNode.value.id)
-    ) || selectedTimelineNode.value
+  caseRefreshInFlight = true
+  try {
+    const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
+    c.value = r.data.data
+    if (selectedTimelineNode.value) {
+      selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
+        String(node.sourceId || node.id) === String(selectedTimelineNode.value.sourceId || selectedTimelineNode.value.id)
+      ) || selectedTimelineNode.value
+    }
+    checkPendingIntake()
+  } finally {
+    caseRefreshInFlight = false
   }
-  checkPendingIntake()
 }
 
 function checkPendingIntake() {
@@ -842,23 +1049,59 @@ function parseStatusLabel(document) {
   return labels[document.parseStatus] || document.parseStatus
 }
 
+function documentPipelineAction(document) {
+  if (document?.pipelineAction) return document.pipelineAction
+  const labels = {
+    UPLOADED: '正在准备合同文件',
+    DOCUMENT_START: '正在读取合同文件',
+    TEXT_PARSING: '正在读取合同文字',
+    PDF_PARSING: '正在读取合同文字',
+    PDF_RECOGNITION_OPTIMIZATION: '正在优化文字识别',
+    DOC_CONVERSION: '正在整理 Word 文档',
+    DOCX_PARSING: '正在读取 Word 文档',
+    CLAUSE_SPLITTING: '正在识别合同条款',
+    CLAUSE_PERSISTING: '正在保存条款证据',
+    TIMELINE_EXTRACTING: '正在提取合同时间节点',
+    LIFECYCLE_EXTRACTING: '正在识别合同结束条件',
+    EMBEDDING: '正在建立合同语义检索',
+    INDEXING: '正在整理合同检索索引',
+  }
+  const stage = String(document?.pipelineStage || '').toUpperCase()
+  return labels[stage] || (String(document?.pipelineStatus || '').toUpperCase() === 'FAILED' ? '合同解析失败' : '正在处理合同文件')
+}
+function documentPipelineStatusActive(document) {
+  return ['UPLOADED', 'PROCESSING', 'PENDING', 'PARSING'].includes(
+    String(document?.pipelineStatus || document?.parseStatus || '').toUpperCase()
+  )
+}
+
 async function startRun(taskType) {
   running.value = true
   try {
     await api.post(`/api/workspace/contracts/${route.params.id}/runs`, { taskType, triggerType: 'MANUAL', question: taskQuestion(taskType) })
     message.success('Agent 任务已创建')
     setTimeout(refreshCase, 2000)
-  } catch (e) { message.error('启动失败') }
+  } catch (e) { message.error(e.response?.data?.message || e.message || '启动失败') }
   finally { running.value = false }
 }
 
 function handlePrimaryAction() {
   const action = primaryAction.value
+  if (action.openIntake) {
+    openIntakeConfirmation()
+    return
+  }
   if (action.scrollTo) {
     document.querySelector(`[data-section="${action.scrollTo}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
     return
   }
   if (action.taskType) startRun(action.taskType)
+}
+
+function openIntakeConfirmation() {
+  if (!intakeFields.value) checkPendingIntake()
+  if (intakeFields.value) showIntakeModal.value = true
+  else message.info('识别结果还未准备好，请等待文档解析完成')
 }
 
 async function updateFinding(findingId, status) {
@@ -872,7 +1115,8 @@ async function updateFinding(findingId, status) {
 }
 
 function canFulfillmentCheck(node) {
-  return (node.sourceType || node.source) === 'PIPELINE_TIMELINE' && Number(node.sourceId || 0) > 0
+  return (node.sourceType || node.source) === 'PIPELINE_TIMELINE'
+    && Number(node.sourceId || 0) > 0
 }
 function fulfillmentHistory(node) {
   return Array.isArray(node.fulfillmentCheckHistory) ? node.fulfillmentCheckHistory : []
@@ -1061,14 +1305,21 @@ function manualResultLabel(value) {
 function timelineKey(node) { return `${node.id || ''}-${node.label || ''}-${timelineDateValue(node) || timelineCondition(node) || ''}` }
 function timelineDateValue(node) { return node.nodeDate || node.date || '' }
 function timelineCondition(node) { return node.conditionText || node.condition || '' }
+function timelineNeedsRecognition(node) {
+  const citation = timelineCitation(node)
+  return ['NEEDS_RECOGNITION', 'NEEDS_REVIEW'].includes(String(node?.status || '').toUpperCase())
+    && Boolean(citation?.textQuality?.requiresReview || citation?.textQuality?.level === 'LOW' || node?.status === 'NEEDS_RECOGNITION')
+}
 function timelineDateLabel(node) {
   const result = relativeDateResult(node)
   if (result.resolvedDate) return result.resolvedDate
   if (timelineDateValue(node)) return timelineDateValue(node)
-  return timelineCondition(node) || '待确认'
+  return timelineConditionDisplay(node) || '待确认'
 }
 function timelineMeaning(node) {
-  return sanitizeTimelineMeaning(node.businessMeaning || node.description || timelineCondition(node))
+  const meaning = sanitizeTimelineMeaning(node.businessMeaning || node.description || '')
+  if (meaning && !isGenericTimelineMeaning(meaning)) return meaning
+  return timelineAction(node)
     || (timelineDateValue(node) ? '来自合同正文提取的履约时间点。' : '来自合同正文或案件字段的时间节点。')
 }
 function timelineCitation(node) {
@@ -1088,12 +1339,42 @@ function timelineFullQuote(node) {
 function timelineAction(node) {
   const enrichment = timelineCitation(node)?.timelineEnrichment || {}
   const enriched = sanitizeTimelineMeaning(enrichment.businessMeaning || '')
-  if (enriched) return enriched
+  if (enriched && !isGenericTimelineMeaning(enriched)) return enriched
   const sourceText = timelineCondition(node)
     ? (timelineFullQuote(node) || timelineQuote(node))
     : (timelineQuote(node) || timelineFullQuote(node))
-  const action = deriveTimelineAction(sourceText, timelineCondition(node))
-  return action || timelineMeaning(node)
+  const action = deriveTimelineAction(sourceText, timelineConditionDisplay(node))
+  if (action && !isGenericTimelineMeaning(action)) return action
+  return enriched || sanitizeTimelineMeaning(node.businessMeaning || '')
+}
+function timelineQualityNote(node) {
+  return timelineNeedsRecognition(node)
+    ? '当前节点已保留供参考，但识别文字可能有误；请核对合同原页后再用于履约判断。'
+    : ''
+}
+function isGenericTimelineMeaning(value) {
+  const text = sanitizeTimelineMeaning(value)
+  return !text
+    || /^(?:需要跟踪|需要关注|来自合同正文|来自合同或案件字段|合同时间节点|请关注[“"]?合同期限)/.test(text)
+    || /来源\s*=|原文片段/.test(text)
+}
+function timelineConditionDisplay(node) {
+  const raw = String(timelineCondition(node) || '').replace(/\s+/g, ' ').trim()
+  if (!raw) return ''
+  let text = raw
+    .replace(/^[^:：]{0,16}[:：]\s*(?=(?:两台|合同|乙方|甲方|对方|我方|收到|不可抗力|期满|验收|交付|付款|书面通知))/i, '')
+    .replace(/^["'`]?f?l?\\?\d{0,2}\s*(?=方)/i, '一')
+    .replace(/[:：]\s*[\\|Il]{0,3}\s*0\s*(?=(?:天|日|个月|月|年))/gi, '：数字待核对')
+  return text || raw
+}
+function lifecycleEvents(condition) {
+  const value = condition?.conditions
+  if (Array.isArray(value)) return value
+  if (value && Array.isArray(value.events)) return value.events
+  return []
+}
+function lifecycleSourceLabel(condition) {
+  return condition?.source === 'LLM_ENRICHED' ? '合同原文 · Agent 复核' : '合同原文 · 待复核'
 }
 function timelineContractRequirements(node) {
   const values = timelineCitation(node)?.timelineEnrichment?.contractRequirements
@@ -1189,14 +1470,14 @@ function knowledgeChangeSummary(doc) {
 function timelineSourceLabel(node) {
   const source = node.source || node.sourceType || ''
   return {
-    RULE_EXTRACTED: '文档解析',
-    RULE_CANDIDATE: '规则候选',
-    LLM_ENRICHED: '规则提取 · Agent 复核',
-    CASE_FIELD: '案件字段',
-    PIPELINE_TIMELINE: '文档解析',
-    OBLIGATION: '履约义务',
-    AGENT_OBLIGATION: 'Agent 提取',
-  }[source] || source || '时间节点'
+    RULE_EXTRACTED: '合同原文',
+    RULE_CANDIDATE: '合同原文',
+    LLM_ENRICHED: '合同原文 · AI 整理',
+    CASE_FIELD: '案件信息',
+    PIPELINE_TIMELINE: '合同原文',
+    OBLIGATION: '合同义务',
+    AGENT_OBLIGATION: '合同义务 · AI 整理',
+  }[source] || (source ? '合同原文' : '时间节点')
 }
 function timelineTypeLabel(type) {
   return {
@@ -1240,15 +1521,81 @@ function typeLabel(t) { return { SERVICE_PROCUREMENT:'服务采购', GOODS_PURCH
 function partyRoleLabel(r) { return { OUR_ENTITY:'我方', COUNTERPARTY:'对方', GUARANTOR:'担保方' }[r] || r }
 function docTypeLabel(t) { return { MAIN:'主合同', ATTACHMENT:'附件', PRICING:'报价', CERTIFICATE:'资质', FULFILLMENT_EVIDENCE:'履约证据' }[t] || t }
 function runStatusClass(s) { return { COMPLETED:'ok', FAILED:'error' }[s] || '' }
-function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', ANALYZING:'审查中', VERIFYING:'验证中', COMPLETED:'完成', FAILED:'失败' }[s] || s }
+function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', PLANNING:'规划中', ANALYZING:'审查中', VERIFYING:'验证中', WAITING_HUMAN:'等待人工确认', COMPLETED:'完成', FAILED:'失败', CANCELLED:'已取消' }[s] || s }
 function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批决策', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验' }[t] || t }
 function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据' }[t] || '执行合同任务' }
+function workflowStatusLabel(s) { return { PARSING:'文档处理中', WAITING_CONFIRMATION:'待人工确认', READY_FOR_REVIEW:'待风险审查', REVIEWING:'风险审查中', COMPLETED:'分析完成', FAILED:'需要处理' }[s] || '分析流程' }
+function workflowStatusClass(s) { return { PARSING:'active', WAITING_CONFIRMATION:'attention', READY_FOR_REVIEW:'ready', REVIEWING:'active', COMPLETED:'done', FAILED:'error' }[s] || '' }
 function findingStatusLabel(s) { return { OPEN:'未处理', REMEDIATED:'已修改', ACCEPTED_EXCEPTION:'已接受例外', DISMISSED:'已驳回' }[s] || s }
 function obligationStatusLabel(s) { return { PLANNED:'计划中', DUE_SOON:'即将到期', COMPLETED:'已完成', OVERDUE:'已逾期', ESCALATED:'已升级', WAIVED:'已豁免' }[s] || s }
 function severityLabel(s) { return { HIGH:'高危', MEDIUM:'中危', LOW:'低危' }[s] || s || '中危' }
 function riskStatusLabel(s) { return { LOW_RISK:'低风险', MEDIUM_RISK:'中风险', HIGH_RISK:'高风险' }[s] || s || '未评分' }
 function clauseTypeLabel(t) { return { LIABILITY:'责任违约', PAYMENT:'商务付款', CONFIDENTIALITY:'保密合规', ACCEPTANCE:'验收交付', TERMINATION:'终止续签', IP:'知识产权', DATA_PROTECTION:'数据保护', OTHER:'其他' }[t] || t || '其他' }
 function suggestedActionLabel(a) { return { CREATE_NEGOTIATION_TASK:'创建协商任务', REQUEST_MATERIAL:'补充材料', REQUEST_LEGAL_REVIEW:'法务复核', SCHEDULE_REMINDER:'设置提醒' }[a] || a }
+function findingDetail(finding) {
+  const value = finding?.detailJson
+  if (!value) return {}
+  if (typeof value === 'object') return value
+  try { return JSON.parse(value) || {} } catch { return {} }
+}
+function findingDomainName(finding) {
+  return findingDetail(finding).domainName || clauseTypeLabel(finding?.clauseType)
+}
+function findingHeadline(finding) {
+  return findingDetail(finding).frontendDisplay?.headline || finding?.title || '合同风险待复核'
+}
+function findingOneLine(finding) {
+  const detail = findingDetail(finding)
+  return detail.frontendDisplay?.summary || detail.oneLineSummary || finding?.description || '请展开查看风险依据与处理建议。'
+}
+function findingKeyPoint(finding) {
+  const detail = findingDetail(finding)
+  return detail.frontendDisplay?.primaryAction || detail.keyPoint || findingRevisionAdvice(finding) || suggestedActionLabel(finding?.suggestedAction) || '人工复核合同条款与适用规则'
+}
+function findingExplanation(finding) {
+  const detail = findingDetail(finding)
+  return detail.riskExplanation || finding?.description || ''
+}
+function findingBusinessImpact(finding) {
+  const detail = findingDetail(finding)
+  return detail.businessImpact || finding?.impact || ''
+}
+function findingRevisionAdvice(finding) {
+  const detail = findingDetail(finding)
+  return detail.revisionAdvice || finding?.remediationAdvice || ''
+}
+function findingContractBasis(finding) {
+  return findingDetail(finding).contractBasis?.summary || citationLabel(finding?.contractCitation)
+}
+function findingKnowledgeBasis(finding) {
+  return findingDetail(finding).knowledgeBasis?.summary || policyLabel(finding?.policyCitation, finding?.ruleKey)
+}
+function findingHasContractBasis(finding) {
+  const detail = findingDetail(finding)
+  return Boolean(finding?.contractCitation || detail.contractBasis?.citations?.length || detail.contractCitationIds?.length)
+}
+function findingHasPolicyBasis(finding) {
+  const detail = findingDetail(finding)
+  return Boolean(finding?.policyCitation || detail.knowledgeBasis?.citations?.length || detail.policyCitationIds?.length)
+}
+function findingReviewQuestions(finding) {
+  const detail = findingDetail(finding)
+  const values = [
+    ...(Array.isArray(detail.reviewQuestions) ? detail.reviewQuestions : []),
+    ...(Array.isArray(finding?.verificationPoints) ? finding.verificationPoints : []),
+  ].map(String).filter(Boolean)
+  return [...new Set(values)]
+}
+function findingCountBySeverity(severity) {
+  return (c.value.findings || []).filter(finding => finding.severity === severity).length
+}
+function findingExpansionKey(finding) { return String(finding?.id || finding?.title || '') }
+function isFindingExpanded(finding) { return expandedFindings.has(findingExpansionKey(finding)) }
+function toggleFinding(finding) {
+  const key = findingExpansionKey(finding)
+  if (expandedFindings.has(key)) expandedFindings.delete(key)
+  else expandedFindings.add(key)
+}
 function citationLabel(citation) {
   if (!citation || typeof citation !== 'object') return '暂无合同引用'
   const loc = citation.clause || citation.clauseNumber || (citation.page ? `第 ${citation.page} 页` : '')
@@ -1296,6 +1643,31 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .meta-grid div:nth-child(3n){border-right:0}
 .meta-grid span{display:block;font-size:10px;font-weight:800;color:var(--atlas-subtle);text-transform:uppercase}
 .meta-grid strong{display:block;margin-top:4px;font-size:13px;color:var(--atlas-text)}
+.analysis-workflow-panel{margin:-8px 0 24px;padding:17px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px}
+.analysis-workflow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.analysis-workflow-head .section-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+.analysis-workflow-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:17px}
+.analysis-workflow-head p{margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.workflow-status{flex:0 0 auto;padding:5px 8px;border-radius:3px;font-size:10px;font-weight:900}
+.workflow-status.active{color:#315d8b;background:#edf4fa}.workflow-status.attention{color:#8a5b14;background:#fff4db}.workflow-status.ready{color:#246744;background:#eaf6ef}.workflow-status.done{color:#246744;background:#dceee3}.workflow-status.error{color:#a33f39;background:#fff0ee}
+.analysis-workflow-stages{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:15px}
+.analysis-workflow-stage{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:10px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:3px}
+.workflow-stage-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:3px;background:#e9edf0;color:var(--atlas-subtle);font-size:10px;font-weight:900}
+.analysis-workflow-stage strong{display:block;color:var(--atlas-text);font-size:11px;line-height:1.4}.analysis-workflow-stage small{display:block;margin-top:3px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.analysis-workflow-stage.done{border-color:#b9d8c5;background:#f4faf6}.analysis-workflow-stage.done .workflow-stage-mark{color:#fff;background:#347254}.analysis-workflow-stage.active{border-color:#b7cde0;background:#f5f9fc}.analysis-workflow-stage.active .workflow-stage-mark{color:#fff;background:var(--atlas-primary)}.analysis-workflow-stage.error{border-color:#e4b2ad;background:#fff7f6}.analysis-workflow-stage.error .workflow-stage-mark{color:#fff;background:#b35c56}
+.analysis-workflow-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.analysis-workflow-foot small{color:var(--atlas-subtle);font-size:10px;word-break:break-all}.analysis-workflow-foot .small{min-height:32px;padding:0 10px;font-size:11px}
+.document-progress-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 18px;align-items:center;margin:-8px 0 24px;padding:16px 18px;border:1px solid #b7cde0;border-left:4px solid var(--atlas-primary);background:#f5f9fc}
+.document-progress-copy{min-width:0}.document-progress-copy h3{margin:3px 0 4px;color:var(--atlas-text);font-size:14px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.document-progress-copy p{margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.55}.document-progress-value{display:flex;flex-direction:column;align-items:flex-end;gap:2px}.document-progress-value strong{color:var(--atlas-primary);font-size:20px;font-variant-numeric:tabular-nums}.document-progress-value span{color:var(--atlas-subtle);font-size:10px}.document-progress-track{grid-column:1 / -1;height:4px;overflow:hidden;background:#dbe6f0}.document-progress-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
+.contract-diagnostics{display:grid;gap:10px;margin:-8px 0 24px}
+.contract-end-condition{display:grid;grid-template-columns:88px minmax(0,1fr);gap:16px;align-items:start;padding:15px 17px;border:1px solid var(--atlas-border);background:var(--atlas-surface)}
+.contract-end-condition{border-left:4px solid #347254;background:#f3f8f5}
+.diagnostic-mark{color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.04em;text-transform:uppercase}
+.contract-end-condition strong{display:block;color:var(--atlas-text);font-size:13px;line-height:1.5}
+.contract-end-condition ol{display:grid;gap:5px;margin:9px 0 7px;padding:0;list-style:none;counter-reset:end-condition}
+.contract-end-condition li{color:var(--atlas-text);font-size:12px;line-height:1.55;counter-increment:end-condition}
+.contract-end-condition li:before{content:counter(end-condition);display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;margin-right:6px;color:#347254;background:#dceee3;border-radius:3px;font-size:10px;font-weight:900}
+.contract-end-condition li span{margin-right:5px;color:#347254;font-size:10px;font-weight:900}
+.contract-end-condition small{color:var(--atlas-subtle);font-size:10px;line-height:1.5}
 
 .timeline-panel{margin-bottom:24px;padding:18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
 .timeline-panel-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
@@ -1399,31 +1771,57 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .party-row span,.doc-row span,.run-row span,.finding-row span,.obligation-row span{padding:2px 6px;border-radius:2px;font-size:9px;font-weight:800}
 .party-row strong,.doc-row strong,.run-row strong,.finding-row strong,.obligation-row strong{flex:1;color:var(--atlas-text)}
 .doc-row small,.run-row small,.finding-row small,.obligation-row small{color:var(--atlas-subtle);font-size:10px;white-space:nowrap}
-.finding-sev.sev-high{color:#b35c56;background:rgba(179,92,86,.08)}
-.finding-sev.sev-medium{color:var(--atlas-warning);background:rgba(167,121,61,.08)}
-.finding-sev.sev-low{color:#7d9a87;background:rgba(125,154,135,.08)}
-.finding-card{padding:14px 0;border-top:1px solid var(--atlas-border)}
-.finding-card:first-of-type{border-top:0;padding-top:2px}
-.finding-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
-.finding-head small{margin-left:auto;color:var(--atlas-subtle);font-size:10px}
+.doc-row{flex-wrap:wrap}.doc-pipeline-action{flex:1 0 100%;margin-left:78px;color:var(--atlas-primary)!important}.doc-pipeline-track{flex:1 0 100%;height:3px;margin-left:78px;overflow:hidden;background:var(--atlas-border)}.doc-pipeline-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
+.risk-workbench{margin:28px 0 22px;padding:0;border-top:2px solid var(--atlas-text);border-bottom:1px solid var(--atlas-border)}
+.risk-workbench-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:18px 0 16px}
+.risk-workbench-head h3{margin:3px 0 5px;font-family:var(--atlas-font-display);font-size:22px;color:var(--atlas-text)}
+.risk-workbench-head p{max-width:650px;margin:0;color:var(--atlas-muted);font-size:12px;line-height:1.6}
+.section-kicker{color:var(--atlas-primary);font-size:10px;font-weight:900}
+.risk-counts{display:flex;align-items:stretch;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface)}
+.risk-counts>span{display:flex;align-items:baseline;gap:5px;min-width:82px;padding:9px 11px;border-left:1px solid var(--atlas-border);color:var(--atlas-muted);font-size:10px;font-weight:800;white-space:nowrap}
+.risk-counts>span:first-child{border-left:0}
+.risk-counts strong{font-size:19px;line-height:1;color:var(--atlas-text)}
+.risk-counts .high strong{color:#9f3f3a}.risk-counts .medium strong{color:#8b642d}.risk-counts .low strong{color:#387052}
+.risk-domain-group{padding:14px 0 18px;border-top:1px solid var(--atlas-border)}
+.risk-domain-head{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-bottom:9px}
+.risk-domain-head div{display:flex;align-items:baseline;gap:9px}
+.risk-domain-head span{color:var(--atlas-subtle);font-size:10px;font-weight:800}
+.risk-domain-head h4{margin:0;color:var(--atlas-text);font-size:14px}
+.risk-domain-head small{color:#9f3f3a;font-size:10px;font-weight:800}
+.finding-sev{display:inline-flex;align-items:center;justify-content:center;min-width:54px;padding:4px 7px;border-radius:3px;font-size:10px;font-weight:900}
+.finding-sev.sev-high{color:#903933;background:#f8e7e5;border:1px solid #e7bbb7}
+.finding-sev.sev-medium{color:#7b591f;background:#fbf2df;border:1px solid #ead4a2}
+.finding-sev.sev-low{color:#2f694b;background:#e8f3ec;border:1px solid #bfd8c8}
+.finding-card{position:relative;margin-top:8px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid #8290a0;border-radius:4px;overflow:hidden}
+.finding-card.finding-high{border-left-color:#a84640}.finding-card.finding-medium{border-left-color:#a67834}.finding-card.finding-low{border-left-color:#477b5d}
+.finding-summary-row{display:grid;grid-template-columns:68px minmax(0,1fr) auto;gap:14px;align-items:start;padding:15px 16px}
+.finding-rank{display:flex;flex-direction:column;align-items:flex-start;gap:7px}
+.finding-rank small{color:var(--atlas-subtle);font-size:9px;font-weight:700}
+.finding-summary-main{min-width:0}
+.finding-title-line{display:flex;align-items:flex-start;gap:9px;flex-wrap:wrap}
+.finding-title-line h5{min-width:0;margin:0;color:var(--atlas-text);font-size:15px;line-height:1.45}
 .clause-pill{padding:2px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-muted);font-size:9px;font-weight:800;background:var(--atlas-bg)}
-.finding-card>strong{display:block;margin-bottom:6px;color:var(--atlas-text);font-size:14px}
-.finding-card p{margin:0 0 8px;color:var(--atlas-muted);font-size:12px;line-height:1.65}
-.impact-text{color:#8b5e34!important}
-.advice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
-.advice-grid div{padding:10px;background:#fff;border:1px solid var(--atlas-border);border-radius:4px}
-.advice-grid span,.verification-list>span{display:block;margin-bottom:5px;color:var(--atlas-subtle);font-size:10px;font-weight:900}
-.advice-grid p{margin:0;color:var(--atlas-text);font-size:12px;line-height:1.65}
-.verification-list{margin-top:8px;padding:10px;background:rgba(63,127,93,.06);border:1px solid rgba(63,127,93,.16);border-radius:4px}
+.finding-one-line{margin:6px 0 0;color:var(--atlas-muted);font-size:12px;line-height:1.65}
+.finding-key-action{display:flex;align-items:flex-start;gap:9px;margin-top:9px;padding:8px 10px;background:#f2f6f9;border-left:3px solid var(--atlas-primary)}
+.finding-key-action span{flex:0 0 auto;color:var(--atlas-primary);font-size:9px;font-weight:900}
+.finding-key-action strong{color:var(--atlas-text);font-size:11px;line-height:1.5}
+.finding-source-strip{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.finding-source-strip span{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);background:var(--atlas-bg);font-size:9px;font-weight:800}
+.finding-source-strip span.active{color:#31634a;background:#edf6f0;border-color:#c6dccd}
+.finding-expand{min-width:78px;min-height:36px;padding:0 10px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-primary);font-size:11px;font-weight:900;cursor:pointer;transition:border-color .18s ease,background .18s ease}
+.finding-expand:hover{border-color:var(--atlas-primary);background:#f3f7fa}.finding-expand:focus-visible{outline:2px solid var(--atlas-primary);outline-offset:2px}
+.finding-detail{padding:16px 16px 17px 98px;background:#f8fafc;border-top:1px solid var(--atlas-border)}
+.finding-detail>section{margin-top:13px}.finding-detail>section:first-child{margin-top:0}
+.finding-detail span,.finding-evidence-grid span,.finding-consequence-grid span,.advice-grid span,.verification-list>span{display:block;margin-bottom:5px;color:var(--atlas-subtle);font-size:10px;font-weight:900}
+.finding-detail p{margin:0;color:var(--atlas-text);font-size:12px;line-height:1.75;white-space:pre-wrap}
+.finding-evidence-grid,.finding-consequence-grid,.advice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:13px}
+.finding-evidence-grid section,.finding-consequence-grid section,.advice-grid section{padding:11px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
+.finding-evidence-grid section:first-child{border-top:3px solid #416f9b}.finding-evidence-grid section:last-child{border-top:3px solid #477b5d}
+.finding-evidence-grid blockquote{margin:8px 0 0;padding:8px 9px;background:var(--atlas-bg);border-left:2px solid var(--atlas-border);color:var(--atlas-muted);font-size:11px;line-height:1.6}
+.finding-consequence-grid section{border-left:3px solid #a84640}.finding-consequence-grid .ai-inference{border-left-color:#a67834;background:#fffaf0}
+.verification-list{margin-top:13px;padding:11px;background:#edf6f0;border:1px solid #c6dccd;border-radius:4px}
 .verification-list ul{margin:0;padding-left:16px;color:var(--atlas-text);font-size:12px;line-height:1.7}
 .verification-list li+li{margin-top:3px}
-.citation-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-top:10px}
-.citation-grid div{padding:10px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
-.citation-grid span,.finding-action-line span{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900}
-.citation-grid small{display:block;color:var(--atlas-text);font-size:11px;line-height:1.5;white-space:normal}
-.finding-action-line{display:flex;align-items:center;gap:10px;margin-top:8px;padding:9px 10px;background:rgba(66,111,166,.06);border-left:3px solid var(--atlas-primary)}
-.finding-action-line span{margin:0;white-space:nowrap}
-.finding-action-line strong{font-size:12px;color:var(--atlas-text)}
 .finding-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -1532,9 +1930,11 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .timeline-date-column strong{color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:18px;line-height:1.25;font-variant-numeric:tabular-nums;word-break:break-word}
 .timeline-date-column small{margin-top:5px;color:var(--atlas-subtle);font-size:10px;font-weight:700}
 .basis-warning{display:inline-flex;width:fit-content;margin-top:6px;padding:3px 6px;color:#8a5b14;background:#fff8e6;border:1px solid #e7c878;border-radius:3px;font-size:10px;font-weight:900}
+.recognition-warning{display:inline-flex;width:fit-content;margin-top:6px;padding:3px 6px;color:#984e2a;background:#fff0e8;border:1px solid #e5b397;border-radius:3px;font-size:10px;font-weight:900}
 .timeline-type{display:block;margin-bottom:4px;color:var(--atlas-primary);font-size:10px;font-weight:900}
 .timeline-node-main h4{margin:0;color:var(--atlas-text);font-size:15px;line-height:1.4}
 .timeline-action{margin:6px 0 0;color:var(--atlas-muted);font-size:13px;line-height:1.65;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.timeline-quality-note,.detail-quality-note{display:block;margin:6px 0 0;color:#984e2a;font-size:10px;line-height:1.5}.detail-quality-note{max-width:680px}
 .timeline-node-meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}
 .timeline-node-meta small{color:var(--atlas-subtle);font-size:10px}
 .timeline-row-actions{display:flex;flex-direction:column;gap:7px}
@@ -1605,8 +2005,10 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-summary-row>strong{color:var(--atlas-text);font-size:17px}
 
 @media(max-width:700px){
-  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}
+  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}
+  .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
   .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}
   .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}
 }
+@media(prefers-reduced-motion:reduce){.finding-expand{transition:none}}
 </style>

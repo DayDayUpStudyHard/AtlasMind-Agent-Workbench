@@ -19,6 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt ./
 RUN pip install -r requirements.txt
 
+# Contract PDF auto-reparse uses PaddleOCR when the extracted text layer is
+# malformed. Keep this in the Worker image so a low-quality PDF is upgraded
+# automatically instead of being silently accepted as normal text.
+COPY requirements-ocr.txt ./
+RUN pip install -r requirements-ocr.txt
+
 COPY . .
 
 EXPOSE 18088

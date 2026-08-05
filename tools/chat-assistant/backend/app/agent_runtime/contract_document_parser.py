@@ -13,13 +13,13 @@ import tempfile
 from pathlib import Path
 
 from app.config import settings
-from app.services.document_parser import DocumentParser
+from app.services.document_parser import DocumentParser, assess_extracted_text_quality
 from app.services.embedding_service import EmbeddingService
 from app.services.es_service import ESService
 from app.services.llm_service import LLMService
 
 from .contract_docx_parser import parse_docx_blocks
-from .persistence import _conn
+from .persistence import new_connection
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +162,74 @@ def _update_job(
         )
 
 
+def _ensure_analysis_workflow(cur, case_id: int, document_id: int, document_version: int | None) -> int:
+    """Return the analysis workflow for a main document, creating a legacy one if needed."""
+    cur.execute(
+        """SELECT id FROM contract_analysis_workflow
+           WHERE case_id=%s AND document_id=%s
+           ORDER BY id DESC LIMIT 1""",
+        (case_id, document_id),
+    )
+    row = cur.fetchone()
+    if row:
+        return int(row["id"])
+    cur.execute(
+        """INSERT INTO contract_analysis_workflow
+           (case_id, document_id, document_version, status, current_stage)
+           VALUES (%s,%s,%s,'PARSING','DOCUMENT_PARSE')""",
+        (case_id, document_id, document_version),
+    )
+    return int(cur.lastrowid)
+
+
+def _update_analysis_workflow(
+    cur,
+    document_id: int,
+    document_version: int | None,
+    evidence_hash: str | None,
+    status: str,
+    stage: str,
+    error_message: str | None = None,
+) -> None:
+    """Persist the reusable parse snapshot and advance the business workflow."""
+    cur.execute(
+        "SELECT case_id FROM contract_document WHERE id=%s",
+        (document_id,),
+    )
+    document = cur.fetchone() or {}
+    case_id = document.get("case_id")
+    if not case_id:
+        return
+    workflow_id = _ensure_analysis_workflow(cur, int(case_id), document_id, document_version)
+
+    effective_status = status
+    effective_stage = stage
+    if status == "WAITING_CONFIRMATION":
+        cur.execute(
+            """SELECT i.status
+               FROM contract_analysis_workflow w
+               LEFT JOIN contract_intake i ON i.id=w.intake_id
+               WHERE w.id=%s""",
+            (workflow_id,),
+        )
+        intake = cur.fetchone() or {}
+        intake_status = str(intake.get("status") or "").upper()
+        # Existing cases can upload a replacement main document without an intake
+        # row; their already-confirmed case metadata is the confirmation boundary.
+        if not intake_status or intake_status == "CONFIRMED":
+            effective_status = "READY_FOR_REVIEW"
+            effective_stage = "RISK_REVIEW"
+
+    cur.execute(
+        """UPDATE contract_analysis_workflow
+           SET document_version=%s, evidence_snapshot_hash=%s,
+               status=%s, current_stage=%s, last_error=%s
+           WHERE id=%s""",
+        (document_version, evidence_hash, effective_status, effective_stage,
+         error_message[:1000] if error_message else None, workflow_id),
+    )
+
+
 def classify_clause(content: str) -> str:
     for clause_type, keywords in _TYPE_KEYWORDS:
         if any(keyword in content for keyword in keywords):
@@ -212,10 +280,12 @@ def parse_contract_document(document_id: int) -> dict:
     job_id: int | None = None
     intake_ids: list[int] = []
     try:
-        with _conn() as conn:
+        # Do not borrow the shared Agent Runtime pool for a pipeline that can
+        # wait on external services for minutes.
+        with new_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT id, case_id, content_text, file_path, file_name
+                    """SELECT id, case_id, content_text, file_path, file_name, version
                        FROM contract_document WHERE id=%s FOR UPDATE""",
                     (document_id,),
                 )
@@ -228,8 +298,24 @@ def parse_contract_document(document_id: int) -> dict:
                     "UPDATE contract_document SET parse_status='PARSING', parse_error=NULL WHERE id=%s",
                     (document_id,),
                 )
+                _update_job(cur, job_id, "PROCESSING", "DOCUMENT_START", 10)
+                if job_id:
+                    cur.execute(
+                        "UPDATE contract_document_job SET started_at=NOW() WHERE id=%s",
+                        (job_id,),
+                    )
+                _append_job_trace(
+                    cur,
+                    job_id,
+                    "DOCUMENT_START",
+                    "文档解析任务已开始，准备读取合同文件",
+                    {"documentId": document_id},
+                    {},
+                )
+                conn.commit()
 
                 parsed = _parse_document_content(cur, job_id, document_id, document)
+                conn.commit()
                 content = parsed["content"]
                 if not content.strip():
                     raise ValueError("Contract document text is empty")
@@ -250,10 +336,16 @@ def parse_contract_document(document_id: int) -> dict:
                         "sampleTitles": [clause["title"] for clause in clauses[:5]],
                     },
                 )
+                conn.commit()
 
                 cur.execute("DELETE FROM contract_clause_chunk WHERE document_id=%s", (document_id,))
                 cur.execute(
                     """DELETE FROM contract_timeline_node
+                       WHERE document_id=%s AND manual_override=0""",
+                    (document_id,),
+                )
+                cur.execute(
+                    """DELETE FROM contract_lifecycle_condition
                        WHERE document_id=%s AND manual_override=0""",
                     (document_id,),
                 )
@@ -289,18 +381,56 @@ def parse_contract_document(document_id: int) -> dict:
                     {"documentId": document_id},
                     {"clauseCount": len(clauses)},
                 )
+                conn.commit()
 
                 chunks = _persist_contract_chunks(cur, job_id, document["case_id"], document_id, persisted_clauses)
-                timeline_nodes = _persist_timeline_nodes(cur, job_id, document["case_id"], document_id, persisted_clauses)
-                index_result = _index_contract_chunks(cur, job_id, document_id)
+                conn.commit()
+                timeline_nodes = _persist_timeline_nodes(
+                    cur,
+                    job_id,
+                    document["case_id"],
+                    document_id,
+                    persisted_clauses,
+                    parsed.get("diagnostics") or {},
+                    commit_callback=conn.commit,
+                )
+                conn.commit()
+                lifecycle_conditions = _persist_lifecycle_conditions(
+                    cur,
+                    job_id,
+                    document["case_id"],
+                    document_id,
+                    persisted_clauses,
+                    commit_callback=conn.commit,
+                )
+                conn.commit()
+                index_result = _index_contract_chunks(
+                    cur, job_id, document_id, commit_callback=conn.commit
+                )
+                conn.commit()
 
                 content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
                 cur.execute(
                     """UPDATE contract_document
                        SET parse_status='READY', parse_error=NULL, page_count=%s,
-                           content_hash=%s, content_text=%s
+                           content_hash=%s, content_text=%s, parse_provider=%s,
+                           parse_quality=%s, parse_diagnostics_json=%s
                        WHERE id=%s""",
-                    (parsed["pageCount"], content_hash, content, document_id),
+                    (
+                        parsed["pageCount"], content_hash, content,
+                        parsed.get("parser"),
+                        (parsed.get("diagnostics") or {}).get("quality", {}).get("level", "UNKNOWN"),
+                        _json(parsed.get("diagnostics") or {}),
+                        document_id,
+                    ),
+                )
+                _update_analysis_workflow(
+                    cur,
+                    document_id,
+                    int(document.get("version") or 1),
+                    content_hash,
+                    "WAITING_CONFIRMATION",
+                    "HUMAN_CONFIRMATION",
                 )
                 cur.execute(
                     """UPDATE contract_case
@@ -344,10 +474,12 @@ def parse_contract_document(document_id: int) -> dict:
                         "clauseCount": len(clauses),
                         "chunkCount": len(chunks),
                         "timelineNodeCount": len(timeline_nodes),
+                        "lifecycleConditionCount": len(lifecycle_conditions),
                         "indexedChunkCount": index_result["indexed"],
                         "embeddedChunkCount": index_result["embedded"],
                         "blockCount": parsed["blockCount"],
                         "contentHash": content_hash,
+                        "parseDiagnostics": parsed.get("diagnostics") or {},
                     },
                 )
             conn.commit()
@@ -361,12 +493,14 @@ def parse_contract_document(document_id: int) -> dict:
             "jobId": job_id,
             "status": "READY",
             "clauseCount": len(clauses),
+            "timelineNodeCount": len(timeline_nodes),
+            "lifecycleConditionCount": len(lifecycle_conditions),
             "intakeIds": intake_ids,
         }
     except Exception as exc:
         logger.exception("Contract document %s parsing failed", document_id)
         try:
-            with _conn() as conn:
+            with new_connection() as conn:
                 with conn.cursor() as cur:
                     if job_id is None:
                         job_id = _latest_job_id(cur, document_id)
@@ -391,6 +525,15 @@ def parse_contract_document(document_id: int) -> dict:
                              AND i.source_type='FILE'
                              AND i.status IN ('FILE_PARSING','PENDING','EXTRACTING')""",
                         (str(exc)[:1000], document_id),
+                    )
+                    _update_analysis_workflow(
+                        cur,
+                        document_id,
+                        None,
+                        None,
+                        "FAILED",
+                        "DOCUMENT_PARSE",
+                        str(exc),
                     )
                     _update_job(cur, job_id, "FAILED", "FAILED", 100, str(exc))
                     _append_job_trace(
@@ -486,8 +629,12 @@ def _persist_timeline_nodes(
     case_id: int,
     document_id: int,
     clauses: list[dict],
+    parse_diagnostics: dict | None = None,
+    commit_callback=None,
 ) -> list[dict]:
     _update_job(cur, job_id, "PROCESSING", "TIMELINE_EXTRACTING", 88)
+    if commit_callback:
+        commit_callback()
     cur.execute(
         "SELECT effective_date AS effectiveDate FROM contract_case WHERE id=%s",
         (case_id,),
@@ -500,6 +647,20 @@ def _persist_timeline_nodes(
     for clause in clauses:
         nodes.extend(_extract_clause_timeline_nodes_v2(clause, inferred_year, effective_date, seen))
     candidate_count = len(nodes)
+    document_quality = (parse_diagnostics or {}).get("quality") or {}
+    if document_quality.get("level") == "LOW":
+        for node in nodes:
+            # Keep the rule candidate visible. The date/term is useful context
+            # even when the PDF text layer is imperfect; only its certainty is
+            # reduced until a human checks the source page.
+            node["status"] = "NEEDS_REVIEW"
+            node["confidence"] = min(float(node.get("confidence") or 0), 0.35)
+            node["citation"]["textQuality"] = {
+                **(node["citation"].get("textQuality") or {}),
+                "documentQuality": document_quality,
+                "requiresReview": True,
+                "qualityNotice": "原文可能存在识别误差，日期和数字请核对合同原页",
+            }
     nodes, enrichment = _enrich_timeline_nodes(nodes, clauses)
 
     inserted = []
@@ -539,6 +700,7 @@ def _persist_timeline_nodes(
             "candidateCount": candidate_count,
             "timelineNodeCount": len(inserted),
             "needsReview": len([n for n in inserted if n["status"] == "NEEDS_REVIEW"]),
+            "needsRecognition": len([n for n in inserted if n["citation"].get("textQuality", {}).get("requiresReview")]),
             "enrichment": enrichment,
             "sampleNodes": [
                 {
@@ -548,6 +710,67 @@ def _persist_timeline_nodes(
                     "clauseNumber": n["citation"].get("clauseNumber"),
                 }
                 for n in inserted[:5]
+            ],
+        },
+    )
+    return inserted
+
+
+def _persist_lifecycle_conditions(
+    cur,
+    job_id: int | None,
+    case_id: int,
+    document_id: int,
+    clauses: list[dict],
+    commit_callback=None,
+) -> list[dict]:
+    _update_job(cur, job_id, "PROCESSING", "LIFECYCLE_EXTRACTING", 90)
+    if commit_callback:
+        commit_callback()
+    candidates = _extract_rule_lifecycle_conditions(clauses)
+    conditions, enrichment = _enrich_lifecycle_conditions(candidates)
+    inserted: list[dict] = []
+    for item in conditions:
+        if not item.get("conditions"):
+            continue
+        cur.execute(
+            """INSERT INTO contract_lifecycle_condition
+               (case_id, document_id, clause_id, condition_type, end_mode,
+                logic_operator, summary, conditions_json, citation_json,
+                confidence, source, status, manual_override)
+               VALUES (%s,%s,%s,'CONTRACT_END',%s,%s,%s,%s,%s,%s,%s,%s,0)""",
+            (
+                case_id,
+                document_id,
+                item.get("clauseId"),
+                item.get("endMode", "CONDITIONAL"),
+                item.get("logic", "SINGLE"),
+                item.get("summary"),
+                _json({"events": item.get("conditions") or []}),
+                _json(item.get("citation") or {}),
+                item.get("confidence"),
+                item.get("source", "RULE_CANDIDATE"),
+                item.get("status", "NEEDS_REVIEW"),
+            ),
+        )
+        item["id"] = cur.lastrowid
+        inserted.append(item)
+    _append_job_trace(
+        cur,
+        job_id,
+        "LIFECYCLE_EXTRACTING",
+        f"合同结束条件识别完成：{len(inserted)} 条",
+        {"documentId": document_id, "candidateCount": len(candidates)},
+        {
+            "conditionCount": len(inserted),
+            "enrichment": enrichment,
+            "conditions": [
+                {
+                    "summary": item.get("summary"),
+                    "logic": item.get("logic"),
+                    "source": item.get("source"),
+                }
+                for item in inserted[:5]
             ],
         },
     )
@@ -617,7 +840,13 @@ def _add_timeline_node(
     if key in seen:
         return
     seen.add(key)
-    status = "EXTRACTED" if confidence >= 0.8 else "NEEDS_REVIEW"
+    text_quality = assess_extracted_text_quality(quote)
+    needs_recognition = text_quality["level"] == "LOW"
+    status = "NEEDS_REVIEW" if needs_recognition else (
+        "EXTRACTED" if confidence >= 0.8 else "NEEDS_REVIEW"
+    )
+    if needs_recognition:
+        confidence = min(confidence, 0.35)
     nodes.append({
         "clauseId": clause["id"],
         "nodeType": node_type,
@@ -637,6 +866,7 @@ def _add_timeline_node(
             "fullQuote": str(clause.get("content") or "").strip()[:12000],
             "page": 1,
             "extractionMode": source_mode,
+            "textQuality": text_quality,
         },
     })
 
@@ -770,9 +1000,12 @@ def _add_timeline_candidate(
     if len(nodes) == before:
         return
     node = nodes[-1]
+    cleaned_condition = _clean_rule_condition(condition, quote)
+    if cleaned_condition:
+        node["condition"] = cleaned_condition
     if node_type:
         node["nodeType"] = node_type
-    node["label"] = label or _rule_timeline_label(node["nodeType"], quote, condition)
+    node["label"] = label or _rule_timeline_label(node["nodeType"], quote, cleaned_condition)
     node["businessMeaning"] = _rule_business_meaning(node, quote)
 
 
@@ -823,9 +1056,9 @@ def _normalize_cn_date(value: str) -> str | None:
 def _rule_timeline_label(node_type: str, quote: str, condition: str | None) -> str:
     if node_type == "TERMINATION" and "不可抗力" in quote:
         return "不可抗力终止条件"
-    if condition:
-        compact = re.sub(r"\s+", " ", condition).strip()
-        return compact[:36]
+    action = _rule_action_from_quote(quote, condition)
+    if action:
+        return action[:48]
     compact = re.sub(r"\s+", " ", quote).strip()
     if node_type == "PAYMENT" and "发票" in compact:
         return "开票期限"
@@ -845,11 +1078,90 @@ def _rule_timeline_label(node_type: str, quote: str, condition: str | None) -> s
 
 
 def _rule_business_meaning(node: dict, quote: str) -> str:
+    action = _rule_action_from_quote(quote, node.get("condition"))
+    if action:
+        return f"合同要求：{action}"
     label = node.get("label") or "合同时间节点"
     date_or_condition = node.get("condition") or node.get("date") or "约定期限"
-    if node.get("date"):
-        return f"需要关注“{label}”对应的时间点：{date_or_condition}。"
-    return f"需要关注“{label}”对应的约束条件：{date_or_condition}。"
+    return f"请关注“{label}”对应的合同期限：{date_or_condition}。"
+
+
+_DURATION_TOKEN_PATTERN = re.compile(
+    r"(?P<number>\d{1,3})\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)"
+    r"(?:内|前|后|起|以上|届满)?"
+)
+
+
+def _rule_action_from_quote(quote: str, condition: str | None = None) -> str:
+    """Extract a readable action from the full clause for rule-only fallback.
+
+    The rule extractor is intentionally not allowed to invent a requirement.
+    It only removes the detected deadline and returns the action already present
+    after it, such as ``完成编制`` or ``向乙方支付合同价款``. This keeps the
+    timeline usable when LLM enrichment is unavailable while preserving the
+    complete clause in citation.fullQuote.
+    """
+    text = re.sub(r"\s+", " ", str(quote or "")).strip()
+    if not text:
+        return ""
+    duration_matches = list(_DURATION_TOKEN_PATTERN.finditer(text))
+    if not duration_matches:
+        return ""
+
+    condition_numbers = re.findall(r"\d{1,3}", str(condition or ""))
+    target = duration_matches[-1]
+    if condition_numbers:
+        matching = [item for item in duration_matches if item.group("number") in condition_numbers]
+        if matching:
+            target = matching[-1]
+
+    sentence_start = max(
+        text.rfind(mark, 0, target.start())
+        for mark in ("。", "；", ";", "\n")
+    ) + 1
+    sentence = text[sentence_start:]
+    if "：" in sentence or ":" in sentence:
+        sentence = re.split(r"[：:]", sentence, maxsplit=1)[-1]
+
+    # Find the same deadline in the sentence after trimming its heading.
+    local_match = _DURATION_TOKEN_PATTERN.search(sentence)
+    if not local_match:
+        return ""
+    action = sentence[local_match.end():]
+    action = re.split(r"[。；;]", action, maxsplit=1)[0]
+    action = re.sub(r"^[，,：:]\s*", "", action).strip()
+    if action:
+        return action
+
+    # Some clauses put the action before the deadline (for example, a notice
+    # or payment condition). Use the concise context immediately before it.
+    prefix = sentence[:local_match.start()].strip(" ，,：:")
+    prefix = re.sub(r"^[\d\s.、．()（）-]+", "", prefix).strip()
+    return prefix[-48:] if prefix else ""
+
+
+def _clean_rule_condition(condition: str | None, quote: str) -> str:
+    """Keep the deadline expression, dropping OCR/heading noise before it."""
+    raw = re.sub(r"\s+", " ", str(condition or "")).strip()
+    if not raw:
+        return ""
+    text = re.sub(r"\s+", " ", str(quote or "")).strip()
+    numbers = re.findall(r"\d{1,3}", raw)
+    matches = list(_DURATION_TOKEN_PATTERN.finditer(text))
+    if not matches:
+        return raw
+    target = matches[-1]
+    if numbers:
+        same_number = [item for item in matches if item.group("number") in numbers]
+        if same_number:
+            target = same_number[-1]
+    start = max(text.rfind(mark, 0, target.start()) for mark in ("。", "；", ";", "\n")) + 1
+    prefix = text[start:target.start()]
+    if "：" in prefix or ":" in prefix:
+        prefix = re.split(r"[：:]", prefix, maxsplit=1)[-1]
+    prefix = re.sub(r"^[\d\s.、．()（）-]+", "", prefix).strip(" ，,")
+    candidate = (prefix + target.group(0)).strip()
+    return candidate or raw
 
 
 def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list[dict], dict]:
@@ -874,8 +1186,12 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
             "clauseNumber": node.get("citation", {}).get("clauseNumber"),
             "clauseTitle": node.get("citation", {}).get("title"),
             "quote": quote,
+            "matchedText": node.get("condition") or node.get("date") or quote,
+            "clauseText": clause_text,
             "context": _timeline_clause_excerpt(clause_text, quote),
         })
+    if not candidates:
+        return nodes, {"status": "SKIPPED", "reason": "NO_RELIABLE_CANDIDATES"}
     try:
         response = LLMService().enrich_contract_timeline(candidates)
     except Exception as exc:
@@ -938,6 +1254,147 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
     return enriched, {
         "status": "LLM_ENRICHED",
         "requested": len(candidates),
+        "returned": len(result_by_id),
+        "dropped": dropped,
+    }
+
+
+_CONTRACT_END_TARGET_PATTERN = re.compile(
+    r"(?P<trigger>[^。；;\n]{2,260}?)(?:后|时|之日)?\s*[，,]?\s*"
+    r"(?:本合同|合同)(?:正式|才)?(?:结束|终止|失效)"
+)
+
+
+def _extract_rule_lifecycle_conditions(clauses: list[dict]) -> list[dict]:
+    """Find explicit event-driven contract end clauses for LLM refinement.
+
+    This is a grounded fallback and candidate generator. It recognizes an
+    explicit contract end target and also sends compressed end-condition clauses
+    to the model for object verification.
+    """
+    results: list[dict] = []
+    seen: set[str] = set()
+    for clause in clauses:
+        content = str(clause.get("content") or "").strip()
+        matches = list(_CONTRACT_END_TARGET_PATTERN.finditer(content))
+        if not matches and (
+            ("合同" in content and any(term in content for term in ("结束", "终止", "失效", "解除")))
+            or ("移交生产" in content and any(term in content for term in ("设计费", "合同款", "全部付清")))
+        ):
+            matches = [None]
+        for match in matches:
+            raw_trigger = match.group("trigger") if match else content
+            trigger = re.sub(r"\s+", " ", raw_trigger).strip(" ，,：:")
+            trigger = re.sub(r"^(?:在|当|待)", "", trigger).strip()
+            if not trigger:
+                continue
+            raw_parts = re.split(r"\s*(?:且|并且|同时|以及|及)\s*", trigger) if match else []
+            parts = [part.strip(" ，,") for part in raw_parts if len(part.strip(" ，,")) >= 2]
+            logic = "ALL" if len(parts) > 1 else "SINGLE"
+            key = f"{clause.get('id')}|{trigger}"
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append({
+                "clauseId": clause.get("id"),
+                "documentId": clause.get("documentId"),
+                "endMode": "CONDITIONAL",
+                "logic": logic,
+                "summary": (
+                    f"{'并且'.join(parts)}后，本合同结束或失效"
+                    if parts else "疑似合同结束条件，等待 Agent 根据完整条款确认"
+                ),
+                "conditions": [
+                    {
+                        "sequence": index + 1,
+                        "event": part,
+                        "status": "PENDING_CONFIRMATION",
+                    }
+                    for index, part in enumerate(parts)
+                ],
+                "confidence": 0.76 if logic == "ALL" else 0.45 if not parts else 0.7,
+                "source": "RULE_CANDIDATE",
+                "status": "NEEDS_REVIEW",
+                "citation": {
+                    "clauseId": clause.get("id"),
+                    "clauseNumber": clause.get("clauseNumber"),
+                    "title": clause.get("title"),
+                    "quote": (match.group(0) if match else content).strip(),
+                    "fullQuote": content[:12000],
+                },
+            })
+    return results
+
+
+def _enrich_lifecycle_conditions(candidates: list[dict]) -> tuple[list[dict], dict]:
+    if not candidates:
+        return [], {"status": "SKIPPED", "reason": "NO_CANDIDATES"}
+    payload = []
+    for index, candidate in enumerate(candidates):
+        candidate_id = f"lifecycle-{index + 1}"
+        candidate["candidateId"] = candidate_id
+        payload.append({
+            "candidateId": candidate_id,
+            "ruleLogic": candidate.get("logic"),
+            "ruleEvents": [item.get("event") for item in candidate.get("conditions", [])],
+            "clauseNumber": candidate.get("citation", {}).get("clauseNumber"),
+            "clauseTitle": candidate.get("citation", {}).get("title"),
+            "clauseText": candidate.get("citation", {}).get("fullQuote"),
+        })
+    try:
+        response = LLMService().enrich_contract_lifecycle_conditions(payload)
+    except Exception as exc:
+        logger.warning("Contract lifecycle enrichment failed: %s", exc)
+        return candidates, {"status": "FALLBACK_RULE", "error": str(exc)[:300]}
+
+    result_by_id = {
+        str(item.get("candidateId")): item
+        for item in (response.get("conditions") or [])
+        if isinstance(item, dict) and item.get("candidateId")
+    }
+    enriched: list[dict] = []
+    dropped = 0
+    for candidate in candidates:
+        result = result_by_id.get(candidate["candidateId"])
+        if result and result.get("keep") is False:
+            dropped += 1
+            continue
+        if result:
+            clause_text = str(candidate.get("citation", {}).get("fullQuote") or "")
+            events = []
+            for event in result.get("events") or []:
+                if not isinstance(event, dict):
+                    continue
+                source_quote = str(event.get("sourceQuote") or "").strip()
+                event_text = str(event.get("event") or "").strip()
+                if not event_text or not source_quote or source_quote not in clause_text:
+                    continue
+                events.append({
+                    "sequence": len(events) + 1,
+                    "event": event_text[:500],
+                    "sourceQuote": source_quote[:1000],
+                    "status": "PENDING_CONFIRMATION",
+                })
+            logic = str(result.get("logic") or "").upper()
+            if events and logic in {"ALL", "ANY", "SINGLE"}:
+                candidate["logic"] = logic
+                candidate["conditions"] = events
+                candidate["summary"] = str(result.get("summary") or candidate["summary"]).strip()[:1000]
+                candidate["source"] = "LLM_ENRICHED"
+                candidate["status"] = "NEEDS_REVIEW"
+                candidate["citation"]["lifecycleEnrichment"] = {
+                    "reason": str(result.get("reason") or "")[:500],
+                }
+                try:
+                    candidate["confidence"] = min(
+                        0.95, max(float(candidate["confidence"]), float(result.get("confidence") or 0))
+                    )
+                except (TypeError, ValueError):
+                    pass
+        enriched.append(candidate)
+    return enriched, {
+        "status": "LLM_ENRICHED",
+        "requested": len(payload),
         "returned": len(result_by_id),
         "dropped": dropped,
     }
@@ -1013,7 +1470,12 @@ def _timeline_clause_excerpt(content: str, quote: str, limit: int = 220) -> str:
     return text[:limit]
 
 
-def _index_contract_chunks(cur, job_id: int | None, document_id: int) -> dict:
+def _index_contract_chunks(
+    cur,
+    job_id: int | None,
+    document_id: int,
+    commit_callback=None,
+) -> dict:
     cur.execute(
         """SELECT ck.id, ck.case_id, ck.document_id, ck.clause_id, ck.clause_number,
                   ck.chunk_text, ck.source_page, c.title, c.clause_type
@@ -1028,17 +1490,33 @@ def _index_contract_chunks(cur, job_id: int | None, document_id: int) -> dict:
         return {"embedded": 0, "indexed": 0, "total": 0}
 
     _update_job(cur, job_id, "PROCESSING", "EMBEDDING", 92)
+    if commit_callback:
+        commit_callback()
     embedding = EmbeddingService()
     vectors: list[list[float]] = [[] for _ in rows]
     embedding_error = ""
     embedded = 0
     if embedding.configured:
-        try:
-            vectors = embedding.embed_batch([row["chunk_text"] for row in rows])
-            embedded = len([vector for vector in vectors if vector])
-        except Exception as exc:
-            embedding_error = str(exc)
-            vectors = [[] for _ in rows]
+        batch_size = max(1, int(settings.kb_embedding_batch_size or 16))
+        batched_vectors: list[list[float]] = []
+        batch_errors: list[str] = []
+        for start in range(0, len(rows), batch_size):
+            batch_rows = rows[start:start + batch_size]
+            progress = min(95, 92 + int((start / max(len(rows), 1)) * 3))
+            _update_job(cur, job_id, "PROCESSING", "EMBEDDING", progress)
+            if commit_callback:
+                commit_callback()
+            try:
+                batch = embedding.embed_batch([row["chunk_text"] for row in batch_rows])
+                if len(batch) != len(batch_rows):
+                    batch = list(batch[:len(batch_rows)]) + [[] for _ in range(len(batch_rows) - len(batch))]
+                batched_vectors.extend(batch)
+            except Exception as exc:
+                batch_errors.append(f"batch {start // batch_size + 1}: {exc}")
+                batched_vectors.extend([[] for _ in batch_rows])
+        vectors = batched_vectors
+        embedded = len([vector for vector in vectors if vector])
+        embedding_error = "; ".join(batch_errors)[:1000]
     for row, vector in zip(rows, vectors):
         cur.execute(
             "UPDATE contract_clause_chunk SET embedding_status=%s WHERE id=%s",
@@ -1053,8 +1531,12 @@ def _index_contract_chunks(cur, job_id: int | None, document_id: int) -> dict:
         {"total": len(rows), "embedded": embedded, "configured": embedding.configured},
         embedding_error or None,
     )
+    if commit_callback:
+        commit_callback()
 
     _update_job(cur, job_id, "PROCESSING", "INDEXING", 96)
+    if commit_callback:
+        commit_callback()
     es = ESService()
     indexed = 0
     index_ready = es.ensure_contract_index()
@@ -1082,6 +1564,8 @@ def _index_contract_chunks(cur, job_id: int | None, document_id: int) -> dict:
         {"total": len(rows), "indexed": indexed, "indexReady": index_ready},
         None if index_ready else "Elasticsearch 不可用或合同索引未就绪，已保留 MySQL 证据并可后续重建索引",
     )
+    if commit_callback:
+        commit_callback()
     return {"embedded": embedded, "indexed": indexed, "total": len(rows)}
 
 
@@ -1241,7 +1725,10 @@ def _business_meaning(node_type: str, quote: str, source_mode: str) -> str:
 
 def _parse_document_content(cur, job_id: int | None, document_id: int, document: dict) -> dict:
     inline_text = str(document.get("content_text") or "")
-    if inline_text.strip():
+    file_path = str(document.get("file_path") or "").strip()
+    # Uploaded files are the source of truth. content_text may be a previous
+    # failed parse and must never prevent a later OCR/MinerU reparse.
+    if inline_text.strip() and (not file_path or file_path == "inline:text"):
         _update_job(cur, job_id, "PROCESSING", "TEXT_PARSING", 20)
         _append_job_trace(
             cur,
@@ -1254,11 +1741,15 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
         return {
             "content": inline_text,
             "parser": "inline-text",
+            "diagnostics": {
+                "provider": "INLINE_TEXT",
+                "quality": assess_extracted_text_quality(inline_text),
+                "requiresReparse": False,
+            },
             "blockCount": len([p for p in re.split(r"\n\s*\n", inline_text) if p.strip()]),
             "pageCount": 1,
         }
 
-    file_path = str(document.get("file_path") or "").strip()
     if not file_path or file_path == "inline:text":
         raise ValueError("Contract document has no inline text or file path")
 
@@ -1280,12 +1771,49 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
     else:
         stage = "PDF_PARSING" if file_type == "PDF" else "TEXT_PARSING"
         _update_job(cur, job_id, "PROCESSING", stage, 20)
-        blocks = DocumentParser().parse(str(local_path), file_type)
-        parser = f"document-parser:{file_type.lower()}"
+        document_parser = DocumentParser()
+        optimization_trace_written = False
+
+        def report_pdf_progress(page: int, total: int, used_ocr: bool) -> None:
+            nonlocal optimization_trace_written
+            progress = 28 if page <= 0 else 20 + min(28, int((page / max(total, 1)) * 28))
+            progress_stage = "PDF_RECOGNITION_OPTIMIZATION" if used_ocr else "PDF_PARSING"
+            _update_job(cur, job_id, "PROCESSING", progress_stage, progress)
+            if used_ocr and not optimization_trace_written:
+                _append_job_trace(
+                    cur,
+                    job_id,
+                    "PDF_RECOGNITION_OPTIMIZATION",
+                    "检测到 PDF 文字层质量不足，正在尝试更高质量识别",
+                    {"documentId": document_id, "provider": "MINERU_OR_OCR"},
+                    {},
+                )
+                optimization_trace_written = True
+            try:
+                cur.connection.commit()
+            except Exception:
+                logger.debug("Could not commit document progress", exc_info=True)
+
+        blocks = document_parser.parse(
+            str(local_path),
+            file_type,
+            progress_callback=report_pdf_progress if file_type == "PDF" else None,
+        )
+        diagnostics = document_parser.last_diagnostics
+        parser_provider = str(diagnostics.get("provider") or file_type).strip().lower()
+        parser = f"document-parser:{parser_provider}"
 
     content = "\n\n".join(block.text for block in blocks if block.text.strip())
+    if file_type in {"DOC", "DOCX"}:
+        diagnostics = {
+            "provider": parser,
+            "quality": assess_extracted_text_quality(content),
+            "requiresReparse": False,
+        }
     pages = [block.source_page for block in blocks if block.source_page]
-    stage = "DOC_CONVERSION" if file_type == "DOC" else "DOCX_PARSING" if file_type == "DOCX" else "PDF_PARSING" if file_type == "PDF" else "TEXT_PARSING"
+    stage = "DOC_CONVERSION" if file_type == "DOC" else "DOCX_PARSING" if file_type == "DOCX" else "PDF_RECOGNITION_OPTIMIZATION" if diagnostics.get("qualityEscalated") else "PDF_PARSING" if file_type == "PDF" else "TEXT_PARSING"
+    if file_type == "PDF":
+        _update_job(cur, job_id, "PROCESSING", stage, 50)
     _append_job_trace(
         cur,
         job_id,
@@ -1299,11 +1827,13 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
             "contentLength": len(content),
             "pageCount": max(pages) if pages else 1,
             "sampleBlocks": [block.text[:120] for block in blocks[:3]],
+            "parseDiagnostics": diagnostics,
         },
     )
     return {
         "content": content,
         "parser": parser,
+        "diagnostics": diagnostics,
         "blockCount": len(blocks),
         "pageCount": max(pages) if pages else 1,
     }

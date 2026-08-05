@@ -39,4 +39,6 @@ public interface AiGateway {
     Map<String, Object> cancelAgentRun(Long runId, Map<String, Object> payload);
 
     Map<String, Object> health();
+
+    void runEvaluation(Long evalRunId);
 }

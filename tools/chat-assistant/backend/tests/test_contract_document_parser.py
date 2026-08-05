@@ -1,7 +1,13 @@
 import unittest
+from unittest.mock import patch
 
 from app.agent_runtime import contract_document_parser as parser
-from app.agent_runtime.contract_document_parser import classify_clause, split_contract_text
+from app.agent_runtime.contract_document_parser import (
+    _clean_rule_condition,
+    _rule_action_from_quote,
+    classify_clause,
+    split_contract_text,
+)
 
 
 class ContractDocumentParserTest(unittest.TestCase):
@@ -73,6 +79,135 @@ class ContractDocumentParserTest(unittest.TestCase):
         self.assertTrue(any("\u4ee5\u4e0a" in (node.get("condition") or "") for node in force_majeure))
         self.assertTrue(any(node.get("nodeType") == "TERMINATION" for node in force_majeure))
         self.assertTrue(all(node["citation"]["fullQuote"] == text for node in force_majeure))
+
+    def test_corrupted_timeline_candidate_is_held_for_recognition_review(self):
+        text = (
+            "11.11 逾期超过 :\\0 天以上时，乙方有权暂停履行下阶段工作，"
+            "并书面通知 1rfl方。"
+        )
+        clause = {
+            "id": 3,
+            "clauseType": "PAYMENT",
+            "clauseNumber": "11.11",
+            "title": "付款逾期",
+            "content": text,
+        }
+
+        nodes = parser._extract_clause_timeline_nodes_v2(clause, 2026, None, set())
+
+        self.assertTrue(nodes)
+        self.assertTrue(all(node["status"] == "NEEDS_REVIEW" for node in nodes))
+        self.assertTrue(all(node["date"] or node["condition"] for node in nodes))
+        self.assertTrue(all("待重新识别" not in node["label"] for node in nodes))
+        self.assertTrue(all(node["citation"]["textQuality"]["requiresReview"] for node in nodes))
+
+    def test_low_quality_timeline_candidate_is_still_sent_to_llm(self):
+        clause = {
+            "id": 31,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "3",
+            "title": "交付期限",
+            "content": "乙方应在合同签订后10日内提交实施方案。",
+        }
+        node = {
+            "clauseId": 31,
+            "nodeType": "DELIVERY",
+            "label": "合同签订后10日内",
+            "date": None,
+            "condition": "合同签订后10日内",
+            "responsibleParty": "COUNTERPARTY",
+            "businessMeaning": "提交实施方案",
+            "confidence": 0.35,
+            "status": "NEEDS_RECOGNITION",
+            "source": "RULE_CANDIDATE",
+            "citation": {"quote": clause["content"], "clauseNumber": "3", "title": "交付期限"},
+        }
+        captured = {}
+
+        def enrich(candidates):
+            captured["candidates"] = candidates
+            return {"nodes": []}
+
+        with patch.object(parser.LLMService, "enrich_contract_timeline", side_effect=enrich):
+            parser._enrich_timeline_nodes([node], [clause])
+
+        self.assertEqual(1, len(captured["candidates"]))
+        self.assertEqual(clause["content"], captured["candidates"][0]["clauseText"])
+
+    def test_timeline_llm_receives_the_complete_clause(self):
+        clause_text = (
+            "7.2.3 竣工图设计文件：两台机组通过168小时试运后45天内完成编制，"
+            "竣工图设计文件应满足机组达标投产的要求。"
+            + "本条补充上下文。" * 80
+        )
+        clause = {
+            "id": 4,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "7.2.3",
+            "title": "竣工图设计文件",
+            "content": clause_text,
+        }
+        nodes = parser._extract_clause_timeline_nodes_v2(clause, 2026, None, set())
+        captured = {}
+
+        def enrich(candidates):
+            captured["candidates"] = candidates
+            return {"nodes": []}
+
+        with patch.object(parser.LLMService, "enrich_contract_timeline", side_effect=enrich):
+            parser._enrich_timeline_nodes(nodes, [clause])
+
+        self.assertEqual(clause_text, captured["candidates"][0]["clauseText"])
+        self.assertIn("两台机组通过168小时试运后45天内", captured["candidates"][0]["matchedText"])
+
+    def test_rule_fallback_extracts_action_without_exposing_match_prefix(self):
+        quote = (
+            "7.2.3 竣工图设计文件：两台机组通过168小时试运后45天内完成编制，"
+            "竣工图设计文件应满足机组达标投产的要求。"
+        )
+        raw_condition = "计文件:两台机组通过168小时试运后45天内"
+
+        self.assertEqual(
+            "两台机组通过168小时试运后45天内",
+            _clean_rule_condition(raw_condition, quote),
+        )
+        self.assertEqual(
+            "完成编制，竣工图设计文件应满足机组达标投产的要求",
+            _rule_action_from_quote(quote, raw_condition),
+        )
+
+
+    def test_extracts_compound_contract_end_condition(self):
+        clause = {
+            "id": 5,
+            "documentId": 8,
+            "clauseNumber": "16.4",
+            "title": "合同终止",
+            "content": "工程移交生产且所有设计费全部付清后，本合同正式结束并失效。",
+        }
+
+        conditions = parser._extract_rule_lifecycle_conditions([clause])
+
+        self.assertEqual(1, len(conditions))
+        self.assertEqual("CONDITIONAL", conditions[0]["endMode"])
+        self.assertEqual("ALL", conditions[0]["logic"])
+        self.assertEqual(2, len(conditions[0]["conditions"]))
+        self.assertEqual(clause["content"], conditions[0]["citation"]["fullQuote"])
+
+    def test_sends_compressed_contract_end_clause_as_provisional_candidate(self):
+        clause = {
+            "id": 6,
+            "documentId": 9,
+            "clauseNumber": "18",
+            "title": "履行完毕",
+            "content": "工程移交生产且所有设计费全部付清，方可结束合同。",
+        }
+
+        candidates = parser._extract_rule_lifecycle_conditions([clause])
+
+        self.assertEqual(1, len(candidates))
+        self.assertEqual([], candidates[0]["conditions"])
+        self.assertIn("完整条款", candidates[0]["summary"])
 
 
 if __name__ == "__main__":

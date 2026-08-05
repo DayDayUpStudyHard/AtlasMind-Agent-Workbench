@@ -18,8 +18,8 @@ from app.services.document_parser_types import ParsedBlock
 class MineruService:
     """Run MinerU and stream its Markdown output as parsed blocks."""
 
-    def iter_parse_pdf(self, pdf_path: Path) -> Iterator[ParsedBlock]:
-        if not settings.mineru_enabled:
+    def iter_parse_pdf(self, pdf_path: Path, allow_auto: bool = False) -> Iterator[ParsedBlock]:
+        if not settings.mineru_enabled and not allow_auto:
             raise RuntimeError("高质量解析需要先启用 MINERU_ENABLED=true，并安装/配置 MinerU")
 
         output_root = Path(settings.mineru_output_dir).resolve()

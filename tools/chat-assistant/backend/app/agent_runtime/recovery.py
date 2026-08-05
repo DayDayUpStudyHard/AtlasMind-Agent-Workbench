@@ -15,7 +15,7 @@ from .persistence import RunStore
 logger = logging.getLogger(__name__)
 
 DEFAULT_INTERVAL = 30   # seconds between recovery scans
-DEFAULT_TIMEOUT = 300   # seconds before an active run is considered timed out
+DEFAULT_TIMEOUT = 900   # multi-domain graph reviews may legitimately take several minutes
 CREATED_TIMEOUT = 120   # seconds before a CREATED (unclaimed) run is marked FAILED
 
 
@@ -61,7 +61,10 @@ class RunRecovery:
         """Periodic scan for timed-out, stuck-CREATED, and heartbeat-lost runs."""
         # 1. Stuck CREATED runs — worker never picked them up
         try:
-            stuck = await self._run_store.find_timed_out_runs(CREATED_TIMEOUT)
+            stuck = await self._run_store.find_timed_out_runs(
+                CREATED_TIMEOUT,
+                statuses=("CREATED",),
+            )
             for run_id in stuck:
                 logger.warning("Recovery: marking run %s as FAILED (stuck CREATED for %ss)",
                               run_id, CREATED_TIMEOUT)
@@ -75,7 +78,10 @@ class RunRecovery:
 
         # 2. Timed-out active runs
         try:
-            timed_out = await self._run_store.find_timed_out_runs(self._timeout)
+            timed_out = await self._run_store.find_timed_out_runs(
+                self._timeout,
+                statuses=("CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING"),
+            )
             for run_id in timed_out:
                 logger.warning("Recovery: marking run %s as FAILED (timeout %ss)",
                               run_id, self._timeout)

@@ -56,6 +56,28 @@ def _conn():
     return _get_pool().connection()
 
 
+def new_connection():
+    """Create a dedicated connection for long-running document pipelines.
+
+    A document parse can hold a connection while waiting on an external parser,
+    LLM, embedding provider, or Elasticsearch. It must not consume a slot from
+    the shared Agent Runtime pool while doing so.
+    """
+    return pymysql.connect(
+        host=settings.mysql_host,
+        port=settings.mysql_port,
+        user=settings.mysql_user,
+        password=settings.mysql_password,
+        database=settings.mysql_db,
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+        autocommit=False,
+        connect_timeout=10,
+        read_timeout=60,
+        write_timeout=60,
+    )
+
+
 def _normalize_value(obj):
     """Recursively convert Decimal → float, datetime/date → isoformat string."""
     if isinstance(obj, Decimal):
@@ -177,7 +199,11 @@ class RunStore(ABC):
         ...
 
     @abstractmethod
-    async def find_timed_out_runs(self, timeout_seconds: int) -> list[int]:
+    async def find_timed_out_runs(
+        self,
+        timeout_seconds: int,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[int]:
         ...
 
     @abstractmethod
@@ -348,6 +374,8 @@ class MySqlRunStore(RunStore):
                                   trigger_type AS triggerType, question, status,
                                   progress, current_step AS currentStep,
                                   error_message AS errorMessage,
+                                  workflow_id AS workflowId, workflow_stage AS workflowStage,
+                                  evidence_snapshot_hash AS evidenceSnapshotHash,
                                   started_at AS startedAt, finished_at AS finishedAt,
                                   create_time AS createTime
                            FROM agent_run WHERE id=%s""",
@@ -398,6 +426,22 @@ class MySqlRunStore(RunStore):
                     cur.execute(
                         f"UPDATE agent_run SET {', '.join(sets)} WHERE id=%s", params
                     )
+                    if status in ("COMPLETED", "FAILED", "CANCELLED"):
+                        cur.execute(
+                            "SELECT workflow_id AS workflowId FROM agent_run WHERE id=%s",
+                            (run_id,),
+                        )
+                        workflow = cur.fetchone() or {}
+                        workflow_id = workflow.get("workflowId")
+                        if workflow_id:
+                            workflow_status = "COMPLETED" if status == "COMPLETED" else "FAILED"
+                            cur.execute(
+                                """UPDATE contract_analysis_workflow
+                                   SET status=%s, current_stage='RISK_REVIEW',
+                                       last_error=%s
+                                   WHERE id=%s""",
+                                (workflow_status, error_message[:4000] if error_message else None, workflow_id),
+                            )
                 conn.commit()
 
         await _run_sync(_update)
@@ -414,15 +458,23 @@ class MySqlRunStore(RunStore):
 
         await _run_sync(_beat)
 
-    async def find_timed_out_runs(self, timeout_seconds: int) -> list[int]:
+    async def find_timed_out_runs(
+        self,
+        timeout_seconds: int,
+        statuses: tuple[str, ...] | None = None,
+    ) -> list[int]:
         def _find():
+            selected_statuses = statuses or (
+                "CREATED", "CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING",
+            )
+            placeholders = ",".join(["%s"] * len(selected_statuses))
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """SELECT id FROM agent_run
-                           WHERE status IN ('CREATED','CONTEXT_BUILDING','PLANNING','ANALYZING','VERIFYING')
-                             AND create_time < DATE_SUB(NOW(), INTERVAL %s SECOND)""",
-                        (timeout_seconds,),
+                        f"""SELECT id FROM agent_run
+                            WHERE status IN ({placeholders})
+                              AND create_time < DATE_SUB(NOW(), INTERVAL %s SECOND)""",
+                        (*selected_statuses, timeout_seconds),
                     )
                     return [row["id"] for row in cur.fetchall()]
 
@@ -435,9 +487,12 @@ class MySqlRunStore(RunStore):
                     cur.execute(
                         """SELECT id FROM agent_run
                            WHERE status IN ('CONTEXT_BUILDING','PLANNING','ANALYZING','VERIFYING')
-                             AND (last_heartbeat_at IS NULL
-                                  OR last_heartbeat_at < DATE_SUB(NOW(), INTERVAL %s SECOND))""",
-                        (max_heartbeat_age_seconds,),
+                             AND ((last_heartbeat_at IS NOT NULL
+                                   AND last_heartbeat_at < DATE_SUB(NOW(), INTERVAL %s SECOND))
+                                  OR (last_heartbeat_at IS NULL
+                                      AND COALESCE(started_at, create_time)
+                                          < DATE_SUB(NOW(), INTERVAL %s SECOND)))""",
+                        (max_heartbeat_age_seconds, max_heartbeat_age_seconds),
                     )
                     return [row["id"] for row in cur.fetchall()]
 
@@ -454,6 +509,8 @@ class MySqlRunStore(RunStore):
                     """SELECT id, project_id AS projectId, run_type AS runType,
                               trigger_type AS triggerType, question, status, progress,
                               current_step AS currentStep, error_message AS errorMessage,
+                              workflow_id AS workflowId, workflow_stage AS workflowStage,
+                              evidence_snapshot_hash AS evidenceSnapshotHash,
                               started_at AS startedAt, finished_at AS finishedAt,
                               create_time AS createTime
                        FROM agent_run WHERE id=%s""",
@@ -922,7 +979,8 @@ class MySqlReportStore(ReportStore):
             with conn.cursor() as cur:
                 cur.execute(
                     """SELECT COALESCE(subject_type, 'PROJECT') AS subjectType,
-                              COALESCE(subject_id, project_id) AS subjectId
+                               COALESCE(subject_id, project_id) AS subjectId,
+                               workflow_id AS workflowId
                        FROM agent_run WHERE id=%s""",
                     (run_id,),
                 )
@@ -985,14 +1043,28 @@ class MySqlReportStore(ReportStore):
                                 continue
                             rule_key = _finding_rule_key(finding)
                             clause_type = _finding_clause_type(finding)
+                            detail_payload = {
+                                key: finding.get(key)
+                                for key in (
+                                    "findingKey", "domainKey", "domainName", "sourceBasis",
+                                    "oneLineSummary", "keyPoint", "riskExplanation",
+                                    "businessImpact", "contractBasis", "knowledgeBasis",
+                                    "explicitConsequence", "inferredConsequence",
+                                    "inferredConsequenceDisclaimer", "revisionAdvice",
+                                    "reviewQuestions", "contractCitationIds", "policyCitationIds",
+                                    "evidenceStatus", "confidenceLevel", "frontendDisplay",
+                                    "validationVerdict", "validationReasons",
+                                )
+                                if finding.get(key) not in (None, "", [], {})
+                            }
                             cur.execute(
                                 """INSERT INTO contract_review_finding
                                    (case_id, run_id, rule_id, rule_key, clause_type,
                                     severity, status, title, description, impact,
                                     remediation_advice, negotiation_advice,
                                     verification_points, contract_citation,
-                                    policy_citation, suggested_action)
-                                   VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                    policy_citation, suggested_action, detail_json)
+                                   VALUES (%s,%s,%s,%s,%s,%s,'OPEN',%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
                                 (
                                     subject_id,
                                     run_id,
@@ -1021,6 +1093,7 @@ class MySqlReportStore(ReportStore):
                                     _json_dumps(finding.get("policyCitation"))
                                     if isinstance(finding.get("policyCitation"), dict) else None,
                                     str(finding.get("suggestedAction") or "") or None,
+                                    _json_dumps(detail_payload) if detail_payload else None,
                                 ),
                             )
                     if task_type == "CONTRACT_REVIEW":
@@ -1037,6 +1110,13 @@ class MySqlReportStore(ReportStore):
                                WHERE id=%s AND deleted=0""",
                             (next_status, run_id, subject_id),
                         )
+                        if run_subject.get("workflowId"):
+                            cur.execute(
+                                """UPDATE contract_analysis_workflow
+                                   SET status='COMPLETED', current_stage='REPORT_READY', last_error=NULL
+                                   WHERE id=%s""",
+                                (run_subject.get("workflowId"),),
+                            )
                     if task_type == "FULFILLMENT_CHECK":
                         timeline_node_id = int(artifact.get("timelineNodeId") or 0)
                         if timeline_node_id:

@@ -2,7 +2,161 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
-## 合同正文智能提取与确认建案
+## Agent 图运行时架构升级：LangGraph DAG/状态机 + 评测中心 + 四阶段渐进迁移
+
+**日期**：2026-08-05
+
+### 调整原因
+
+- 当前 Python Agent Runtime 使用线性 6-Phase Harness（上下文→规划→工具循环→证据兜底→反思→产物），主要存在 10 个明确约束。
+- 补检索后不再次执行完整 Reflection，证据缺口无法证明已关闭（C-04）。
+- Reflection 失败仍可能继续生成正式报告，"未通过质量门禁"和"报告完成"语义冲突（C-05）。
+- 本地 Reflection 只要存在引用即可判 `adequate`，一个弱引用可能错误通过复杂任务（C-06）。
+- 长合同审查因 `readContractClause` 单次最多 20 条限制存在覆盖盲区（C-02）。
+- 通用 Runner 最多 2 轮 8 次工具调用，长合同易在证据完整前耗尽预算（C-01）。
+- 履约核验包含补证、待定、人工确认、上传新证据后重新核验等状态，继续使用线性流程会越来越难维护。
+- 缺少合同 Agent Golden Dataset，无法量化新旧版本准确率差异（C-10）。
+- 缺少可证明"准确率确实提高"的专项评测集和发布门槛。
+
+### 实现
+
+**G0 — Harness 正确性修正与评测基线（不改架构）**
+
+- Phase 5 Reflection 补检索后新增 re-reflection：补充工具执行完后重新调用 `_reflect()`，若仍 `adequate=false` 则传入 `limited=true` 给 Phase 6 产物生成。
+- `_local_reflection()` 合同模式加强：不再仅检查"有任意引用即通过"，改为要求合同引用 + 政策引用均存在才判 `adequate=true`。
+- Phase 6 `_generate_artifact()` 新增 `limited` 参数：`limited=true` 时 CONTRACT_REVIEW 走 `_fallback_review_artifact()` 生成 `[范围受限]` 报告（`analysisMode=LIMITED`），FULFILLMENT_CHECK 已有类似 `_fallback_fulfillment_artifact()` 路径。
+- 新增 `app/agent_runtime/schemas/` 包：`review.py`（`ContractReviewArtifact`、`ContractFinding`、`DualCitation`）、`fulfillment.py`（`FulfillmentArtifact`、`FulfillmentRequirementJudgement`）、`validators.py`（`validate_report()` — Schema + 10 项业务不变量双重校验）。
+- `prompts.py` 更新 fallback：`reflection` prompt 改为领域覆盖矩阵（逐域检查 + `domains` 字段 + `retryable`），`contract_review` prompt 新增受限报告模式指令、`findingKey`/`claim`/`evidenceStatus`/`contractCitationIds`/`policyCitationIds` 新字段。
+- 新增 `app/agent_runtime/evaluation/` 评测框架：`dataset.py`（`EvaluationDataset` — YAML/JSON 加载）、`runner.py`（`EvaluationRunner` — 逐案例执行+指标计算）、`metrics.py`（`EvaluationMetrics` — 11 项指标+发布阈值检查）。
+- 3 份样本评测数据：预付款风险、模糊验收标准、缺少责任上限条款。新增 `tests/test_evaluation.py`。
+
+**G1 — Runtime 接口与 LangGraph 基础设施（搭壳，不切流量）**
+
+- 新增 `app/agent_runtime/runtime.py`：`AgentRuntime` 协议（`run()` + `resume()`）、`AgentResult` 数据类、`ResumeCommand`（从字典解析 + 状态版本校验）、`LegacyHarnessAdapter`（包装现有 `AgentRunner`）、`GraphAdapter`（包装编译后的 LangGraph StateGraph）、`ShadowAdapter`（并排运行 primary+shadow 对比差异）、`RuntimeRouter`（按 task_type 环境变量路由）。
+- 新增 `app/agent_runtime/graph/` 包：
+  - `state.py`：`BaseGraphState(TypedDict)` — 带自定义 reducer（`_add_observations`、`_add_citations`）的共享状态定义。
+  - `registry.py`：`GraphRegistry` — name+version 注册 + 编译缓存 + 单例。
+  - `checkpoint.py`：`MySqlCheckpointSaver` — 实现 MySQL `agent_graph_checkpoint` 表持久化，支持 `get_tuple()`/`put()`/`list()`/`delete_thread()`。
+  - `ping.py`：最小测试图（`ping_node` 读取合同标题），LangGraph 未安装时安全降级。
+- Java `AgentWorkbenchSchemaInitializer` 新增 `agent_graph_checkpoint`、`agent_node_execution` 两张表 + 3 条 runtime 路由配置种子（`agent.runtime.default/CONTRACT_REVIEW/FULFILLMENT_CHECK=legacy`）。
+- 新增 `requirements-graph.txt`：LangGraph 依赖独立安装（`langgraph>=0.4,<0.5`、`langgraph-checkpoint>=2.0,<3.0`），不回滚时不影响主流程。
+
+**G2 — ContractReviewGraph（12 节点 DAG，含条件路由和补检索循环）**
+
+- 新增 `listClauseInventory` 工具（`contract_store.py` + `contract_tools.py`）：分页返回完整条款目录（总数、类型分布、缺失关键类型、每条 ID/编号/标题/页数/字符数），不受 20 条限制。
+- 新增 `graph/nodes/` 7 个节点文件：
+  - `context.py`：`load_run_context`（加载合同快照）+ `freeze_case_snapshot`（冻结不可变事实）。
+  - `inventory.py`：`inventory_clauses`（直接查询 MySQL 构建条款清单）。
+  - `domain_tasks.py`：`create_domain_tasks`（7 个必查领域确定性模板：主体授权、商务付款、责任违约、合规保密、履约可执行性、终止续签、IP 数据）。
+  - `validation.py`：`validate_claims`（Claim Validator — 10 项检查：引用前缀、HIGH 双引用、负向声明、LLM 篡改评分字段、建议写成事实、标题缺失、clauseType 合法性、INSUFFICIENT_EVIDENCE 矛盾检查、AI 后果串入合同后果）。输出 `PASS | DOWNGRADE | REJECT`。
+  - `reflection.py`：`coverage_reflection`（领域覆盖矩阵 + 条件路由 CONFIRMED/NEED_MORE/CANNOT_RESOLVE）+ `targeted_retrieval`（补检索计数，max 2 轮）。
+  - `artifact.py`：`compose_report`（完整报告）+ `compose_limited_report`（受限报告）+ `validate_schema`（Pydantic）+ `persist_report`（落库）。
+- `graph/contract_review.py`：主图定义 — 12 节点 + `add_conditional_edges` 实现覆盖反射路由。
+- LangGraph `v0.4.10` 已安装并验证：PingGraph 和 ContractReviewGraph 均编译通过，已通过 RuntimeRouter 在实际合同案件上跑通全链路（12 节点 → state_revision=15 → 受限报告生成）。
+
+**G3 — FulfillmentCheckGraph（7 节点状态机，含人工中断/恢复）**
+
+- 新增 `graph/nodes/` 4 个履约节点：
+  - `requirements.py`：`decompose_requirements`（按 nodeType — PAYMENT/DELIVERY/ACCEPTANCE/NOTICE/RENEWAL/TERMINATION — 拆解为履约子项，模糊验收标记 `ambiguity`）。
+  - `fulfillment_judge.py`：`judge_each_requirement`（逐项证据匹配 + ourSide 视角：A方验收追责/B方交付举证，禁止 Agent 输出 COMPLETED/FAILED/ACCEPTED）。
+  - `fulfillment_validate.py`：`validate_fulfillment_judgement`（代码级校验：必需项有合同引用、INSUFFICIENT_EVIDENCE 不声称完成、UNCLEAR_TERMS 不高置信度）。
+  - `human_confirm.py`：`wait_human_confirmation`（LangGraph `interrupt_before` 暂停点）+ `apply_human_result`（读取 ResumeCommand 应用到状态）。
+- `graph/fulfillment_check.py`：主图定义 — 7 节点 + `interrupt_before=["wait_human_confirmation"]`。
+- 新增 `POST /internal/agent/run/{runId}/resume` 端点（`routes.py`）：接收 ResumeCommand，通过 RuntimeRouter 调用 `GraphAdapter.resume()` 从 checkpoint 恢复执行。
+- `RuntimeRouter` 注册链路：初始化时自动检测 LangGraph 可用性，编译 ContractReviewGraph 和 FulfillmentCheckGraph 并注册到 Router（`GraphAdapter(compiled, MySqlCheckpointSaver)`）。
+
+**G4 — 评测中心（后端 API + 管理端 UI）**
+
+- 新增 `EvalAdminController.java`（`/api/admin/eval`）：14 个端点 — 数据集 CRUD、用例管理、发起评测、评测记录查询（含逐案例结果）、版本对比（legacy vs langgraph 逐用例差异高亮）、指标趋势。
+- Java Schema Initializer 新增 4 张评测表：`agent_eval_dataset`、`agent_eval_case`、`agent_eval_run`、`agent_eval_result`。
+- 新增 `EvalCenter.vue`（管理端评测中心页面）：3 个 tab — 数据集（创建/用例/发起评测）、评测记录（召回率/引用率/误报率列表 + Runtime 标签）、版本对比（双下拉选择 + 差异高亮表格）。
+- 管理端路由和菜单新增"评测中心"入口。
+
+**架构变化**
+
+```
+之前：AgentRunner.execute() — 线性 6-Phase Hardcoded Pipeline
+之后：RuntimeRouter
+        ├── LegacyHarnessAdapter → AgentRunner（保留，回滚通道）
+        ├── GraphAdapter → ContractReviewGraph（12 节点 DAG）
+        └── GraphAdapter → FulfillmentCheckGraph（7 节点状态机 + interrupt/resume）
+
+激活方式：
+  AGENT_RUNTIME_CONTRACT_REVIEW=langgraph  # G2 已激活
+  AGENT_RUNTIME_FULFILLMENT_CHECK=langgraph  # G3 就绪
+  回滚：AGENT_RUNTIME_CONTRACT_REVIEW=legacy  # 无需重启
+```
+
+### 修改文件
+
+**G0 — 6 个文件**
+- `tools/chat-assistant/backend/app/agent_runtime/runner.py`：Phase 5 re-reflection + `_local_reflection` 加强 + `_generate_artifact` limited 参数 + `_fallback_review_artifact`
+- `tools/chat-assistant/backend/app/agent_runtime/prompts.py`：`reflection` 领域覆盖矩阵 + `contract_review` 受限报告模式 + 新字段
+- `tools/chat-assistant/backend/app/agent_runtime/schemas/__init__.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/schemas/review.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/schemas/fulfillment.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/schemas/validators.py`（新）
+
+**G0 评测 — 7 个文件**
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/__init__.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/dataset.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/runner.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/metrics.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/datasets/v1/sample-service-procurement.yaml`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/datasets/v1/sample-vague-acceptance.yaml`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/evaluation/datasets/v1/sample-missing-liability-cap.yaml`（新）
+
+**G1 — 7 个文件**
+- `tools/chat-assistant/backend/app/agent_runtime/runtime.py`（新）：`AgentRuntime` + `LegacyHarnessAdapter` + `GraphAdapter` + `ShadowAdapter` + `RuntimeRouter`
+- `tools/chat-assistant/backend/app/agent_runtime/graph/__init__.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/state.py`（新）：`BaseGraphState`
+- `tools/chat-assistant/backend/app/agent_runtime/graph/registry.py`（新）：`GraphRegistry`
+- `tools/chat-assistant/backend/app/agent_runtime/graph/checkpoint.py`（新）：`MySqlCheckpointSaver`
+- `tools/chat-assistant/backend/app/agent_runtime/graph/ping.py`（新）：Ping 测试图
+- `tools/chat-assistant/backend/requirements-graph.txt`（新）：LangGraph 依赖
+
+**G2 — 9 个文件**
+- `tools/chat-assistant/backend/app/agent_runtime/contract_store.py`：新增 `list_clause_inventory` 方法
+- `tools/chat-assistant/backend/app/agent_runtime/contract_tools.py`：新增 `listClauseInventory` 工具定义与执行派发
+- `tools/chat-assistant/backend/app/agent_runtime/graph/contract_review.py`（新）：主图 12 节点 + 条件路由
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/__init__.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/context.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/inventory.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/domain_tasks.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/validation.py`（新）：Claim Validator 10 项检查
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/reflection.py`（新）：覆盖反射 + 条件路由
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/artifact.py`（新）
+
+**G3 — 6 个文件**
+- `tools/chat-assistant/backend/app/agent_runtime/graph/fulfillment_check.py`（新）：主图 7 节点 + interrupt_before
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/requirements.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/fulfillment_judge.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/fulfillment_validate.py`（新）
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/human_confirm.py`（新）
+- `tools/chat-assistant/backend/app/api/routes.py`：新增 `_dispatch_via_router` + `resume_agent_run` 端点 + `_contract_runtime_router` 初始化
+
+**G4 — 4 个文件**
+- `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java`（新）：14 个评测 API
+- `agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java`：新增 4 张评测表 DDL
+- `agent-admin/src/views/EvalCenter.vue`（新）：评测中心管理端页面
+- `agent-admin/src/router/index.js`：新增评测中心路由
+- `agent-admin/src/components/AdminLayout.vue`：新增评测中心菜单项
+- `tools/chat-assistant/backend/tests/test_evaluation.py`（新）
+
+### 验证
+
+- `pip install -r requirements-graph.txt` → LangGraph v0.4.10 安装成功，PingGraph 编译通过。
+- ContractReviewGraph 12 节点在实际合同案件上跑通：state_revision=15 → `[范围受限]` 报告生成 → coverage_reflection 正确循环 2 次后转 CANNOT_RESOLVE。
+- FulfillmentCheckGraph 7 节点编译通过，`interrupt_before` 暂停逻辑正确。
+- `RuntimeRouter` 派发验证：`AGENT_RUNTIME_CONTRACT_REVIEW=langgraph` → `GraphAdapter` 正确路由 → `engine: langgraph`。
+- 所有 Python 模块编译通过，所有新导入无报错。
+- 8 个前端 `contractTimeline.test.js` 测试全部通过。
+- 3 份评测样本 YAML 正确加载。
+- LangGraph 未安装时 ping graph 安全降级（`register()` 跳过）。
+- `mvnw compile`：通过（Java EvalAdminController + SchemaInitializer）。
+- `agent-admin npm run build`：通过（评测中心页面 + 路由 + 菜单）。
+
+
 
 **日期**：2026-08-03
 

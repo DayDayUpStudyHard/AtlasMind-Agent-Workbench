@@ -28,6 +28,7 @@ from app.services.kb_service import KbService
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
+HEALTH_PROBE_TIMEOUT_SECONDS = 15.0
 
 router = APIRouter()
 internal_router = APIRouter()
@@ -41,13 +42,13 @@ _kb_service: KbService | None = None
 # ── Agent Runtime singletons ────────────────────────────────────────
 _agent_dispatcher = None   # RunDispatcher (project mode)
 _agent_recovery_task: asyncio.Task | None = None
-_agent_worker = None       # AgentRunWorker
-_agent_worker_task: asyncio.Task | None = None
 _active_runs: dict[str, asyncio.Task] = {}  # requestId → Task (idempotency)
 
 # Contract Agent runtime singletons
 _contract_dispatcher = None  # RunDispatcher (contract mode)
+_contract_runtime_router = None  # RuntimeRouter (G1+)
 _contract_initialized = False
+_contract_document_tasks: dict[int, asyncio.Task] = {}
 
 
 def _check_internal_token(token: str | None) -> None:
@@ -87,8 +88,8 @@ def get_kb() -> KbService:
 # ── Agent Runtime factory ───────────────────────────────────────────
 
 def _init_agent_runtime():
-    """Lazily initialise the Agent Runtime singletons (dispatcher + recovery + worker)."""
-    global _agent_dispatcher, _agent_recovery_task, _agent_worker, _agent_worker_task
+    """Lazily initialise the Agent Runtime singletons (dispatcher + recovery)."""
+    global _agent_dispatcher, _agent_recovery_task
     if _agent_dispatcher is not None:
         return
 
@@ -104,7 +105,6 @@ def _init_agent_runtime():
     from app.agent_runtime.runner import AgentRunner, RunDispatcher
     from app.agent_runtime.scoring import HealthScoringEngine
     from app.agent_runtime.tools import AgentToolRegistry
-    from app.agent_runtime.worker import AgentRunWorker
 
     run_store = MySqlRunStore()
     trace_store = MySqlTraceStore()
@@ -130,11 +130,7 @@ def _init_agent_runtime():
     recovery = RunRecovery(run_store)
     _agent_recovery_task = asyncio.create_task(recovery.run_forever())
 
-    # Start Redis Stream consumer worker (fire-and-forget dispatch from Java)
-    _agent_worker = AgentRunWorker(_agent_dispatcher, redis_url=settings.redis_url)
-    _agent_worker_task = asyncio.create_task(_agent_worker.run_forever())
-
-    logger.info("Agent Runtime initialised (stores, runner, recovery, stream-worker)")
+    logger.info("Agent Runtime initialised (stores, runner, recovery)")
 
 
 def get_dispatcher():
@@ -144,7 +140,7 @@ def get_dispatcher():
 
 def _init_contract_runtime():
     """Lazily initialise the Contract Agent Runtime."""
-    global _contract_dispatcher, _contract_initialized
+    global _contract_dispatcher, _contract_initialized, _contract_runtime_router
     if _contract_initialized:
         return
 
@@ -155,7 +151,7 @@ def _init_contract_runtime():
     from app.agent_runtime.contract_tools import ContractToolRegistry
     from app.agent_runtime.contract_store import ContractStore
     from app.agent_runtime.recovery import RunRecovery
-    from app.agent_runtime.worker import AgentRunWorker
+    from app.agent_runtime.runtime import LegacyHarnessAdapter, RuntimeRouter
     from app.config import settings
 
     run_store = MySqlRunStore()
@@ -176,20 +172,72 @@ def _init_contract_runtime():
     _contract_dispatcher = RunDispatcher(runner, run_store, report_store)
     runner.on_progress = _contract_dispatcher._publish_progress
 
-    # Start recovery + stream worker (same infrastructure as project mode)
+    # ── Runtime Router for G1+ ──
+    _contract_runtime_router = RuntimeRouter()
+    _contract_runtime_router.register("legacy", LegacyHarnessAdapter(runner))
+
+    # Conditionally register graph adapters if LangGraph is installed
+    try:
+        from app.agent_runtime.graph.checkpoint import MySqlCheckpointSaver
+        from app.agent_runtime.runtime import GraphAdapter
+
+        checkpointer = MySqlCheckpointSaver()
+
+        # Build and register ContractReviewGraph
+        try:
+            from app.agent_runtime.graph.contract_review import build_contract_review_graph
+            cr_graph = build_contract_review_graph(checkpointer=checkpointer)
+            _contract_runtime_router.register(
+                "contract_review",
+                GraphAdapter(
+                    cr_graph,
+                    checkpointer,
+                    graph_name="contract_review",
+                    graph_version="v1",
+                ),
+            )
+            logger.info("Registered contract_review graph adapter")
+        except Exception as exc:
+            logger.warning("contract_review graph init failed: %s", exc)
+
+        # Build and register FulfillmentCheckGraph
+        try:
+            from app.agent_runtime.graph.fulfillment_check import build_fulfillment_check_graph
+            fc_graph = build_fulfillment_check_graph(checkpointer=checkpointer)
+            _contract_runtime_router.register(
+                "fulfillment_check",
+                GraphAdapter(
+                    fc_graph,
+                    checkpointer,
+                    graph_name="fulfillment_check",
+                    graph_version="v1",
+                ),
+            )
+            logger.info("Registered fulfillment_check graph adapter")
+        except Exception as exc:
+            logger.warning("fulfillment_check graph init failed: %s", exc)
+        logger.info("Graph adapters registered via RuntimeRouter")
+    except Exception as exc:
+        logger.info("Graph adapters not available (LangGraph may not be installed): %s", exc)
+
+    # HTTP dispatch uses asyncio tasks; recovery handles stale runs.
     recovery = RunRecovery(run_store)
-    global _agent_recovery_task, _agent_worker, _agent_worker_task
+    global _agent_recovery_task
     _agent_recovery_task = asyncio.create_task(recovery.run_forever())
-    _agent_worker = AgentRunWorker(_contract_dispatcher, redis_url=settings.redis_url)
-    _agent_worker_task = asyncio.create_task(_agent_worker.run_forever())
 
     _contract_initialized = True
-    logger.info("Contract Agent Runtime initialised (stores, runner, recovery, stream-worker)")
+    logger.info("Contract Agent Runtime initialised (stores, runner, recovery)")
 
 
 def get_contract_dispatcher():
     _init_contract_runtime()
     return _contract_dispatcher
+
+
+def get_contract_runtime_router():
+    """Get the RuntimeRouter for G2+ graph dispatch and resume."""
+    _init_contract_runtime()
+    return _contract_runtime_router
 
 
 # ── Migration runner ────────────────────────────────────────────────
@@ -587,8 +635,10 @@ async def get_suggestions():
 
 
 @router.get("/health")
-async def health(probe: bool = False):
+async def health(probe: bool = False, component: str | None = None):
     result = {"status": "ok", "probe": probe, "components": {}}
+    component_key = (component or "").strip().lower()
+    llm_only = component_key in {"llm", "deepseek", "model"}
 
     if not settings.llm_api_key:
         result["components"]["llm"] = {"status": "error", "message": "LLM_API_KEY is not set"}
@@ -600,11 +650,20 @@ async def health(probe: bool = False):
             "base_url": settings.llm_base_url,
         }
         if probe:
-            error = get_llm().validate_connection()
+            try:
+                error = await asyncio.wait_for(
+                    asyncio.to_thread(get_llm().validate_connection),
+                    timeout=HEALTH_PROBE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                error = f"LLM health probe timed out after {HEALTH_PROBE_TIMEOUT_SECONDS:.0f}s"
             result["components"]["llm"]["status"] = "ok" if error is None else "error"
             if error:
                 result["components"]["llm"]["message"] = error
                 result["status"] = "degraded"
+
+    if llm_only:
+        return result
 
     emb = get_embedding()
     if emb.configured:
@@ -615,9 +674,20 @@ async def health(probe: bool = False):
             "dim": settings.embedding_dim,
         }
         if probe:
-            vector = emb.embed("AtlasMind health check")
+            try:
+                vector = await asyncio.wait_for(
+                    asyncio.to_thread(emb.embed, "AtlasMind health check"),
+                    timeout=HEALTH_PROBE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                vector = None
+                result["components"]["embedding"]["message"] = (
+                    f"Embedding health probe timed out after {HEALTH_PROBE_TIMEOUT_SECONDS:.0f}s"
+                )
             result["components"]["embedding"]["status"] = "ok" if vector else "error"
             if not vector:
+                result["status"] = "degraded"
+            if not vector and "message" not in result["components"]["embedding"]:
                 result["components"]["embedding"]["message"] = "Embedding API 请求失败或未返回向量"
                 result["status"] = "degraded"
     else:
@@ -626,7 +696,10 @@ async def health(probe: bool = False):
     try:
         es = get_es()
         if es.health():
-            ping_ok = es.ping()
+            ping_ok = await asyncio.wait_for(
+                asyncio.to_thread(es.ping),
+                timeout=HEALTH_PROBE_TIMEOUT_SECONDS,
+            )
             result["components"]["elasticsearch"] = {
                 "status": "ok" if ping_ok else "degraded",
                 "host": settings.es_host,
@@ -763,15 +836,34 @@ async def delete_document_index(
 @internal_router.post("/contract/documents/{document_id}/parse")
 async def parse_contract_document(
     document_id: int,
-    background_tasks: BackgroundTasks,
     x_internal_token: str | None = Header(default=None),
 ):
-    """Parse an inline contract document and persist locatable clauses."""
+    """Queue a contract document parse in a tracked worker task."""
     _check_internal_token(x_internal_token)
-    from app.agent_runtime.contract_document_parser import parse_contract_document
+    active = _contract_document_tasks.get(document_id)
+    if active is not None and not active.done():
+        return {"ok": True, "documentId": document_id, "status": "PROCESSING", "scheduled": False}
 
-    background_tasks.add_task(parse_contract_document, document_id)
-    return {"ok": True, "documentId": document_id, "status": "PENDING"}
+    from app.agent_runtime.contract_document_parser import parse_contract_document as parse_worker
+
+    async def run_worker() -> dict:
+        return await asyncio.to_thread(parse_worker, document_id)
+
+    task = asyncio.create_task(run_worker(), name=f"contract-document-parse-{document_id}")
+    _contract_document_tasks[document_id] = task
+
+    def on_done(done: asyncio.Task) -> None:
+        _contract_document_tasks.pop(document_id, None)
+        try:
+            result = done.result()
+            logger.info("Contract document parse finished: document=%s result=%s", document_id, result)
+        except asyncio.CancelledError:
+            logger.warning("Contract document parse cancelled: document=%s", document_id)
+        except Exception:
+            logger.exception("Contract document parse task crashed: document=%s", document_id)
+
+    task.add_done_callback(on_done)
+    return {"ok": True, "documentId": document_id, "status": "QUEUED", "scheduled": True}
 
 
 @internal_router.post("/contract/intakes/{intake_id}/extract")
@@ -788,6 +880,59 @@ async def extract_contract_intake(
     return {"ok": True, "intakeId": intake_id, "status": "PENDING"}
 
 
+async def _dispatch_via_router(router, request) -> None:
+    """Execute a run via RuntimeRouter with progress updates and persistence."""
+    from app.agent_runtime.api_models import AgentTaskContext
+    from app.agent_runtime.persistence import MySqlRunStore
+
+    run_store = MySqlRunStore()
+    run_id = request.run_id
+    heartbeat_task: asyncio.Task | None = None
+
+    try:
+        await run_store.update_run(run_id, status="CONTEXT_BUILDING", progress=5,
+                                   current_step="Graph Runtime 开始执行")
+        await run_store.heartbeat(run_id)
+        heartbeat_task = asyncio.create_task(_graph_heartbeat_loop(run_store, run_id))
+        ctx = AgentTaskContext.from_request(run_id, request)
+        result: AgentResult = await router.dispatch(ctx)
+
+        if result.status == "WAITING_HUMAN":
+            # HITL: graph paused at interrupt, state in checkpoint
+            await run_store.update_run(run_id, status="WAITING_HUMAN", progress=85,
+                                       current_step="等待人工确认")
+        elif result.status == "COMPLETED":
+            # Graph completed: artifact was already persisted by graph's persist_report node
+            await run_store.update_run(run_id, status="COMPLETED", progress=100,
+                                       current_step="Graph 产物已生成")
+        else:
+            # FAILED or other
+            error_msg = str((result.artifact or {}).get("artifactError", "Graph execution failed"))[:500]
+            await run_store.update_run(run_id, status="FAILED", progress=0,
+                                       error_message=error_msg)
+    except Exception as exc:
+        logger.exception("Graph dispatch failed for run %s", run_id)
+        try:
+            await run_store.update_run(run_id, status="FAILED", progress=0,
+                                       error_message=str(exc)[:500])
+        except Exception:
+            pass
+    finally:
+        if heartbeat_task is not None:
+            heartbeat_task.cancel()
+            try:
+                await heartbeat_task
+            except asyncio.CancelledError:
+                pass
+
+
+async def _graph_heartbeat_loop(run_store, run_id: int) -> None:
+    """Keep graph runs distinguishable from abandoned active rows."""
+    while True:
+        await asyncio.sleep(10)
+        await run_store.heartbeat(run_id)
+
+
 # ── Agent Runtime endpoints ──────────────────────────────────────────
 
 @internal_router.post("/agent/run")
@@ -802,12 +947,35 @@ async def start_agent_run(
     """
     _check_internal_token(x_internal_token)
     from app.agent_runtime.api_models import RunStatus, StartRunRequest, StartRunResponse
+    from app.agent_runtime.runtime import AgentResult
 
     request = StartRunRequest(payload)
     if not request.run_id:
         raise HTTPException(status_code=400, detail="runId is required")
 
-    # Route to contract dispatcher (default) or project dispatcher (legacy)
+    # ── G2+: Try RuntimeRouter for graph-based tasks ──
+    router = get_contract_runtime_router()
+    if router is not None and request.subject_type == "CONTRACT_CASE":
+        try:
+            # Dispatch via RuntimeRouter (async graph run)
+            task = asyncio.create_task(
+                _dispatch_via_router(router, request)
+            )
+            request_id = request.request_id or ""
+            if request_id:
+                _active_runs[request_id] = task
+                task.add_done_callback(lambda _t, rid=request_id: _active_runs.pop(rid, None))
+
+            return StartRunResponse(
+                run_id=request.run_id,
+                status=RunStatus.CREATED,
+                progress=0,
+                current_step="已接收，Graph Runtime 调度中",
+            ).to_dict()
+        except NotImplementedError:
+            pass  # Fall through to legacy dispatcher
+
+    # Route to contract dispatcher (legacy fallback)
     if request.subject_type == "CONTRACT_CASE":
         dispatcher = get_contract_dispatcher()
     else:
@@ -871,6 +1039,268 @@ async def cancel_agent_run(
     reason = str(payload.get("reason", "用户手动取消"))
     await store.update_run(run_id, status="CANCELLED", error_message=reason)
     return {"runId": run_id, "status": "CANCELLED"}
+
+
+@internal_router.post("/agent/run/{run_id}/resume")
+async def resume_agent_run(
+    run_id: int,
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Resume a paused graph run with a human command.
+
+    Used by fulfillment check graph when human confirms/rejects/requests supplement.
+    Requires agent.runtime to be 'langgraph' for the given task type.
+    """
+    _check_internal_token(x_internal_token)
+
+    from app.agent_runtime.runtime import ResumeCommand
+
+    command = ResumeCommand.from_dict(payload)
+    router = get_contract_runtime_router()
+
+    if router is None:
+        raise HTTPException(
+            status_code=400,
+            detail="RuntimeRouter not initialized. Resume requires LangGraph infrastructure.",
+        )
+
+    try:
+        result = await router.resume(run_id, command)
+        return {
+            "runId": run_id,
+            "status": result.status,
+            "artifact": result.artifact,
+        }
+    except NotImplementedError:
+        raise HTTPException(
+            status_code=400,
+            detail="Resume is not supported by the current agent runtime. "
+                   "Set AGENT_RUNTIME_DEFAULT=langgraph to enable graph-based resume.",
+        )
+    except Exception as exc:
+        logger.exception("Resume failed for run %s", run_id)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@internal_router.post("/agent/evaluations/run")
+async def run_evaluation(
+    payload: dict,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Fire-and-forget eval run. Returns immediately, runs in background."""
+    _check_internal_token(x_internal_token)
+    eval_run_id = int(payload.get("evalRunId", 0))
+    if not eval_run_id:
+        raise HTTPException(status_code=400, detail="evalRunId is required")
+
+    # Spawn background task, return immediately to avoid HTTP timeout
+    asyncio.create_task(_run_evaluation_background(eval_run_id))
+    return {"evalRunId": eval_run_id, "status": "ACCEPTED", "message": "评测已开始后台执行"}
+
+
+def _fail_eval_run(eval_run_id: int, error: str) -> None:
+    """Mark an eval run as FAILED."""
+    try:
+        from app.agent_runtime.persistence import _conn
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE agent_eval_run SET status='FAILED', summary_json=%s, finished_at=NOW() WHERE id=%s",
+                    (f'{{"error": "{error}"}}', eval_run_id),
+                )
+                conn.commit()
+    except Exception:
+        pass
+
+
+async def _run_evaluation_background(eval_run_id: int):
+    """Background worker: iterate cases, run agent, compute metrics, write results."""
+    from app.agent_runtime.persistence import _conn
+
+    temp_case_ids: list[int] = []  # Track temp cases for cleanup
+
+    try:
+        # ── Load eval run config ──
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT id, dataset_id, runtime_engine FROM agent_eval_run WHERE id=%s",
+                    (eval_run_id,),
+                )
+                run_row = cur.fetchone()
+                if not run_row:
+                    _fail_eval_run(eval_run_id, "Eval run not found")
+                    return
+                dataset_id = int(run_row["dataset_id"])
+                runtime = str(run_row["runtime_engine"])
+                cur.execute(
+                    "SELECT id, case_key, title, contract_type, contract_text, expected_findings_json FROM agent_eval_case WHERE dataset_id=%s AND status='ACTIVE'",
+                    (dataset_id,),
+                )
+                cases = cur.fetchall()
+
+        if not cases:
+            _fail_eval_run(eval_run_id, "No active cases in dataset")
+            return
+
+        logger.info("Eval run %s: %d cases, runtime=%s", eval_run_id, len(cases), runtime)
+
+        per_case_results = []
+        success_count = 0
+
+        for idx, case in enumerate(cases):
+            case_id = int(case["id"])
+            try:
+                # Execute a minimal contract review for this case
+                from app.agent_runtime.api_models import AgentTaskContext
+                router = get_contract_runtime_router()
+
+                # Create temp contract_case for eval context so ContractStore can find clauses
+                temp_case_id = 0
+                contract_text = str(case.get("contract_text") or "")
+                if contract_text.strip():
+                    with _conn() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute(
+                                """INSERT INTO contract_case (case_key, title, contract_type, status, counterparty)
+                                   VALUES (%s,%s,%s,'MATERIAL_PENDING','评测对方主体')""",
+                                (f"EVAL-{eval_run_id}-{idx}", case["title"], case["contract_type"]),
+                            )
+                            temp_case_id = cur.lastrowid
+                            temp_case_ids.append(temp_case_id)
+                            cur.execute(
+                                """INSERT INTO contract_document (case_id, document_type, file_name, file_path, version, parse_status, content_text)
+                                   VALUES (%s,'MAIN',%s,'eval://text',1,'READY',%s)""",
+                                (temp_case_id, case["title"] + ".txt", contract_text),
+                            )
+                            doc_id = cur.lastrowid
+                            import re as _re
+                            parts = _re.split(r'(?=(?:第[一二三四五六七八九十百千]+[章节条]|\d+[.、．]))', contract_text)
+                            for ci, part in enumerate(parts):
+                                part = part.strip()
+                                if len(part) < 10:
+                                    continue
+                                cur.execute(
+                                    """INSERT INTO contract_clause (document_id, case_id, clause_number, title, content, clause_type)
+                                       VALUES (%s,%s,%s,%s,LEFT(%s,8000),'OTHER')""",
+                                    (doc_id, temp_case_id, str(ci + 1), part[:80], part),
+                                )
+                            conn.commit()
+
+                ctx = AgentTaskContext(
+                    run_id=eval_run_id * 10000 + idx,
+                    project_id=temp_case_id,
+                    task_type="CONTRACT_REVIEW",
+                    question=f"审查合同: {case['title']}",
+                    subject_type="CONTRACT_CASE",
+                    subject_id=temp_case_id,
+                    project={
+                        "id": temp_case_id,
+                        "title": case["title"],
+                        "contractType": case["contract_type"],
+                    },
+                    task_input={"evalCaseId": case["case_key"]},
+                )
+
+                result = await router.dispatch_with_mode(ctx, runtime)
+                artifact = result.artifact or {}
+                findings = artifact.get("findings") or []
+                expected_json = case["expected_findings_json"] or "[]"
+                import json as _json
+                try:
+                    expected = _json.loads(expected_json) if isinstance(expected_json, str) else expected_json
+                except Exception:
+                    expected = []
+
+                expected_high = [f for f in expected if str(f.get("severity", "")).upper() == "HIGH"]
+                actual_high = [f for f in findings if str(f.get("severity", "")).upper() == "HIGH"]
+                high_recall = len([h for h in expected_high if any(
+                    str(h.get("title", "")).lower() in str(a.get("title", "")).lower()
+                    for a in actual_high
+                )]) / max(len(expected_high), 1)
+
+                dual_cited = sum(1 for f in findings if f.get("contractCitation") or f.get("contractCitationIds"))
+                dual_rate = dual_cited / max(len(findings), 1)
+
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO agent_eval_result
+                            (run_id, case_id, success, high_recall, dual_citation_rate,
+                             false_positives, analysis_mode, risk_score, finding_count, result_json)
+                            VALUES (%s,%s,1,%s,%s,0,%s,%s,%s,%s)
+                            ON DUPLICATE KEY UPDATE high_recall=VALUES(high_recall),
+                                                    dual_citation_rate=VALUES(dual_citation_rate),
+                                                    analysis_mode=VALUES(analysis_mode),
+                                                    risk_score=VALUES(risk_score),
+                                                    finding_count=VALUES(finding_count),
+                                                    result_json=VALUES(result_json)
+                            """, (
+                            eval_run_id, case_id,
+                            high_recall, dual_rate,
+                            artifact.get("analysisMode", "FULL"),
+                            artifact.get("riskScore", 0),
+                            len(findings),
+                            _json.dumps(artifact, ensure_ascii=False, default=str),
+                        ))
+                        conn.commit()
+
+                per_case_results.append({"caseId": case_id, "highRecall": high_recall})
+                success_count += 1
+                logger.info("Eval run %s: case %s/%s done (recall=%.2f)", eval_run_id, idx + 1, len(cases), high_recall)
+
+            except Exception as exc:
+                logger.error("Eval case %s failed: %s", case_id, exc)
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute("""
+                            INSERT INTO agent_eval_result
+                            (run_id, case_id, success, error_message)
+                            VALUES (%s,%s,0,%s)
+                            ON DUPLICATE KEY UPDATE error_message=VALUES(error_message)
+                            """, (eval_run_id, case_id, str(exc)[:500]))
+                        conn.commit()
+
+        # Compute aggregate metrics
+        if per_case_results:
+            avg_recall = sum(r["highRecall"] for r in per_case_results) / len(per_case_results)
+        else:
+            avg_recall = 0
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE agent_eval_run
+                    SET status='COMPLETED', high_risk_recall=%s, dual_citation_rate=0,
+                        false_positive_rate=0, case_count=%s, passed_count=%s,
+                        finished_at=NOW()
+                    WHERE id=%s
+                    """, (avg_recall, len(cases), success_count, eval_run_id))
+                conn.commit()
+
+    except Exception as exc:
+        logger.exception("Eval run %s background task failed", eval_run_id)
+        _fail_eval_run(eval_run_id, str(exc)[:500])
+
+    finally:
+        # Clean up temp eval contract cases
+        if temp_case_ids:
+            try:
+                placeholders = ",".join(["%s"] * len(temp_case_ids))
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"UPDATE contract_case SET deleted=1 WHERE id IN ({placeholders})",
+                            temp_case_ids,
+                        )
+                        conn.commit()
+                logger.info("Cleaned up %d temp eval cases", len(temp_case_ids))
+            except Exception:
+                pass
+
+    logger.info("Eval run %s completed: recall=%.3f, %d/%d passed",
+                eval_run_id, avg_recall, success_count, len(cases))
 
 
 @kb_router.post("/qa/test")
