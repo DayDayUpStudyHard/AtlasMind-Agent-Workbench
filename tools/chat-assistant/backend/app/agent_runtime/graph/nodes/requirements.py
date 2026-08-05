@@ -24,7 +24,8 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
                 from ...persistence import _normalize_value
 
                 cur.execute(
-                    """SELECT n.id, n.node_type AS nodeType, n.label,
+                    """SELECT n.id, n.clause_id AS clauseId,
+                              n.node_type AS nodeType, n.label,
                               n.business_meaning AS businessMeaning,
                               n.responsible_party AS responsibleParty,
                               n.citation_json AS citationJson,
@@ -53,7 +54,7 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
     node_type = str(node.get("nodeType") or "OTHER").upper()
     label = str(node.get("label") or "")
     business_meaning = str(node.get("businessMeaning") or "")
-    clause_content = str(node.get("clauseContent") or "")[:500]
+    clause_content = str(node.get("clauseContent") or "")[:12000]
 
     items: list[dict] = []
     item_idx = 0

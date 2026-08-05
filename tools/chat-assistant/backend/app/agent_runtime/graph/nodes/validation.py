@@ -34,11 +34,16 @@ def validate_claims(state: dict[str, Any]) -> dict[str, Any]:
     validated: list[dict] = []
     rejected: int = 0
     downgraded: int = 0
+    evidence_checked: int = 0
+    evidence_unsupported: int = 0
 
     for finding in merged:
         verdict, reasons = _validate_one(finding, state)
         finding["validationVerdict"] = verdict
         finding["validationReasons"] = reasons
+        checks = finding.get("evidenceValidation") or []
+        evidence_checked += len(checks)
+        evidence_unsupported += sum(1 for check in checks if not check.get("supported"))
 
         if verdict == "REJECT_FINDING":
             rejected += 1
@@ -58,6 +63,12 @@ def validate_claims(state: dict[str, Any]) -> dict[str, Any]:
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "validate_claims",
         "validated_findings": validated,
+        "evidence_validation": {
+            "checkedCitationCount": evidence_checked,
+            "unsupportedCitationCount": evidence_unsupported,
+            "rejectedFindingCount": rejected,
+            "downgradedFindingCount": downgraded,
+        },
         "coverage": state.get("coverage") or {
             "validatedCount": len(validated),
             "rejectedCount": rejected,
@@ -86,6 +97,63 @@ def _validate_one(finding: dict, state: dict) -> tuple[str, list[str]]:
         elif available_ids and cid not in available_ids:
             reasons.append(f"citation ID was not returned by retrieval: {cid}")
             has_fatal = True
+
+    # Check every cited source against canonical text. Retrieval agreement is
+    # useful confidence metadata, but it is not a substitute for this check.
+    evidence_by_id = {
+        str(item.get("sourceId") or ""): item
+        for item in state.get("citations") or []
+        if isinstance(item, dict) and item.get("sourceId")
+    }
+    try:
+        from ...evidence import citation_support
+
+        support_results = []
+        for index, cid in enumerate(contract_ids + policy_ids):
+            citation = None
+            if index == 0 and contract_ids:
+                citation = finding.get("contractCitation")
+            elif index == len(contract_ids) and policy_ids:
+                citation = finding.get("policyCitation")
+            support_results.append(citation_support(cid, citation, evidence_by_id))
+        finding["evidenceValidation"] = support_results
+        unsupported = [item for item in support_results if not item.get("supported")]
+        if unsupported:
+            reasons.extend(
+                f"{item.get('citationId')}: {'; '.join(item.get('reasons') or [])}"
+                for item in unsupported
+            )
+            has_fatal = True
+    except Exception as exc:
+        reasons.append(f"evidence validator unavailable: {exc}")
+        force_downgrade = True
+
+    quality = state.get("document_quality") or {}
+    if quality.get("status") in {"LOW", "REVIEW"}:
+        finding["humanReviewRequired"] = True
+        finding["documentQualityNotice"] = "文档解析质量未达到自动确认标准，请人工核对原页。"
+        reasons.append("document parse quality requires human review")
+        force_downgrade = True
+
+    selected_evidence = [
+        evidence_by_id[cid]
+        for cid in contract_ids + policy_ids
+        if cid in evidence_by_id
+    ]
+    if selected_evidence:
+        finding["retrievalEvidence"] = {
+            "crossValidated": any(item.get("crossValidated") for item in selected_evidence),
+            "retrievalSources": sorted({
+                source
+                for item in selected_evidence
+                for source in (item.get("retrievalSources") or [])
+            }),
+            "fallbackUsed": all(
+                "MYSQL_KEYWORD" in (item.get("retrievalSources") or [])
+                and not item.get("crossValidated")
+                for item in selected_evidence
+            ),
+        }
 
     # Check 2: HIGH severity must have contract evidence. Missing policy support
     # lowers confidence but does not hide a contract-grounded material risk.

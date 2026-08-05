@@ -19,6 +19,21 @@ def wait_human_confirmation(state: dict[str, Any]) -> dict[str, Any]:
     """
     artifacts = state.get("artifacts") or {}
     judgements = artifacts.get("judgements") or []
+    evidence_snapshot = []
+    for observation in state.get("observations") or []:
+        output = observation.get("output") or {}
+        for item in output.get("evidenceDocuments") or []:
+            if not isinstance(item, dict):
+                continue
+            evidence_snapshot.append({
+                "documentId": item.get("documentId") or item.get("id"),
+                "fileName": item.get("fileName") or "",
+                "version": item.get("version"),
+                "contentHash": item.get("contentHash"),
+                "snippet": item.get("snippet") or "",
+                "matchedTerms": item.get("matchedTerms") or [],
+                "matchReason": item.get("matchReason") or "",
+            })
 
     # Build structured wait state for frontend display
     wait_state = {
@@ -71,8 +86,12 @@ def apply_human_result(state: dict[str, Any]) -> dict[str, Any]:
         "riskLevel": "LOW" if manual_result == "SATISFIED" else "MEDIUM",
         "confidenceLevel": "HIGH" if manual_result == "SATISFIED" else "MEDIUM",
         "requirements": judgements,
-        "evidenceSnapshot": [],
-        "missingEvidence": [],
+        "evidenceSnapshot": evidence_snapshot,
+        "missingEvidence": sorted({
+            str(item.get("gap") or "")
+            for item in judgements
+            if str(item.get("gap") or "").strip()
+        }),
         "explicitConsequence": "",
         "aiRisk": "AI 推断，仅供参考：最终履约结果以人工确认为准。",
         "suggestedActions": [],

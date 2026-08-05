@@ -308,6 +308,39 @@
             <strong>{{ d.score }}</strong>
           </div>
         </div>
+        <div class="review-result-footer">
+          <span>
+            {{ c.reviewSummary.reportType === 'CONTRACT_REVIEW' ? '合同审查结果' : '合同审查报告' }}
+            <template v-if="c.reviewSummary.createTime"> · {{ formatDate(c.reviewSummary.createTime) }}</template>
+          </span>
+          <button type="button" class="quiet-button tiny" @click="showReviewReport = !showReviewReport">
+            {{ showReviewReport ? '收起完整结果' : '展开完整结果' }}
+          </button>
+        </div>
+        <div v-if="showReviewReport" class="review-result-detail">
+          <section v-if="reviewReportRisks.length">
+            <strong>风险结果 · {{ reviewReportRisks.length }} 项</strong>
+            <div v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-result-item">
+              <span>{{ severityLabel(risk.severity) }}</span>
+              <div>
+                <b>{{ risk.title || risk.name || `风险 ${index + 1}` }}</b>
+                <p>{{ risk.description || risk.summary || risk.detail || '请展开下方审查发现查看证据与处理建议。' }}</p>
+              </div>
+            </div>
+          </section>
+          <section v-if="reviewReportPlan.length">
+            <strong>处理计划 · {{ reviewReportPlan.length }} 项</strong>
+            <div v-for="(item, index) in reviewReportPlan" :key="item.id || index" class="review-result-item">
+              <span>{{ item.id || index + 1 }}</span>
+              <div>
+                <b>{{ item.title || item.action || item.name || '待处理事项' }}</b>
+                <p>{{ item.acceptance || item.description || item.ownerRole || '请结合审查发现确认处理人和完成标准。' }}</p>
+              </div>
+            </div>
+          </section>
+          <pre v-if="c.reviewSummary.reportMarkdown" class="review-report-markdown">{{ c.reviewSummary.reportMarkdown }}</pre>
+          <pre v-else-if="c.reviewSummary.contentJson" class="review-report-json">{{ prettyReportContent(c.reviewSummary.contentJson) }}</pre>
+        </div>
       </div>
     </section>
 
@@ -731,6 +764,7 @@ import {
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const running = ref(false)
 const expandedFindings = reactive(new Set())
+const showReviewReport = ref(false)
 const showUpload = ref(false)
 const uploading = ref(false)
 const upload = ref({ mode: 'file', docType: 'MAIN', fileName: '', filePath: '', contentText: '', file: null })
@@ -757,6 +791,8 @@ let caseRefreshInFlight = false
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
+const reviewReportRisks = computed(() => arrayField(c.value.reviewSummary?.risksJson).filter(item => item && typeof item === 'object'))
+const reviewReportPlan = computed(() => arrayField(c.value.reviewSummary?.planJson).filter(item => item && typeof item === 'object'))
 const analysisStages = computed(() => {
   const workflow = analysisWorkflow.value
   const status = String(workflow.status || '').toUpperCase()
@@ -1538,6 +1574,11 @@ function findingDetail(finding) {
   if (typeof value === 'object') return value
   try { return JSON.parse(value) || {} } catch { return {} }
 }
+function prettyReportContent(value) {
+  if (!value) return ''
+  if (typeof value === 'object') return JSON.stringify(value, null, 2)
+  try { return JSON.stringify(JSON.parse(value), null, 2) } catch { return String(value) }
+}
 function findingDomainName(finding) {
   return findingDetail(finding).domainName || clauseTypeLabel(finding?.clauseType)
 }
@@ -1764,6 +1805,14 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .dimension-strip div{padding:8px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
 .dimension-strip span{display:block;font-size:10px;color:var(--atlas-subtle);font-weight:800}
 .dimension-strip strong{display:block;margin-top:3px;font-size:18px;color:var(--atlas-text)}
+.review-result-footer{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:14px;padding-top:11px;border-top:1px solid var(--atlas-border);color:var(--atlas-subtle);font-size:10px}
+.review-result-detail{display:grid;gap:14px;margin-top:12px;padding:14px;background:rgba(255,255,255,.68);border:1px solid var(--atlas-border);border-radius:4px}
+.review-result-detail section>strong{display:block;margin-bottom:8px;color:var(--atlas-text);font-size:12px}
+.review-result-item{display:grid;grid-template-columns:44px minmax(0,1fr);gap:10px;padding:9px 0;border-top:1px solid var(--atlas-border)}
+.review-result-item>span{display:inline-flex;align-items:flex-start;justify-content:center;height:20px;padding:3px 5px;background:var(--atlas-surface-soft);color:var(--atlas-primary);font-size:10px;font-weight:900}
+.review-result-item b{display:block;color:var(--atlas-text);font-size:12px;line-height:1.45}
+.review-result-item p{margin:3px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.review-report-markdown,.review-report-json{max-height:280px;overflow:auto;margin:0;padding:12px;color:#354452;background:#f7f9fb;border:1px solid var(--atlas-border);font:11px/1.7 'JetBrains Mono','Fira Code',monospace;white-space:pre-wrap;word-break:break-word}
 
 .side-section{margin-bottom:20px;padding:18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
 .side-section h3{margin:0 0 12px;font-family:var(--atlas-font-display);font-size:16px;color:var(--atlas-text)}

@@ -19,6 +19,7 @@ from app.services.es_service import ESService
 from app.services.llm_service import LLMService
 
 from .contract_docx_parser import parse_docx_blocks
+from .evidence import normalize_document_text
 from .persistence import new_connection
 
 logger = logging.getLogger(__name__)
@@ -1478,9 +1479,11 @@ def _index_contract_chunks(
 ) -> dict:
     cur.execute(
         """SELECT ck.id, ck.case_id, ck.document_id, ck.clause_id, ck.clause_number,
-                  ck.chunk_text, ck.source_page, c.title, c.clause_type
+                  ck.chunk_text, ck.source_page, ck.content_hash,
+                  d.version AS document_version, c.title, c.clause_type
            FROM contract_clause_chunk ck
            LEFT JOIN contract_clause c ON c.id=ck.clause_id
+           LEFT JOIN contract_document d ON d.id=ck.document_id
            WHERE ck.document_id=%s
            ORDER BY ck.chunk_index ASC""",
         (document_id,),
@@ -1570,8 +1573,7 @@ def _index_contract_chunks(
 
 
 def _normalize_text(text: str) -> str:
-    lines = [line.strip() for line in str(text or "").splitlines()]
-    return "\n".join(line for line in lines if line)
+    return normalize_document_text(text)
 
 
 def _quote_in_content(quote: str, content: str) -> bool:
@@ -1729,6 +1731,7 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
     # Uploaded files are the source of truth. content_text may be a previous
     # failed parse and must never prevent a later OCR/MinerU reparse.
     if inline_text.strip() and (not file_path or file_path == "inline:text"):
+        inline_text = normalize_document_text(inline_text)
         _update_job(cur, job_id, "PROCESSING", "TEXT_PARSING", 20)
         _append_job_trace(
             cur,
@@ -1743,7 +1746,7 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
             "parser": "inline-text",
             "diagnostics": {
                 "provider": "INLINE_TEXT",
-                "quality": assess_extracted_text_quality(inline_text),
+            "quality": assess_extracted_text_quality(inline_text),
                 "requiresReparse": False,
             },
             "blockCount": len([p for p in re.split(r"\n\s*\n", inline_text) if p.strip()]),
@@ -1803,7 +1806,8 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
         parser_provider = str(diagnostics.get("provider") or file_type).strip().lower()
         parser = f"document-parser:{parser_provider}"
 
-    content = "\n\n".join(block.text for block in blocks if block.text.strip())
+    content = normalize_document_text("\n\n".join(block.text for block in blocks if block.text.strip()))
+    diagnostics.setdefault("quality", assess_extracted_text_quality(content))
     if file_type in {"DOC", "DOCX"}:
         diagnostics = {
             "provider": parser,

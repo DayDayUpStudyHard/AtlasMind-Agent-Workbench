@@ -95,6 +95,8 @@ CONTRACT_INDEX_MAPPING = {
             "content": {"type": "text", "analyzer": "standard"},
             "clause_type": {"type": "keyword"},
             "source_page": {"type": "integer"},
+            "content_hash": {"type": "keyword"},
+            "document_version": {"type": "integer"},
             "status": {"type": "keyword"},
             "embedding_model": {"type": "keyword"},
             "embedding": {
@@ -571,6 +573,8 @@ class ESService:
             "content": row.get("chunk_text") or "",
             "clause_type": row.get("clause_type") or "OTHER",
             "source_page": row.get("source_page"),
+            "content_hash": row.get("content_hash"),
+            "document_version": row.get("document_version"),
             "status": "READY",
             "embedding_model": settings.embedding_model,
         }
@@ -621,7 +625,7 @@ class ESService:
                     {"term": {"case_id": case_id}},
                 ]}},
             },
-            "_source": ["chunk_id", "case_id", "document_id", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
+            "_source": ["chunk_id", "case_id", "document_id", "document_version", "content_hash", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
             "size": top_k,
         }
         try:
@@ -654,7 +658,7 @@ class ESService:
                 }
             },
             "highlight": {"fields": {"content": {"fragment_size": 180, "number_of_fragments": 2}}},
-            "_source": ["chunk_id", "case_id", "document_id", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
+            "_source": ["chunk_id", "case_id", "document_id", "document_version", "content_hash", "clause_id", "clause_number", "title", "content", "clause_type", "source_page"],
             "size": top_k,
         }
         try:
@@ -729,6 +733,8 @@ class ESService:
                     "sourceType": "CONTRACT_CLAUSE",
                     "caseId": source.get("case_id"),
                     "documentId": source.get("document_id"),
+                    "documentVersion": source.get("document_version"),
+                    "contentHash": source.get("content_hash"),
                     "clauseId": source.get("clause_id"),
                     "chunkId": source.get("chunk_id"),
                     "clauseNumber": source.get("clause_number", ""),

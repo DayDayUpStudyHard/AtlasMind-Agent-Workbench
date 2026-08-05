@@ -318,22 +318,28 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                         + "evidence_snapshot_hash AS evidenceSnapshotHash, create_time AS createTime "
                         + "FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
         List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
-                SELECT id, report_type AS reportType, title, summary,
+                SELECT rp.id, rp.report_type AS reportType, rp.title, rp.summary,
                        health_status AS riskStatus, health_score AS riskScore,
                        dimensions_json AS dimensionsJson, risks_json AS risksJson,
                        plan_json AS planJson, citations_json AS citationsJson,
                        evidence_hash AS evidenceHash, analysis_mode AS analysisMode,
                        scoring_version AS scoringVersion,
-                       status, create_time AS createTime
-                FROM agent_report
-                WHERE subject_type=? AND subject_id=?
-                ORDER BY id DESC LIMIT 5
-                """, SUBJECT_TYPE, caseId);
-        parseJsonFields(reports, "dimensionsJson", "risksJson", "planJson", "citationsJson");
+                       content_json AS contentJson, report_markdown AS reportMarkdown,
+                       rp.status, rp.create_time AS createTime
+                FROM agent_report rp
+                LEFT JOIN agent_run ar ON ar.id=rp.run_id
+                WHERE (rp.subject_type=? AND rp.subject_id=?)
+                   OR (ar.subject_type=? AND ar.subject_id=?)
+                ORDER BY
+                    CASE WHEN rp.report_type IN ('CONTRACT_REVIEW_REPORT','CONTRACT_REVIEW') THEN 0 ELSE 1 END,
+                    rp.id DESC
+                LIMIT 8
+                """, SUBJECT_TYPE, caseId, SUBJECT_TYPE, caseId);
+        parseJsonFields(reports, "dimensionsJson", "risksJson", "planJson", "citationsJson", "contentJson");
         normalizeReportRisk(reports, findings);
         c.put("reports", reports);
         c.put("reviewSummary", reports.stream()
-                .filter(r -> "CONTRACT_REVIEW_REPORT".equals(str(r, "reportType")))
+                .filter(r -> Set.of("CONTRACT_REVIEW_REPORT", "CONTRACT_REVIEW").contains(str(r, "reportType")))
                 .findFirst().orElse(Map.of()));
         // Latest pending intake for confirmation modal
         c.put("pendingIntake", first(jdbcTemplate.queryForList(

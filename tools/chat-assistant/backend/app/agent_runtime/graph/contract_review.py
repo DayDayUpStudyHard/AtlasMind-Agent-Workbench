@@ -23,6 +23,7 @@ from .nodes.artifact import (
     compose_limited_report,
     validate_schema,
     repair_artifact,
+    prepare_human_review,
     _route_after_schema,
     persist_report,
 )
@@ -80,6 +81,7 @@ def build_contract_review_graph(checkpointer: Any = None) -> Any:
     builder.add_node("compose_limited_report", compose_limited_report)
     builder.add_node("validate_schema", validate_schema)
     builder.add_node("repair_artifact", repair_artifact)
+    builder.add_node("prepare_human_review", prepare_human_review)
     builder.add_node("persist_report", persist_report)
 
     # ── Edges ──
@@ -115,11 +117,13 @@ def build_contract_review_graph(checkpointer: Any = None) -> Any:
         _route_after_schema,
         {
             "persist_report": "persist_report",
+            "prepare_human_review": "prepare_human_review",
             "repair_artifact": "repair_artifact",
             "compose_limited_report": "compose_limited_report",
         },
     )
     builder.add_edge("repair_artifact", "validate_schema")
+    builder.add_edge("prepare_human_review", "persist_report")
     builder.add_edge("persist_report", END)
 
     return builder.compile(checkpointer=checkpointer) if checkpointer else builder.compile()

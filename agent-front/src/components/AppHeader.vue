@@ -39,45 +39,51 @@
 
             <div class="panel-divider"></div>
 
-            <template v-if="documentPipelines.length">
-              <div class="panel-section-heading">
-                <strong>合同文件处理</strong>
-                <span class="section-note">后台继续</span>
-              </div>
-              <div class="document-pipeline-feed">
-                <div
-                  v-for="pipeline in documentPipelines"
-                  :key="pipeline.jobId"
-                  class="document-pipeline-row"
-                  :class="pipelineStatusClass(pipeline.status)"
-                  role="button"
-                  tabindex="0"
-                  @click="openDocumentPipeline(pipeline)"
-                  @keydown.enter="openDocumentPipeline(pipeline)"
-                >
-                  <span class="pipeline-dot" :class="pipelineStatusClass(pipeline.status)"></span>
-                  <div class="document-pipeline-copy">
-                    <strong>{{ pipeline.caseTitle || pipeline.fileName || `合同文件 #${pipeline.documentId}` }}</strong>
-                    <span>{{ pipelineActionLabel(pipeline) }}</span>
-                    <div v-if="pipelineIsActive(pipeline.status)" class="pipeline-progress">
-                      <i :style="{ width: `${pipeline.progress || 0}%` }"></i>
+            <div class="panel-section-heading">
+              <strong>合同处理</strong>
+              <span class="section-note">文件、Agent 与结果</span>
+            </div>
+            <div v-if="contractActivities.length" class="contract-activity-feed">
+              <div
+                v-for="activity in contractActivities"
+                :key="activity.id"
+                class="contract-activity-row"
+                :class="activityStatusClass(activity)"
+                role="button"
+                tabindex="0"
+                @click="openContractActivity(activity)"
+                @keydown.enter="openContractActivity(activity)"
+              >
+                <span class="activity-dot" :class="activityStatusClass(activity)"></span>
+                <div class="contract-activity-copy">
+                  <div class="activity-headline">
+                    <strong>{{ activity.caseTitle }}</strong>
+                    <span class="activity-kind">{{ activity.kind === 'CONTRACT_WORKFLOW' ? '合同工作流' : 'Agent 任务' }}</span>
+                  </div>
+                  <span class="activity-main-label">{{ activityMainLabel(activity) }}</span>
+                  <div class="activity-stage-list">
+                    <div v-if="activity.pipeline" class="activity-stage">
+                      <span>文件</span>
+                      <strong>{{ pipelineActionLabel(activity.pipeline) }}</strong>
+                      <b>{{ pipelineIsActive(activity.pipeline.status) ? `${activity.pipeline.progress || 0}%` : pipelineStatusLabel(activity.pipeline.status) }}</b>
+                    </div>
+                    <div v-if="activity.run" class="activity-stage">
+                      <span>Agent</span>
+                      <strong>{{ activity.run.currentStep || runTypeLabel(activity.run.runType) }}</strong>
+                      <b>{{ runIsActive(activity.run.status) ? `${activity.run.progress || 0}%` : runStatusLabel(activity.run.status) }}</b>
                     </div>
                   </div>
-                  <div class="document-pipeline-meta">
-                    <b>{{ pipelineIsActive(pipeline.status) ? `${pipeline.progress || 0}%` : pipelineStatusLabel(pipeline.status) }}</b>
-                    <time>{{ relativeTime(pipeline.updateTime || pipeline.createTime) }}</time>
+                  <div v-if="activityIsActive(activity)" class="pipeline-progress">
+                    <i :style="{ width: `${activityProgress(activity)}%` }"></i>
                   </div>
                 </div>
+                <div class="activity-meta">
+                  <b>{{ activityStatusLabel(activity) }}</b>
+                  <time>{{ relativeTime(activityUpdatedAt(activity)) }}</time>
+                </div>
               </div>
-              <div class="panel-divider"></div>
-            </template>
-
-            <!-- Agent 运行中心 -->
-            <div class="panel-section-heading">
-              <strong>Agent 运行中心</strong>
-              <span class="section-note">自动刷新</span>
             </div>
-            <RunFeed :runs="recentRuns" :max-items="8" compact :polling="notificationOpen" empty-text="暂无运行记录" @status-change="onRunStatusChange"/>
+            <div v-else class="activity-empty">暂无合同处理记录</div>
           </div>
         </div>
         <a class="admin-link" :href="adminUrl" target="_blank" rel="noreferrer">管理端</a>
@@ -88,11 +94,11 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
 import { getRecentContractDocumentPipelines, getRecentWorkspaceRuns, getWorkspaceAiStatus, getWorkspaceUnreadCount } from '../api/index.js'
-import RunFeed from './RunFeed.vue'
+import { activityProgress as getActivityProgress, isActivityActive, mergeContractActivities } from '../utils/contractActivity.js'
 
 const router = useRouter()
 const message = useMessage()
@@ -119,8 +125,26 @@ const aiStatusMessage = computed(() => {
   const components = aiStatus.value?.components || {}
   return Object.values(components).find(item => item?.message)?.message || ''
 })
-const activeDocumentPipelineCount = computed(() => documentPipelines.value.filter(item => pipelineIsActive(item.status)).length)
-const notificationBadgeCount = computed(() => unreadCount.value + activeDocumentPipelineCount.value)
+const contractActivities = computed(() => mergeContractActivities(documentPipelines.value, recentRuns.value, 8))
+const activeContractActivityCount = computed(() => contractActivities.value.filter(activity => isActivityActive(activity)).length)
+const notificationBadgeCount = computed(() => unreadCount.value + activeContractActivityCount.value)
+const previousActivityStatuses = ref({})
+
+watch(contractActivities, (activities) => {
+  const previous = previousActivityStatuses.value
+  for (const activity of activities) {
+    const before = previous[activity.id]
+    const after = String(activity.status || '').toUpperCase()
+    if (!before || before === after || !['COMPLETED', 'FAILED'].includes(after)) continue
+    if (!isActivityActive({ status: before })) continue
+    const label = activity.run?.runType ? runTypeLabel(activity.run.runType) : '合同处理'
+    if (after === 'COMPLETED') message.success(`${label}已完成 · ${activity.caseTitle}`)
+    else message.error(`${label}失败 · ${activity.caseTitle}`)
+  }
+  previousActivityStatuses.value = Object.fromEntries(
+    activities.map(activity => [activity.id, String(activity.status || '').toUpperCase()]),
+  )
+})
 
 if (typeof window !== 'undefined') {
   window.addEventListener('scroll', () => { scrolled.value = window.scrollY > 10 })
@@ -150,19 +174,15 @@ async function refreshAll() {
 }
 async function refreshHeaderData() {
   try {
-    const [countRes, pipelinesRes] = await Promise.allSettled([
+    const [countRes, runsRes, pipelinesRes] = await Promise.allSettled([
       getWorkspaceUnreadCount(),
+      getRecentWorkspaceRuns(),
       getRecentContractDocumentPipelines(),
     ])
     if (countRes.status === 'fulfilled') unreadCount.value = Number(countRes.value.data.data?.count) || 0
+    if (runsRes.status === 'fulfilled') recentRuns.value = runsRes.value.data.data || []
     if (pipelinesRes.status === 'fulfilled') documentPipelines.value = pipelinesRes.value.data.data || []
-  } catch {}
-  if (notificationOpen.value) {
-    try {
-      const r = await getRecentWorkspaceRuns()
-      recentRuns.value = r.data.data || []
-    } catch {}
-  }
+  } catch { /* silent */ }
 }
 async function refreshAiStatus() {
   aiStatusLoading.value = true
@@ -183,8 +203,13 @@ async function toggleNotificationPanel() {
 }
 function closeNotificationPanel() { notificationOpen.value = false }
 
-function openDocumentPipeline(pipeline) {
-  if (pipeline?.caseId) router.push(`/contracts/${pipeline.caseId}`)
+function openContractActivity(activity) {
+  if (activity?.caseId) {
+    router.push({
+      path: `/contracts/${activity.caseId}`,
+      query: activity.run?.id ? { runId: String(activity.run.id) } : undefined,
+    })
+  }
 }
 function pipelineIsActive(status) {
   return !['READY', 'COMPLETED', 'FAILED', 'CANCELLED'].includes(String(status || '').toUpperCase())
@@ -232,11 +257,65 @@ function relativeTime(value) {
   return String(value).replace('T', ' ').slice(0, 16)
 }
 
-function onRunStatusChange({ run }) {
-  const label = { HEALTH_ANALYSIS:'健康分析', PROJECT_ONBOARDING:'项目接手', ENGINEERING_DECISION:'研发决策' }[run.runType] || 'Agent 任务'
-  const runLabel = run.subjectType === 'CONTRACT_CASE' ? '合同' : '项目'
-  if (run.status === 'COMPLETED') message.success(`${label}已完成 — ${runLabel} #${run.subjectId || run.projectId}`)
-  else if (run.status === 'FAILED') message.error(`${label}失败 — ${runLabel} #${run.subjectId || run.projectId}`)
+function activityIsActive(activity) { return isActivityActive(activity) }
+function activityStatusClass(activity) {
+  const status = String(activity?.status || '').toUpperCase()
+  if (status === 'COMPLETED') return 'done'
+  if (status === 'FAILED') return 'error'
+  if (activityIsActive(activity)) return 'active'
+  return 'unknown'
+}
+function activityStatusLabel(activity) {
+  const status = String(activity?.status || '').toUpperCase()
+  if (status === 'COMPLETED') return '已完成'
+  if (status === 'FAILED') return '失败'
+  if (activityIsActive(activity)) return '处理中'
+  return '待处理'
+}
+function activityMainLabel(activity) {
+  if (activity?.pipeline && pipelineIsActive(activity.pipeline.status)) return pipelineActionLabel(activity.pipeline)
+  if (activity?.run && runIsActive(activity.run.status)) {
+    return activity.run.currentStep || `${runTypeLabel(activity.run.runType)}进行中`
+  }
+  if (activity?.pipeline?.status === 'FAILED' || activity?.run?.status === 'FAILED') return '合同处理失败，点击查看原因'
+  if (activity?.run?.status === 'COMPLETED') return '审查结果已生成，点击查看合同详情'
+  if (activity?.pipeline?.status === 'READY') return '合同文件处理完成，等待下一步'
+  return '合同处理记录'
+}
+function activityProgress(activity) { return getActivityProgress(activity) }
+function runIsActive(status) {
+  return !['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(status || '').toUpperCase())
+}
+function runTypeLabel(type) {
+  return {
+    CONTRACT_REVIEW: '合同审查',
+    CONTRACT_INTAKE: '合同发起',
+    APPROVAL_DECISION: '审批决策',
+    VERSION_REVIEW: '版本复核',
+    OBLIGATION_EXTRACTION: '义务提取',
+    FULFILLMENT_CHECK: '履约核验',
+    HEALTH_ANALYSIS: '健康分析',
+    PROJECT_ONBOARDING: '项目接手',
+    ENGINEERING_DECISION: '研发决策',
+  }[type] || type || 'Agent 任务'
+}
+function runStatusLabel(status) {
+  return {
+    CREATED: '排队中',
+    CONTEXT_BUILDING: '构建上下文',
+    PLANNING: '规划中',
+    ANALYZING: '分析中',
+    VERIFYING: '复核中',
+    WAITING_HUMAN: '等待人工确认',
+    WAITING_APPROVAL: '等待审批',
+    COMPLETED: '已完成',
+    FAILED: '失败',
+    CANCELLED: '已取消',
+  }[status] || status || '未知'
+}
+function activityUpdatedAt(activity) {
+  return activity?.pipeline?.updateTime || activity?.pipeline?.createTime
+    || activity?.run?.updateTime || activity?.run?.createTime
 }
 
 function formatTime(v) { if (!v) return '刚刚'; const d = new Date(v); return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString('zh-CN',{hour12:false}) }
@@ -283,6 +362,26 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .model-status-row strong.ok{color:#3f7f5d}.model-status-row strong.error{color:#b35c56}.model-status-row strong.checking{color:var(--atlas-warning)}.model-status-row strong.unknown{color:var(--atlas-subtle)}
 .status-message{margin:8px 0 0;color:#b35c56;font-size:10px;line-height:1.5;overflow-wrap:anywhere}
 .checked-time{display:block;margin-top:8px;color:var(--atlas-subtle);font-size:10px}
+.contract-activity-feed{display:flex;flex-direction:column;margin-top:8px}
+.contract-activity-row{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:10px 0;border-bottom:1px solid var(--atlas-border);cursor:pointer;transition:background .15s}
+.contract-activity-row:last-child{border-bottom:0}
+.contract-activity-row:hover,.contract-activity-row:focus-visible{margin:0 -8px;padding-left:8px;padding-right:8px;background:var(--atlas-surface-soft);outline:0}
+.activity-dot{width:7px;height:7px;flex:0 0 auto;margin-top:5px;border-radius:50%;background:var(--atlas-subtle)}
+.activity-dot.active{background:var(--atlas-warning);animation:dot-pulse 1.5s ease-in-out infinite}
+.activity-dot.done{background:#3f7f5d}.activity-dot.error{background:#b35c56}
+.contract-activity-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}
+.activity-headline{display:flex;align-items:center;gap:6px;min-width:0}
+.activity-headline strong{overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
+.activity-kind{flex:0 0 auto;padding:1px 5px;color:var(--atlas-primary);background:var(--atlas-surface-soft);border:1px solid var(--atlas-border);border-radius:3px;font-size:9px;font-weight:800;white-space:nowrap}
+.activity-main-label{overflow:hidden;color:var(--atlas-muted);font-size:10px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}
+.activity-stage-list{display:grid;gap:3px}
+.activity-stage{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:5px;align-items:center;min-width:0;color:var(--atlas-subtle);font-size:9px}
+.activity-stage>span{color:var(--atlas-primary);font-weight:900}
+.activity-stage strong{overflow:hidden;font-size:9px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
+.activity-stage b{color:var(--atlas-muted);font-size:9px;font-weight:800;white-space:nowrap}
+.activity-meta{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:3px;color:var(--atlas-subtle);font-size:9px}
+.activity-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.contract-activity-row.error .activity-meta b{color:#b35c56}.contract-activity-row.done .activity-meta b{color:#3f7f5d}
+.activity-empty{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px;text-align:center}
 .document-pipeline-feed{display:flex;flex-direction:column;margin-top:8px}
 .document-pipeline-row{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:9px 0;border-bottom:1px solid var(--atlas-border);cursor:pointer}
 .document-pipeline-row:last-child{border-bottom:0}
@@ -303,6 +402,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 
 @media(max-width:860px){.header-inner{height:auto;min-height:60px;flex-wrap:wrap;gap:10px;padding:12px 16px}.nav{order:3;flex:0 0 100%;width:100%;min-width:0;overflow-x:auto;justify-content:flex-start;padding-bottom:2px}.nav-link{white-space:nowrap}.search-box{margin-left:auto;max-width:min(172px,calc(100vw - 190px))}.search-input{width:100%;min-width:0}}
 @media(max-width:520px){.model-status-list{grid-template-columns:1fr}}
+@media(max-width:520px){.activity-stage{grid-template-columns:30px minmax(0,1fr)}.activity-stage b{grid-column:2}.activity-meta{display:none}}
 @media(max-width:420px){.header-inner{align-items:flex-start}.logo{min-height:34px}.search-box{order:2;flex:1 1 calc(100% - 96px);width:auto;max-width:none;margin-left:0}.header-actions{order:2;margin-left:auto}.notification-panel{position:fixed;top:70px;right:16px}.nav{order:3}}
 
 [data-theme="dark"] .header{background:rgba(11,17,32,.88);border-bottom-color:var(--atlas-border)}

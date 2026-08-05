@@ -43,6 +43,13 @@ def _normalize_evidence(item: dict[str, Any]) -> dict[str, Any]:
         prefixed = f"{source_type}:{prefixed}"
     value["sourceType"] = source_type
     value["sourceId"] = prefixed
+    value["clauseText"] = str(
+        value.get("clauseText")
+        or value.get("content")
+        or value.get("fullText")
+        or value.get("snippet")
+        or ""
+    )[:12000]
     value["snippet"] = str(
         value.get("snippet") or value.get("content") or value.get("description") or ""
     )[:1800]
@@ -138,6 +145,7 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         result_sets = [[] for _ in domain_tasks]
 
     domain_results: dict[str, list[dict[str, Any]]] = {}
+    retrieval_validation: dict[str, dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
     citations: list[dict[str, Any]] = []
     for task, evidence in zip(domain_tasks, result_sets):
@@ -148,6 +156,19 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         for item in evidence:
             source_type = str(item.get("sourceType") or "UNKNOWN")
             type_counts[source_type] = type_counts.get(source_type, 0) + 1
+        stats = next(
+            (item.get("retrievalStats") for item in evidence
+             if isinstance(item.get("retrievalStats"), dict)),
+            {},
+        )
+        retrieval_validation[key] = {
+            "mode": stats.get("mode") or "UNKNOWN",
+            "crossValidatedCount": sum(
+                1 for item in evidence if item.get("crossValidated")
+            ),
+            "evidenceCount": len(evidence),
+            "stats": stats,
+        }
         observations.append({
             "callId": f"graph-retrieval-{key}-{case_id}",
             "planStepId": f"retrieve_{key}",
@@ -158,7 +179,11 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "queries": task.get("queries") or [],
                 "clauseTypes": task.get("requiredClauseTypes") or [],
             },
-            "output": {"evidenceCount": len(evidence), "sourceCounts": type_counts},
+            "output": {
+                "evidenceCount": len(evidence),
+                "sourceCounts": type_counts,
+                "retrievalValidation": retrieval_validation[key],
+            },
             "status": "DONE",
         })
 
@@ -166,6 +191,7 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "retrieve_domain_evidence",
         "domain_results": domain_results,
+        "retrieval_validation": retrieval_validation,
         "citations": citations,
         "observations": observations,
     }
@@ -198,6 +224,77 @@ def run_deterministic_rules(state: dict[str, Any]) -> dict[str, Any]:
             "output": {"violationCount": len(findings), "findings": findings},
             "status": "DONE",
         }],
+    }
+
+
+def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
+    """Retrieve the timeline clause and uploaded proof before judging it."""
+    case_id = int(state.get("subject_id") or 0)
+    task_input = state.get("task_input") or {}
+    timeline_node_id = int(task_input.get("timelineNodeId") or 0)
+
+    async def _retrieve() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        from ...contract_store import ContractStore
+
+        store = ContractStore()
+        verification = await store.verify_evidence(
+            case_id,
+            timeline_node_id=timeline_node_id,
+        )
+        node = verification.get("node") or {}
+        query = " ".join(
+            str(value) for value in (
+                node.get("label"), node.get("businessMeaning"),
+                node.get("conditionText"), node.get("clauseContent"),
+            ) if value
+        )[:600]
+        contract_hits = await store.search_contract_clause(
+            case_id, {"query": query, "topK": 6}
+        ) if query else []
+        return verification, contract_hits
+
+    try:
+        verification, contract_hits = _run_async(_retrieve())
+    except Exception as exc:
+        logger.exception("Fulfillment evidence retrieval failed: %s", exc)
+        verification, contract_hits = {"error": str(exc), "evidenceDocuments": []}, []
+
+    evidence_documents = []
+    for raw in verification.get("evidenceDocuments") or []:
+        item = dict(raw)
+        document_id = item.get("documentId") or item.get("id")
+        item["sourceType"] = "FULFILLMENT_DOCUMENT"
+        item["sourceId"] = f"FULFILLMENT_DOCUMENT:{document_id}" if document_id else ""
+        item["content"] = item.get("contentText") or item.get("snippet") or ""
+        evidence_documents.append(item)
+
+    normalized_contract_hits = _deduplicate_evidence(contract_hits, limit=8)
+    citations = evidence_documents + normalized_contract_hits
+    observation = {
+        "callId": f"graph-fulfillment-retrieval-{case_id}-{timeline_node_id}",
+        "planStepId": "retrieve_fulfillment_evidence",
+        "toolName": "verifyFulfillmentEvidence/searchContractClause",
+        "arguments": {"timelineNodeId": timeline_node_id},
+        "output": {
+            "evidenceDocuments": evidence_documents,
+            "contractEvidence": normalized_contract_hits,
+            "missingEvidence": verification.get("missingEvidence") or [],
+            "conclusion": verification.get("conclusion"),
+        },
+        "status": "DONE" if not verification.get("error") else "FAILED",
+    }
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "retrieve_fulfillment_evidence",
+        "citations": citations,
+        "retrieval_validation": {
+            "fulfillment": {
+                "mode": "CONTRACT_CLAUSE_PLUS_UPLOADED_EVIDENCE",
+                "contractEvidenceCount": len(normalized_contract_hits),
+                "uploadedEvidenceCount": len(evidence_documents),
+            }
+        },
+        "observations": [observation],
     }
 
 
@@ -330,8 +427,8 @@ def _fallback_rule_findings(task: dict[str, Any], evidence: list[dict[str, Any]]
         if str(rule.get("clauseType") or "OTHER").upper() not in allowed_types:
             continue
         contract_ids = [
-            str(item.get("sourceId")) for item in evidence
-            if str(item.get("sourceType")) == "CONTRACT_CLAUSE"
+            str(value) for value in rule.get("contractCitationIds") or []
+            if str(value).startswith("CONTRACT_CLAUSE:")
         ][:3]
         policy_ids = [
             str(item.get("sourceId")) for item in evidence

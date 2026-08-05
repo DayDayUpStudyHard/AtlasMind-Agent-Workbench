@@ -78,6 +78,9 @@ async def load_run_context(state: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         logger.warning("Failed to load contract evidence snapshot: %s", exc)
 
+    from ...evidence import summarize_document_quality
+    document_quality = summarize_document_quality(document_snapshot)
+
     workflow_observation = {
         "callId": f"graph-analysis-snapshot-{run_id}",
         "planStepId": "load_analysis_snapshot",
@@ -90,6 +93,7 @@ async def load_run_context(state: dict[str, Any]) -> dict[str, Any]:
         "output": {
             "evidenceSnapshotHash": analysis_workflow.get("evidenceSnapshotHash"),
             "documentCount": len(document_snapshot),
+            "documentQuality": document_quality,
             "reuseParsedEvidence": True,
         },
         "status": "DONE",
@@ -101,6 +105,7 @@ async def load_run_context(state: dict[str, Any]) -> dict[str, Any]:
         "case_snapshot": case_snapshot,
         "analysis_workflow": analysis_workflow,
         "document_snapshot": document_snapshot,
+        "document_quality": document_quality,
         "observations": [workflow_observation],
     }
 
@@ -124,6 +129,7 @@ def freeze_case_snapshot(state: dict[str, Any]) -> dict[str, Any]:
             "frozenAt": str(snapshot.get("updateTime", "")),
             "evidenceSnapshotHash": evidence_hash,
             "documentVersion": analysis_workflow.get("documentVersion"),
+            "documentQuality": state.get("document_quality") or {},
             "reuseParsedEvidence": True,
         },
     }

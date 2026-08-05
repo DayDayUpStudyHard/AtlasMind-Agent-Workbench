@@ -65,6 +65,7 @@ class BaseGraphState(TypedDict, total=False):
     analysis_workflow: dict[str, Any]
     document_snapshot: list[dict[str, Any]]
     knowledge_snapshot: list[dict[str, Any]]
+    document_quality: dict[str, Any]
 
     # ── Accumulated data ──
     observations: Annotated[list[dict[str, Any]], _add_observations]
@@ -75,11 +76,13 @@ class BaseGraphState(TypedDict, total=False):
     domain_tasks: list[dict[str, Any]]
     domain_results: dict[str, list[dict[str, Any]]]
     domain_analysis: dict[str, dict[str, Any]]
+    retrieval_validation: dict[str, Any]
 
     # ── Findings & verification ──
     rule_findings: list[dict[str, Any]]
     draft_findings: list[dict[str, Any]]
     validated_findings: list[dict[str, Any]]
+    evidence_validation: dict[str, Any]
     coverage: dict[str, Any]         # Domain coverage matrix
     reflection: dict[str, Any]       # Current quality gate result
 
@@ -90,7 +93,9 @@ class BaseGraphState(TypedDict, total=False):
 
     # ── Artifact ──
     artifact: dict[str, Any]
+    artifacts: dict[str, Any]
     schema_validation: dict[str, Any]
+    human_review: dict[str, Any]
 
     # ── Human-in-the-loop ──
     wait_state: dict[str, Any] | None

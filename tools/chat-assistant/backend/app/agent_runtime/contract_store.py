@@ -104,16 +104,19 @@ def _fuse_contract_retrieval(
     vector_hits: list[dict],
     keyword_hits: list[dict],
     limit: int,
+    es_keyword_hits: list[dict] | None = None,
 ) -> tuple[list[dict], dict]:
-    """Fuse independent retrieval paths and expose agreement as evidence.
+    """Fuse ES vector/keyword and MySQL keyword paths with reciprocal rank.
 
-    This is deliberately not a fallback chain. When ES is healthy, vector
-    results are compared with the existing MySQL keyword results. A hit is
-    marked validated only when both paths return the same clause/chunk identity.
+    MySQL remains an independent cross-check and the hard fallback. Agreement
+    means retrieval paths located the same clause; claim correctness is checked
+    later against canonical clause text by the graph validator.
     """
+    es_keyword_hits = es_keyword_hits or []
     buckets: dict[str, dict] = {}
     paths = (
         ("ES_VECTOR", vector_hits),
+        ("ES_KEYWORD", es_keyword_hits),
         ("MYSQL_KEYWORD", keyword_hits),
     )
     for path_name, hits in paths:
@@ -127,25 +130,36 @@ def _fuse_contract_retrieval(
             bucket["hit"].update({k: v for k, v in raw.items() if v not in (None, "")})
 
     vector_keys = {_hit_key(hit) for hit in vector_hits if _hit_key(hit)}
-    keyword_keys = {_hit_key(hit) for hit in keyword_hits if _hit_key(hit)}
-    vector_keyword_overlap = len(vector_keys & keyword_keys)
+    es_keyword_keys = {_hit_key(hit) for hit in es_keyword_hits if _hit_key(hit)}
+    mysql_keyword_keys = {_hit_key(hit) for hit in keyword_hits if _hit_key(hit)}
+    vector_keyword_overlap = len(vector_keys & mysql_keyword_keys)
+    es_mysql_keyword_overlap = len(es_keyword_keys & mysql_keyword_keys)
     fused: list[dict] = []
     for bucket in buckets.values():
         hit = bucket["hit"]
         sources = sorted(bucket["sources"])
         hit["retrievalSources"] = sources
         hit["crossValidated"] = len(sources) >= 2
-        hit["retrievalType"] = "ES_HYBRID_CROSS_CHECK" if len(sources) >= 2 else sources[0]
+        hit["retrievalType"] = "HYBRID_RRF" if len(sources) >= 2 else sources[0]
         hit["retrievalAgreement"] = "MULTI_SOURCE" if len(sources) >= 2 else "SINGLE_SOURCE"
-        rank_bonus = sum(1.0 / (rank + 1) for rank in bucket["ranks"].values())
+        rank_bonus = sum(1.0 / (60 + rank + 1) for rank in bucket["ranks"].values())
         hit["fusionScore"] = round(rank_bonus + float(hit.get("score") or 0) * 0.001, 6)
+        hit["retrievalValidation"] = {
+            "mode": "HYBRID_RRF",
+            "paths": sources,
+            "crossValidated": len(sources) >= 2,
+            "independentKeywordAgreement": "MYSQL_KEYWORD" in sources and len(sources) >= 2,
+        }
         fused.append(hit)
     fused.sort(key=lambda item: (bool(item.get("crossValidated")), item.get("fusionScore", 0)), reverse=True)
     return fused[:limit], {
         "vectorCount": len(vector_hits),
+        "esKeywordCount": len(es_keyword_hits),
         "keywordCount": len(keyword_hits),
         "vectorKeywordOverlap": vector_keyword_overlap,
+        "esMysqlKeywordOverlap": es_mysql_keyword_overlap,
         "crossValidatedCount": sum(1 for hit in fused if hit.get("crossValidated")),
+        "mode": "HYBRID_RRF",
     }
 
 
@@ -167,6 +181,40 @@ def _merge_policy_items(*groups: list[dict], limit: int) -> list[dict]:
             if len(merged) >= limit:
                 return merged
     return merged
+
+
+def _fuse_policy_retrieval(
+    vector_hits: list[dict],
+    keyword_hits: list[dict],
+    limit: int,
+) -> list[dict]:
+    """Fuse policy vector and keyword hits while preserving chunk identity."""
+    buckets: dict[str, dict[str, Any]] = {}
+    for path_name, hits in (("ES_VECTOR", vector_hits), ("ES_KEYWORD", keyword_hits)):
+        for rank, raw in enumerate(hits or []):
+            key = str(raw.get("chunkId") or raw.get("sourceId") or raw.get("documentId") or "")
+            if not key:
+                continue
+            bucket = buckets.setdefault(key, {"hit": dict(raw), "sources": [], "ranks": {}})
+            if path_name not in bucket["sources"]:
+                bucket["sources"].append(path_name)
+            bucket["ranks"][path_name] = rank
+            bucket["hit"].update({k: v for k, v in raw.items() if v not in (None, "")})
+
+    result = []
+    for bucket in buckets.values():
+        hit = bucket["hit"]
+        sources = sorted(bucket["sources"])
+        hit["retrievalSources"] = sources
+        hit["crossValidated"] = len(sources) >= 2
+        hit["retrievalAgreement"] = "MULTI_SOURCE" if len(sources) >= 2 else "SINGLE_SOURCE"
+        hit["retrievalType"] = "HYBRID_RRF" if len(sources) >= 2 else sources[0]
+        hit["fusionScore"] = round(
+            sum(1.0 / (60 + rank + 1) for rank in bucket["ranks"].values()), 6
+        )
+        result.append(hit)
+    result.sort(key=lambda item: (bool(item.get("crossValidated")), item.get("fusionScore", 0)), reverse=True)
+    return result[:limit]
 
 
 class ContractStore:
@@ -265,8 +313,10 @@ class ContractStore:
                     cur.execute(
                         f"""SELECT c.id AS clauseId, c.document_id AS documentId,
                                   c.clause_number AS clauseNumber, c.title, c.content,
-                                  c.clause_type AS clauseType, c.page_number AS pageNumber
+                                  c.clause_type AS clauseType, c.page_number AS pageNumber,
+                                  d.version AS documentVersion, d.content_hash AS contentHash
                            FROM contract_clause c
+                           LEFT JOIN contract_document d ON d.id=c.document_id
                            WHERE c.case_id=%s
                              AND ({conditions})
                            ORDER BY c.id ASC LIMIT %s""",
@@ -280,6 +330,13 @@ class ContractStore:
                     "snippet": str(row.get("content") or "")[:220],
                     "score": 0,
                     "retrievalType": "MYSQL_KEYWORD_FALLBACK",
+                    "retrievalSources": ["MYSQL_KEYWORD"],
+                    "retrievalAgreement": "SINGLE_SOURCE",
+                    "retrievalValidation": {
+                        "mode": "MYSQL_KEYWORD_FALLBACK",
+                        "paths": ["MYSQL_KEYWORD"],
+                        "crossValidated": False,
+                    },
                 }
                 for row in rows
             ]
@@ -302,13 +359,19 @@ class ContractStore:
 
         candidate_k = max(top_k * 4, 20)
         vector_hits: list[dict] = []
+        es_keyword_hits: list[dict] = []
         try:
             vector = embedding.embed(query) if embedding.configured else None
             vector_hits = es.search_contract_by_embedding(vector, case_id, candidate_k) if vector else []
         except Exception as exc:
             logger.warning("contract vector retrieval failed while ES is available: %s", exc)
+        try:
+            es_keyword_hits = es.search_contract_by_keyword(query, case_id, candidate_k)
+        except Exception as exc:
+            logger.warning("contract ES keyword retrieval failed while ES is available: %s", exc)
         hits, retrieval_validation = _fuse_contract_retrieval(
-            vector_hits, keyword_hits, max(top_k * 2, top_k)
+            vector_hits, keyword_hits, max(top_k * 2, top_k),
+            es_keyword_hits=es_keyword_hits,
         )
         if not hits:
             return keyword_hits
@@ -323,11 +386,13 @@ class ContractStore:
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        f"""SELECT id AS clauseId, document_id AS documentId,
-                                   clause_number AS clauseNumber, title, content,
-                                   clause_type AS clauseType, page_number AS pageNumber
-                            FROM contract_clause
-                            WHERE case_id=%s AND id IN ({placeholders})""",
+                        f"""SELECT c.id AS clauseId, c.document_id AS documentId,
+                                   c.clause_number AS clauseNumber, c.title, c.content,
+                                   c.clause_type AS clauseType, c.page_number AS pageNumber,
+                                   d.version AS documentVersion, d.content_hash AS contentHash
+                            FROM contract_clause c
+                            LEFT JOIN contract_document d ON d.id=c.document_id
+                            WHERE c.case_id=%s AND c.id IN ({placeholders})""",
                         [case_id] + clause_ids,
                     )
                     rows = {r["clauseId"]: _normalize_value(r) for r in cur.fetchall()}
@@ -339,7 +404,7 @@ class ContractStore:
                     **parent,
                     "snippet": hit.get("snippet") or str(parent.get("content") or "")[:220],
                     "clauseText": str(parent.get("content") or hit.get("content") or ""),
-                    "retrievalValidation": retrieval_validation,
+                    "retrievalStats": retrieval_validation,
                 })
             return enriched
         return await _run_sync(_enrich)
@@ -464,18 +529,24 @@ class ContractStore:
                 from app.services.es_service import ESService
                 embedding = EmbeddingService()
                 es = ESService()
-                vector = embedding.embed(query) if embedding.configured else None
-                hits = es.search_kb_by_embedding(vector, kb_limit) if vector else []
-                retrieval_type = "KB_VECTOR" if hits else ""
-                if not hits:
-                    hits = es.search_kb_by_keyword(query, kb_limit)
-                    retrieval_type = "KB_KEYWORD" if hits else ""
+                try:
+                    vector = embedding.embed(query) if embedding.configured else None
+                    vector_hits = es.search_kb_by_embedding(vector, kb_limit * 2) if vector else []
+                except Exception as exc:
+                    logger.warning("policy KB vector retrieval failed: %s", exc)
+                    vector_hits = []
+                try:
+                    keyword_hits = es.search_kb_by_keyword(query, kb_limit * 2)
+                except Exception as exc:
+                    logger.warning("policy KB keyword retrieval failed: %s", exc)
+                    keyword_hits = []
+                hits = _fuse_policy_retrieval(vector_hits, keyword_hits, kb_limit * 2)
                 return [
                     {
                         **hit,
-                        "sourceType": "KB_DOCUMENT",
-                        "sourceId": hit.get("sourceId") or hit.get("documentId"),
-                        "retrievalType": retrieval_type,
+                        "sourceType": "KB_CHUNK",
+                        "sourceId": hit.get("chunkId") or hit.get("sourceId") or hit.get("documentId"),
+                        "documentId": hit.get("documentId") or hit.get("sourceId"),
                     }
                     for hit in await _filter_allowed_kb_hits(hits, case_id, kb_limit)
                 ]
@@ -486,7 +557,7 @@ class ContractStore:
         async def _filter_allowed_kb_hits(hits: list[dict], current_case_id: int, max_items: int) -> list[dict]:
             document_ids = []
             for hit in hits:
-                doc_id = hit.get("sourceId") or hit.get("documentId")
+                doc_id = hit.get("documentId") or hit.get("sourceId")
                 if doc_id is None:
                     continue
                 try:
@@ -577,10 +648,13 @@ class ContractStore:
                 {
                     **row,
                     "sourceType": "KB_DOCUMENT",
+                    "sourceId": row.get("chunkId"),
                     "documentId": row.get("sourceId"),
                     "snippet": str(row.get("content") or "")[:220],
                     "score": 0,
                     "retrievalType": "MYSQL_KB_KEYWORD_FALLBACK",
+                    "retrievalSources": ["MYSQL_KEYWORD"],
+                    "crossValidated": False,
                 }
                 for row in rows
             ]
@@ -684,6 +758,7 @@ class ContractStore:
             for rule in rules:
                 check_type = str(rule.get("checkType", "MISSING"))
                 check_config = rule.get("checkConfig")
+                matching: list[dict] = []
                 if isinstance(check_config, str):
                     try: check_config = json.loads(check_config)
                     except: check_config = {}
@@ -737,6 +812,7 @@ class ContractStore:
                                 break
 
                 if violated:
+                    matched_clause = matching[0] if matching else {}
                     findings.append({
                         "ruleId": rule.get("id"),
                         "ruleKey": rule.get("ruleKey"),
@@ -746,6 +822,15 @@ class ContractStore:
                         "clauseType": rule.get("clauseType"),
                         "detail": detail,
                         "description": rule.get("description"),
+                        "contractCitationIds": (
+                            [f"CONTRACT_CLAUSE:{matched_clause.get('id')}" ]
+                            if matched_clause.get("id") else []
+                        ),
+                        "contractCitation": {
+                            "clause": matched_clause.get("title") or matched_clause.get("clauseType") or "",
+                            "snippet": str(matched_clause.get("content") or "")[:1200],
+                        } if matched_clause else None,
+                        "evidenceBasis": "MATCHED_CLAUSE" if matched_clause else "CLAUSE_INVENTORY",
                     })
 
             return findings

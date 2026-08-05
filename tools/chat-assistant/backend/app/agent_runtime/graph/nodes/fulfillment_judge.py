@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any
+import re
 
 
 def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
@@ -26,6 +27,16 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(doc, dict):
                     evidence_items.append(doc)
 
+    def _best_evidence(requirement: str) -> dict[str, Any] | None:
+        if not evidence_items:
+            return None
+        terms = [term for term in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{2,}", requirement)]
+        def score(item: dict[str, Any]) -> tuple[int, int]:
+            text = " ".join(str(item.get(key) or "") for key in ("fileName", "snippet", "content"))
+            matched = sum(1 for term in terms if term in text)
+            return (matched, 1 if item.get("manuallyLinked") else 0)
+        return max(evidence_items, key=score)
+
     results = []
     for req in requirements:
         requirement_text = str(req.get("requirement", ""))
@@ -45,8 +56,8 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 "confidenceLevel": "LOW",
             }
         else:
-            # Evidence exists — basic check
-            best_evidence = evidence_items[0]  # Simplified: take first match
+            # Evidence exists, but the Agent still cannot make the final business decision.
+            best_evidence = _best_evidence(requirement_text) or evidence_items[0]
             judgement = {
                 "requirement": requirement_text,
                 "required": bool(req.get("required", True)),
@@ -60,6 +71,7 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 "gap": "请人工确认证明材料是否充分",
                 "riskLevel": "MEDIUM",
                 "confidenceLevel": "MEDIUM",
+                "evidenceMatchReason": best_evidence.get("matchReason") or "按履约节点检索到候选证明",
             }
 
         # ourSide perspective

@@ -2,7 +2,7 @@
 
 from app.agent_runtime.graph.nodes.artifact import _risk_groups, _risk_summary
 from app.agent_runtime.graph.nodes.domain_tasks import _normalize_domain
-from app.agent_runtime.graph.nodes.retrieval import _normalize_finding
+from app.agent_runtime.graph.nodes.retrieval import _fallback_rule_findings, _normalize_finding
 from app.agent_runtime.graph.nodes.validation import _validate_one
 
 
@@ -76,6 +76,22 @@ def test_high_risk_without_contract_evidence_is_downgraded():
     assert finding["severity"] == "MEDIUM"
     assert finding["confidenceLevel"] == "LOW"
     assert finding["sourceBasis"] == "POLICY_ONLY"
+
+
+def test_missing_clause_rule_does_not_borrow_unrelated_contract_citation():
+    findings = _fallback_rule_findings(
+        _task(),
+        _evidence(),
+        [{
+            "ruleKey": "MISSING_ACCEPTANCE",
+            "ruleTitle": "缺少验收条款",
+            "clauseType": "OTHER",
+            "severity": "HIGH",
+            "detail": "未找到验收条款",
+        }],
+    )
+    assert len(findings) == 1
+    assert findings[0]["contractCitationIds"] == []
 
 
 def test_validator_rejects_citation_not_returned_by_retrieval():

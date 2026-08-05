@@ -82,6 +82,9 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
         "riskSummary": risk_summary,
         "riskGroups": risk_groups,
         "analysisWorkflow": analysis_workflow,
+        "documentQuality": state.get("document_quality") or {},
+        "evidenceValidation": state.get("evidence_validation") or {},
+        "retrievalValidation": state.get("retrieval_validation") or {},
         "evidenceHash": analysis_workflow.get("evidenceSnapshotHash"),
         "actionProposals": [
             {
@@ -100,6 +103,9 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
             "riskGroups": risk_groups,
             "findings": validated,
             "analysisWorkflow": analysis_workflow,
+            "documentQuality": state.get("document_quality") or {},
+            "evidenceValidation": state.get("evidence_validation") or {},
+            "retrievalValidation": state.get("retrieval_validation") or {},
         },
     }
 
@@ -133,6 +139,9 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
         "riskSummary": _risk_summary(validated, state.get("coverage") or {}),
         "riskGroups": _risk_groups(validated),
         "analysisWorkflow": analysis_workflow,
+        "documentQuality": state.get("document_quality") or {},
+        "evidenceValidation": state.get("evidence_validation") or {},
+        "retrievalValidation": state.get("retrieval_validation") or {},
         "evidenceHash": analysis_workflow.get("evidenceSnapshotHash"),
         "actionProposals": [
             {
@@ -148,6 +157,9 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
             "limitedReport": True,
             "qualityGatePassed": False,
             "analysisWorkflow": analysis_workflow,
+            "documentQuality": state.get("document_quality") or {},
+            "evidenceValidation": state.get("evidence_validation") or {},
+            "retrievalValidation": state.get("retrieval_validation") or {},
         },
     }
 
@@ -228,11 +240,51 @@ def _route_after_schema(state: dict[str, Any]) -> str:
     """Route based on schema validation result."""
     sv = state.get("schema_validation") or {}
     if sv.get("valid"):
-        return "persist_report"
+        return "prepare_human_review"
     repair_count = sv.get("repair_count", 0)
     if repair_count < 1:
         return "repair_artifact"
     return "compose_limited_report"
+
+
+def prepare_human_review(state: dict[str, Any]) -> dict[str, Any]:
+    """Attach an explicit legal-review handoff before persisting the report.
+
+    Contract review can finish asynchronously, but the Agent never treats a
+    generated risk conclusion as a final legal decision. Fulfillment uses a
+    real LangGraph interrupt; contract review records this review boundary in
+    the persisted artifact and action queue.
+    """
+    artifact = state.get("artifact") or {}
+    quality = state.get("document_quality") or {}
+    validation = state.get("evidence_validation") or {}
+    reasons = ["合同风险结论需要负责人或法务人工复核"]
+    if quality.get("requiresHumanReview"):
+        reasons.append("文档解析质量需要核对原页")
+    if validation.get("unsupportedCitationCount"):
+        reasons.append("存在无法由原文连续片段支持的引用")
+    if (state.get("coverage") or {}).get("status") != "CONFIRMED":
+        reasons.append("部分风险领域证据覆盖不足")
+
+    content = artifact.get("content") if isinstance(artifact.get("content"), dict) else {}
+    human_review = {
+        "required": True,
+        "status": "PENDING",
+        "reasons": list(dict.fromkeys(reasons)),
+        "finalDecisionOwner": "HUMAN_REVIEWER",
+    }
+    content["humanReview"] = human_review
+    content["documentQuality"] = quality
+    content["evidenceValidation"] = validation
+    artifact["content"] = content
+    artifact["humanReviewRequired"] = True
+
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "prepare_human_review",
+        "artifact": artifact,
+        "human_review": human_review,
+    }
 
 
 def persist_report(state: dict[str, Any]) -> dict[str, Any]:

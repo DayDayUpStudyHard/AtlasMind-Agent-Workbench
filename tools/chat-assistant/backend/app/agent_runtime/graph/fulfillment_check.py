@@ -12,7 +12,9 @@ from typing import Any
 from langgraph.graph import StateGraph, START, END
 
 from .state import BaseGraphState
+from .nodes.context import load_run_context, freeze_case_snapshot
 from .nodes.requirements import decompose_requirements
+from .nodes.retrieval import retrieve_fulfillment_evidence
 from .nodes.fulfillment_judge import judge_each_requirement
 from .nodes.fulfillment_validate import validate_fulfillment_judgement
 from .nodes.human_confirm import wait_human_confirmation, apply_human_result
@@ -31,7 +33,10 @@ def build_fulfillment_check_graph(checkpointer: Any = None) -> Any:
     builder = StateGraph(BaseGraphState)
 
     # ── Nodes ──
+    builder.add_node("load_run_context", load_run_context)
+    builder.add_node("freeze_case_snapshot", freeze_case_snapshot)
     builder.add_node("decompose_requirements", decompose_requirements)
+    builder.add_node("retrieve_fulfillment_evidence", retrieve_fulfillment_evidence)
     builder.add_node("judge_each_requirement", judge_each_requirement)
     builder.add_node("validate_fulfillment_judgement", validate_fulfillment_judgement)
     builder.add_node("wait_human_confirmation", wait_human_confirmation)
@@ -39,8 +44,11 @@ def build_fulfillment_check_graph(checkpointer: Any = None) -> Any:
     builder.add_node("persist_report", persist_report)
 
     # ── Edges ──
-    builder.add_edge(START, "decompose_requirements")
-    builder.add_edge("decompose_requirements", "judge_each_requirement")
+    builder.add_edge(START, "load_run_context")
+    builder.add_edge("load_run_context", "freeze_case_snapshot")
+    builder.add_edge("freeze_case_snapshot", "decompose_requirements")
+    builder.add_edge("decompose_requirements", "retrieve_fulfillment_evidence")
+    builder.add_edge("retrieve_fulfillment_evidence", "judge_each_requirement")
     builder.add_edge("judge_each_requirement", "validate_fulfillment_judgement")
     builder.add_edge("validate_fulfillment_judgement", "wait_human_confirmation")
 
