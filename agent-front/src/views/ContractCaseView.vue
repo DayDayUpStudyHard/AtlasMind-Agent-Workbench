@@ -11,14 +11,38 @@
       </div>
       <div class="case-actions">
         <button class="primary-button" @click="handlePrimaryAction" :disabled="running || primaryAction.disabled">{{ running ? '运行中' : primaryAction.label }}</button>
-        <div class="task-menu">
-          <select v-model="selectedTask" :disabled="running">
-            <option value="VERSION_REVIEW">版本复核</option>
-            <option value="APPROVAL_DECISION">生成审批意见</option>
-            <option value="OBLIGATION_EXTRACTION">提取履约义务</option>
-          </select>
-          <button class="quiet-button" @click="startRun(selectedTask)" :disabled="running">运行</button>
-        </div>
+        <details class="task-menu">
+          <summary class="quiet-button">更多 Agent 任务</summary>
+          <div class="task-menu-panel" role="menu">
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !canVersionReview"
+              @click="startAdditionalTask('VERSION_REVIEW')"
+            >
+              <strong>版本差异复核</strong>
+              <small>{{ canVersionReview ? '对比当前合同与其他已解析版本' : '至少需要两个已解析的主合同版本' }}</small>
+            </button>
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !canApprovalDecision"
+              @click="startAdditionalTask('APPROVAL_DECISION')"
+            >
+              <strong>生成审批意见</strong>
+              <small>{{ canApprovalDecision ? '根据审查结果整理审批建议' : '完成风险审查或进入待审批状态后可用' }}</small>
+            </button>
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !canObligationExtraction"
+              @click="startAdditionalTask('OBLIGATION_EXTRACTION')"
+            >
+              <strong>提取履约义务</strong>
+              <small>{{ canObligationExtraction ? '整理付款、交付、验收和通知义务' : '合同签署或进入履约阶段后可用' }}</small>
+            </button>
+          </div>
+        </details>
       </div>
     </header>
 
@@ -60,9 +84,9 @@
         <button v-if="analysisWorkflow.status === 'WAITING_CONFIRMATION'" class="quiet-button small" @click="openIntakeConfirmation">
           打开识别确认
         </button>
-        <button v-else-if="analysisWorkflow.status === 'READY_FOR_REVIEW'" class="primary-button small" :disabled="running" @click="startRun('CONTRACT_REVIEW')">
-          开始风险审查
-        </button>
+        <span v-else-if="analysisWorkflow.status === 'READY_FOR_REVIEW'" class="workflow-next-step">
+          请使用页面顶部的主按钮发起风险审查
+        </span>
       </div>
     </section>
 
@@ -360,9 +384,7 @@
         <p>合同文本和时间节点已经准备好。点击下方按钮后，Agent 才会检索证据、分析风险并生成审查报告。</p>
         <div class="review-result-footer">
           <span>当前状态：待发起合同审查</span>
-          <button type="button" class="primary-button small" :disabled="running" @click="startRun('CONTRACT_REVIEW')">
-            开始合同审查
-          </button>
+          <span class="workflow-next-step">请使用页面顶部的“开始风险审查”按钮</span>
         </div>
       </div>
     </section>
@@ -690,9 +712,10 @@
     <!-- Runs -->
     <section class="side-section" data-section="runs" v-if="c.runs?.length">
       <h3>Agent 运行记录</h3>
-      <div v-for="r in c.runs" :key="r.id" class="run-row">
+      <div v-for="r in c.runs" :key="r.id" class="run-row" :class="{ 'run-row-failed': r.status === 'FAILED' }">
         <span :class="runStatusClass(r.status)">{{ runStatusLabel(r.status) }}</span>
         <strong>{{ runTypeLabel(r.runType) }}</strong>
+        <p v-if="r.status === 'FAILED' && r.errorMessage" class="run-error-message">{{ r.errorMessage }}</p>
         <small>{{ r.progress || 0 }}% · {{ formatDate(r.createTime) }}</small>
       </div>
     </section>
@@ -847,7 +870,6 @@ const viewTextDoc = ref(null)
 const showIntakeModal = ref(false)
 const intakeFields = ref(null)
 const confirming = ref(false)
-const selectedTask = ref('VERSION_REVIEW')
 const timelineBaseSelection = reactive({})
 const timelineBaseSaving = ref(false)
 const selectedTimelineNode = ref(null)
@@ -866,6 +888,12 @@ let caseRefreshInFlight = false
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
+const ACTIVE_RUN_STATUSES = new Set([
+  'CREATED', 'CONTEXT_BUILDING', 'PLANNING', 'ANALYZING',
+  'VERIFYING', 'WAITING_HUMAN', 'WAITING_APPROVAL',
+])
+const hasActiveRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
+  .some(run => ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
 const reviewSummaryView = computed(() => {
   const direct = c.value.reviewSummary
   if (direct?.id) return direct
@@ -873,6 +901,20 @@ const reviewSummaryView = computed(() => {
     ['CONTRACT_REVIEW_REPORT', 'CONTRACT_REVIEW'].includes(String(report?.reportType || '').toUpperCase())
   ) || {}
 })
+const canVersionReview = computed(() => {
+  const versions = (Array.isArray(c.value.documents) ? c.value.documents : [])
+    .filter(document => String(document?.documentType || '').toUpperCase() === 'MAIN')
+    .map(document => Number(document?.version))
+    .filter(Number.isFinite)
+  return new Set(versions).size >= 2
+})
+const canApprovalDecision = computed(() =>
+  Boolean(reviewSummaryView.value?.id)
+  || ['PENDING_APPROVAL', 'APPROVED', 'READY_TO_SIGN'].includes(String(c.value.status || '').toUpperCase())
+)
+const canObligationExtraction = computed(() =>
+  ['SIGNED', 'IN_FULFILLMENT'].includes(String(c.value.status || '').toUpperCase())
+)
 const reviewReportRisks = computed(() => arrayField(reviewSummaryView.value?.risksJson).filter(item => item && typeof item === 'object'))
 const reviewReportPlan = computed(() => arrayField(reviewSummaryView.value?.planJson).filter(item => item && typeof item === 'object'))
 const analysisStages = computed(() => {
@@ -937,7 +979,7 @@ const intakeOurSideLabel = computed(() => {
 
 const primaryAction = computed(() => {
   const status = c.value.status
-  const hasRunning = c.value.runs?.some(r => !['COMPLETED', 'FAILED', 'CANCELLED'].includes(r.status))
+  const hasRunning = hasActiveRun.value
   if (analysisWorkflow.value.status === 'WAITING_CONFIRMATION' || status === 'INTAKE_CONFIRMING') {
     return { label: '确认识别结果', taskType: null, disabled: false, openIntake: true }
   }
@@ -949,7 +991,7 @@ const primaryAction = computed(() => {
   if (status === 'PENDING_APPROVAL') return { label: '生成审批意见', taskType: 'APPROVAL_DECISION', disabled: false }
   if (['SIGNED', 'IN_FULFILLMENT'].includes(status)) return { label: '提取履约义务', taskType: 'OBLIGATION_EXTRACTION', disabled: false }
   if (!c.value.documents?.length) return { label: '先上传合同', taskType: null, disabled: true }
-  return { label: '开始合同审查', taskType: 'CONTRACT_REVIEW', disabled: false }
+  return { label: '开始风险审查', taskType: 'CONTRACT_REVIEW', disabled: false }
 })
 
 onMounted(() => {
@@ -1194,10 +1236,22 @@ function documentPipelineStatusActive(document) {
 }
 
 async function startRun(taskType) {
+  if (running.value || hasActiveRun.value) {
+    message.info('当前合同已有 Agent 任务运行中，请先查看运行进度')
+    return
+  }
   running.value = true
   try {
-    await api.post(`/api/workspace/contracts/${route.params.id}/runs`, { taskType, triggerType: 'MANUAL', question: taskQuestion(taskType) })
-    message.success('Agent 任务已创建')
+    const response = await api.post(`/api/workspace/contracts/${route.params.id}/runs`, {
+      taskType,
+      triggerType: 'MANUAL',
+      question: taskQuestion(taskType),
+    })
+    if (response.data.data?.deduplicated) {
+      message.info('当前合同已有同类 Agent 任务，已沿用现有运行记录')
+    } else {
+      message.success('Agent 任务已创建')
+    }
     setTimeout(refreshCase, 2000)
   } catch (e) { message.error(e.response?.data?.message || e.message || '启动失败') }
   finally { running.value = false }
@@ -1230,6 +1284,10 @@ async function updateFinding(findingId, status) {
   } catch (e) {
     message.error('更新审查发现失败')
   }
+}
+
+function startAdditionalTask(taskType) {
+  startRun(taskType)
 }
 
 function canFulfillmentCheck(node) {
@@ -1752,7 +1810,20 @@ function formatBytes(size) {
 .case-header h1{margin:8px 0 6px;font-family:var(--atlas-font-display);font-size:36px;color:var(--atlas-text)}
 .case-header p{color:var(--atlas-muted);font-size:14px;max-width:600px}
 .case-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
-.task-menu{display:flex;align-items:center;gap:6px}
+.task-menu{position:relative;display:block}
+.task-menu summary{list-style:none}
+.task-menu summary::-webkit-details-marker{display:none}
+.task-menu summary::after{display:inline-block;margin-left:8px;content:'⌄';font-size:12px;transform:translateY(-1px)}
+.task-menu[open] summary{color:var(--atlas-primary);border-color:var(--atlas-primary)}
+.task-menu[open] summary::after{transform:translateY(-1px) rotate(180deg)}
+.task-menu-panel{position:absolute;top:calc(100% + 7px);right:0;z-index:30;display:grid;gap:4px;width:min(290px,calc(100vw - 28px));padding:6px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;box-shadow:0 14px 30px rgba(15,23,42,.14)}
+.task-menu-item{display:flex;min-height:58px;flex-direction:column;align-items:flex-start;justify-content:center;gap:3px;padding:9px 10px;color:var(--atlas-text);background:var(--atlas-surface);border:1px solid transparent;border-radius:3px;text-align:left;cursor:pointer}
+.task-menu-item:hover:not(:disabled),.task-menu-item:focus-visible{background:var(--atlas-surface-soft);border-color:var(--atlas-border);outline:0}
+.task-menu-item strong{font-size:12px;line-height:1.35}
+.task-menu-item small{color:var(--atlas-subtle);font-size:10px;font-weight:500;line-height:1.45}
+.task-menu-item:disabled{color:var(--atlas-subtle);background:var(--atlas-bg);cursor:not-allowed;opacity:.72}
+.task-menu-item:disabled small{color:var(--atlas-subtle)}
+.workflow-next-step{display:inline-flex;align-items:center;min-height:32px;padding:0 11px;color:var(--atlas-muted);background:var(--atlas-bg);border:1px dashed var(--atlas-border);border-radius:4px;font-size:11px;font-weight:700}
 .task-menu select{min-height:38px;padding:0 8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-text);font-size:12px;font-weight:700}
 .quiet-button,.primary-button{display:inline-flex;align-items:center;min-height:38px;padding:0 14px;border-radius:4px;font-size:12px;font-weight:800;cursor:pointer}
 .quiet-button{color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border)}
@@ -1963,6 +2034,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .verification-list li+li{margin-top:3px}
 .finding-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
 .run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
+.run-row-failed{align-items:flex-start;flex-wrap:wrap}.run-row-failed .run-error-message{flex:1 0 100%;margin:0 0 2px 78px;color:#9d4b45;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .section-header h3{margin:0!important}
 .upload-form{margin:12px 0;padding:14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
@@ -2144,7 +2216,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-summary-row>strong{color:var(--atlas-text);font-size:17px}
 
 @media(max-width:700px){
-  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}
+  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}
   .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
   .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}
   .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}

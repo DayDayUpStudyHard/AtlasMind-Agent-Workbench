@@ -76,9 +76,13 @@
                   <div v-if="activityIsActive(activity)" class="pipeline-progress">
                     <i :style="{ width: `${activityProgress(activity)}%` }"></i>
                   </div>
+                  <p v-if="activity.status === 'FAILED'" class="activity-error-preview">
+                    {{ activityFailureMessage(activity) }}
+                  </p>
                 </div>
                 <div class="activity-meta">
                   <b>{{ activityStatusLabel(activity) }}</b>
+                  <span v-if="activity.status === 'FAILED'" class="activity-error-link">查看原因</span>
                   <time>{{ relativeTime(activityUpdatedAt(activity)) }}</time>
                 </div>
               </div>
@@ -90,6 +94,52 @@
         <button type="button" class="logout-button" @click="logout">退出</button>
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="failureDialog"
+        class="activity-error-overlay"
+        role="presentation"
+        @click.self="failureDialog = null"
+      >
+        <section
+          class="activity-error-dialog"
+          role="alertdialog"
+          aria-modal="true"
+          aria-live="assertive"
+          aria-labelledby="activity-error-title"
+        >
+          <div class="activity-error-dialog-head">
+            <div>
+              <span class="activity-error-kicker">合同处理失败</span>
+              <h3 id="activity-error-title">查看失败原因</h3>
+            </div>
+            <button type="button" class="activity-error-close" aria-label="关闭" @click="failureDialog = null">×</button>
+          </div>
+          <dl class="activity-error-facts">
+            <div>
+              <dt>合同</dt>
+              <dd>{{ failureDialog.caseTitle }}</dd>
+            </div>
+            <div v-if="failureDialog.run?.id">
+              <dt>Agent Run</dt>
+              <dd>#{{ failureDialog.run.id }}</dd>
+            </div>
+            <div v-if="failureDialog.run?.currentStep">
+              <dt>失败阶段</dt>
+              <dd>{{ failureDialog.run.currentStep }}</dd>
+            </div>
+          </dl>
+          <div class="activity-error-message">
+            <span>系统返回的失败原因</span>
+            <p>{{ activityFailureMessage(failureDialog) }}</p>
+          </div>
+          <div class="activity-error-actions">
+            <button type="button" class="quiet-button" @click="failureDialog = null">关闭</button>
+            <button type="button" class="primary-button small" @click="openFailureCase">查看合同详情</button>
+          </div>
+        </section>
+      </div>
+    </Teleport>
   </header>
 </template>
 
@@ -106,6 +156,7 @@ const keyword = ref('')
 const scrolled = ref(false)
 const adminUrl = import.meta.env.VITE_ADMIN_URL || 'http://localhost:15173/'
 const notificationOpen = ref(false)
+const failureDialog = ref(null)
 const unreadCount = ref(0)
 const aiStatus = ref(null)
 const aiStatusLoading = ref(false)
@@ -204,6 +255,27 @@ async function toggleNotificationPanel() {
 function closeNotificationPanel() { notificationOpen.value = false }
 
 function openContractActivity(activity) {
+  if (activity?.status === 'FAILED') {
+    failureDialog.value = activity
+    return
+  }
+  if (activity?.caseId) {
+    router.push({
+      path: `/contracts/${activity.caseId}`,
+      query: activity.run?.id ? { runId: String(activity.run.id) } : undefined,
+    })
+  }
+}
+function activityFailureMessage(activity) {
+  return activity?.run?.errorMessage
+    || activity?.pipeline?.errorMessage
+    || activity?.pipeline?.pipelineError
+    || '系统没有返回具体失败原因，请打开合同详情查看运行记录。'
+}
+function openFailureCase() {
+  const activity = failureDialog.value
+  failureDialog.value = null
+  notificationOpen.value = false
   if (activity?.caseId) {
     router.push({
       path: `/contracts/${activity.caseId}`,
@@ -374,6 +446,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .activity-headline strong{overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
 .activity-kind{flex:0 0 auto;padding:1px 5px;color:var(--atlas-primary);background:var(--atlas-surface-soft);border:1px solid var(--atlas-border);border-radius:3px;font-size:9px;font-weight:800;white-space:nowrap}
 .activity-main-label{overflow:hidden;color:var(--atlas-muted);font-size:10px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}
+.activity-error-preview{margin:0;color:#8f4843;font-size:10px;line-height:1.5;display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden}
 .activity-stage-list{display:grid;gap:3px}
 .activity-stage{display:grid;grid-template-columns:30px minmax(0,1fr) auto;gap:5px;align-items:center;min-width:0;color:var(--atlas-subtle);font-size:9px}
 .activity-stage>span{color:var(--atlas-primary);font-weight:900}
@@ -381,6 +454,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .activity-stage b{color:var(--atlas-muted);font-size:9px;font-weight:800;white-space:nowrap}
 .activity-meta{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:3px;color:var(--atlas-subtle);font-size:9px}
 .activity-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.contract-activity-row.error .activity-meta b{color:#b35c56}.contract-activity-row.done .activity-meta b{color:#3f7f5d}
+.activity-error-link{color:#b35c56;font-size:9px;font-weight:800;white-space:nowrap}
 .activity-empty{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px;text-align:center}
 .document-pipeline-feed{display:flex;flex-direction:column;margin-top:8px}
 .document-pipeline-row{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:9px 0;border-bottom:1px solid var(--atlas-border);cursor:pointer}
@@ -396,6 +470,21 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .document-pipeline-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.document-pipeline-row.error .document-pipeline-meta b{color:#b35c56}.document-pipeline-row.done .document-pipeline-meta b{color:#3f7f5d}
 .pipeline-progress{height:3px;margin-top:2px;overflow:hidden;background:var(--atlas-border)}
 .pipeline-progress i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
+.activity-error-overlay{position:fixed;inset:0;z-index:300;display:grid;place-items:center;padding:20px;background:rgba(22,35,48,.28)}
+.activity-error-dialog{width:min(520px,100%);padding:20px;background:var(--atlas-surface);border:1px solid rgba(179,92,86,.35);border-left:4px solid #b35c56;border-radius:6px;box-shadow:0 18px 48px rgba(22,35,48,.18)}
+.activity-error-dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+.activity-error-kicker{color:#b35c56;font-size:10px;font-weight:900;letter-spacing:.04em}
+.activity-error-dialog h3{margin:4px 0 0;color:var(--atlas-text);font-size:18px}
+.activity-error-close{width:28px;height:28px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-muted);font-size:20px;line-height:1;cursor:pointer}
+.activity-error-close:hover{color:#b35c56;border-color:#b35c56}
+.activity-error-facts{display:grid;gap:9px;margin:18px 0 0}
+.activity-error-facts div{display:grid;grid-template-columns:74px minmax(0,1fr);gap:10px;padding-bottom:8px;border-bottom:1px solid var(--atlas-border)}
+.activity-error-facts dt{color:var(--atlas-subtle);font-size:10px;font-weight:900}
+.activity-error-facts dd{margin:0;color:var(--atlas-text);font-size:12px;line-height:1.5;overflow-wrap:anywhere}
+.activity-error-message{margin-top:16px;padding:12px;background:#fff6f5;border:1px solid #edcfcc;border-radius:4px}
+.activity-error-message span{display:block;color:#9d4b45;font-size:10px;font-weight:900}
+.activity-error-message p{margin:7px 0 0;color:#5f3532;font-size:12px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.activity-error-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px}
 
 .admin-link,.logout-button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 10px;color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;cursor:pointer;font-size:12px;font-weight:800;text-decoration:none;white-space:nowrap}
 .admin-link:hover,.logout-button:hover{color:var(--atlas-primary);border-color:var(--atlas-primary)}

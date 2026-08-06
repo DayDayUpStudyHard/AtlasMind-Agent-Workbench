@@ -2,6 +2,95 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 合同 Agent 架构收敛：有界反思、幂等运行与失败可观测
+
+**日期**：2026-08-06
+
+### 背景
+
+- ContractReviewGraph 在证据不足时可能反复进入补检索和反思路径，造成运行时间过长，甚至没有报告产物。
+- 合同详情页的多个按钮实际都调用同一个 `CONTRACT_REVIEW` 任务接口，前端请求结束后异步 Run 仍在执行，用户可以重复发起同类任务。
+- Agent 运行失败原因已经写入 `agent_run.error_message`，但合同详情页和顶部消息中心没有完整展示，用户只能看到“处理失败”。
+- 合同详情页同时存在“开始合同审查”“开始风险审查”和流程卡按钮，业务语义重复，容易误触发重复运行。
+
+### 最近的架构调整
+
+#### 1. LangGraph 审查图增加有界反思与受限报告出口
+
+- `contract_review.py` 的反思路由读取 `retry_state.reflection_rounds`，将补检索次数纳入状态机判断。
+- 证据覆盖不足时最多执行一次定向补检索；补检索后不再重新跑完整的领域 LLM 审查，直接进入 `compose_limited_report`。
+- 证据仍不足时生成明确标记为范围受限的报告，而不是停留在 `VERIFYING` 或无限循环。
+- 保留 `CONFIRMED → compose_report` 和 `CANNOT_RESOLVE → compose_limited_report` 两条明确出口。
+- 新增回归测试，验证一次补检索后必定进入受限报告路径。
+
+当前合同风险审查链路：
+
+```text
+加载合同快照
+  → 条款清单
+  → 创建领域任务
+  → 混合检索合同/知识库证据
+  → 确定性规则 + LLM 生成风险发现
+  → 覆盖反思
+  → 最多一次定向补检索
+  → 完整报告 / 范围受限报告
+  → Pydantic Schema 校验
+  → 修复或有限报告
+  → 持久化报告与引用
+```
+
+#### 2. Java 侧增加合同任务幂等保护
+
+- `ContractCaseServiceImpl.startRun()` 在事务内先对合同记录执行 `SELECT ... FOR UPDATE`。
+- 同一合同、同一 `run_type` 存在以下活动状态时，不再创建新的 `agent_run`：
+  `CREATED`、`CONTEXT_BUILDING`、`PLANNING`、`ANALYZING`、`VERIFYING`、`WAITING_HUMAN`、`WAITING_APPROVAL`。
+- 后端返回已有 Run，并附加 `deduplicated=true`，前端提示“已沿用现有运行记录”。
+- 这使幂等保护不依赖前端按钮状态，即使多个浏览器请求同时到达，也不会重复创建同类合同任务。
+
+#### 3. 前端统一合同 Agent 任务入口
+
+- 顶部主按钮统一承担当前合同的下一步主操作：
+  - 待审查：开始风险审查
+  - 运行中：查看审查进度
+  - 待审批：生成审批意见
+  - 已签署/履约中：提取履约义务
+- 删除流程卡和空状态卡中重复的风险审查按钮。
+- 新增“更多 Agent 任务”菜单，集中放置版本差异复核、审批意见和履约义务提取，并显示各任务的前置条件。
+- 前端增加活动 Run 拦截，后端幂等保护作为最终兜底。
+- 移动端菜单改为从操作区左侧展开，避免窄屏向视口外溢。
+
+#### 4. 失败原因纳入可观测链路
+
+- 合同详情的 Agent 运行记录读取并展示 `errorMessage`。
+- 顶部消息中心将合同文件处理和 Agent 运行合并为一个合同工作流活动，不再显示两条重复通知。
+- 失败活动可以直接打开错误原因弹窗，查看合同、Run 编号、失败阶段和后端返回的完整错误信息。
+- Java 仍负责 API、事务、鉴权和任务入口；Python Runtime 负责 LangGraph 编排、工具调用、反思、报告和 checkpoint；前端只负责发起任务和展示状态/轨迹。
+
+### 验证结果
+
+- 用户端 Vite 生产构建通过。
+- 用户端测试 9 项全部通过。
+- Python Agent Runtime 测试 64 项全部通过。
+- Java `mvnw -q -DskipTests compile` 通过。
+- `git diff --check` 通过。
+- Java 后端重启后 `http://localhost:18080/actuator/health` 返回 200。
+
+### 当前架构结论
+
+```text
+ContractCaseView
+  → Java ContractCaseService.startRun()
+  → 事务锁 + 活动 Run 幂等判断
+  → agent_run
+  → Python RuntimeRouter
+  → GraphAdapter
+  → ContractReviewGraph
+  → traces / tool calls / report / checkpoint
+  → Java API + 消息中心 + 合同详情展示
+```
+
+这次调整没有改变 Legacy Harness 作为回滚通道的定位，而是把 LangGraph 的运行边界、失败出口、重复运行保护和前端可观测性补齐，使 Agent 从“能运行”进一步变成“可控、可解释、可恢复”。
+
 ## Agent 图运行时架构升级：LangGraph DAG/状态机 + 评测中心 + 四阶段渐进迁移
 
 **日期**：2026-08-05

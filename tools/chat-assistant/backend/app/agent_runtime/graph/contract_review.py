@@ -35,9 +35,15 @@ def _route_after_reflection(state: dict[str, Any]) -> str:
     """Route based on coverage reflection status."""
     coverage = state.get("coverage") or {}
     status = coverage.get("status", "NEED_MORE_EVIDENCE")
+    retry_count = int((state.get("retry_state") or {}).get("reflection_rounds", 0))
     if status == "CONFIRMED":
         return "compose_report"
     if status == "CANNOT_RESOLVE":
+        return "compose_limited_report"
+    # One targeted retrieval is enough for the MVP. Re-running every domain
+    # LLM after that can leave the graph in a long, report-less verification
+    # loop when the model or policy evidence is unavailable.
+    if retry_count >= 1:
         return "compose_limited_report"
     return "targeted_retrieval"
 
@@ -105,7 +111,10 @@ def build_contract_review_graph(checkpointer: Any = None) -> Any:
             "targeted_retrieval": "targeted_retrieval",
         },
     )
-    builder.add_edge("targeted_retrieval", "draft_domain_findings")
+    # Targeted retrieval is a bounded evidence expansion. The resulting
+    # report must remain honest about unresolved coverage instead of looping
+    # through another full LLM pass.
+    builder.add_edge("targeted_retrieval", "compose_limited_report")
 
     # Report paths with quality gate
     builder.add_edge("compose_report", "validate_schema")

@@ -314,6 +314,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         c.put("analysisWorkflow", latestAnalysisWorkflow(caseId));
         c.put("runs", jdbcTemplate.queryForList(
                 "SELECT id, run_type AS runType, status, progress, current_step AS currentStep, "
+                        + "error_message AS errorMessage, "
                         + "workflow_id AS workflowId, workflow_stage AS workflowStage, "
                         + "evidence_snapshot_hash AS evidenceSnapshotHash, create_time AS createTime "
                         + "FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
@@ -758,11 +759,28 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Transactional
     public Map<String, Object> startRun(Long caseId, Map<String, Object> request) {
         Map<String, Object> c = first(jdbcTemplate.queryForList(
-                "SELECT id FROM contract_case WHERE id=? AND deleted=0", caseId));
+                "SELECT id FROM contract_case WHERE id=? AND deleted=0 FOR UPDATE", caseId));
         if (c == null) throw new IllegalArgumentException("Contract case not found");
 
         String taskType = str(request, "taskType");
         if (taskType.isBlank()) taskType = "CONTRACT_REVIEW";
+
+        Map<String, Object> activeRun = first(jdbcTemplate.queryForList("""
+                SELECT id
+                FROM agent_run
+                WHERE subject_type=? AND subject_id=? AND run_type=?
+                  AND status IN (
+                      'CREATED', 'CONTEXT_BUILDING', 'PLANNING', 'ANALYZING',
+                      'VERIFYING', 'WAITING_HUMAN', 'WAITING_APPROVAL'
+                  )
+                ORDER BY id DESC
+                LIMIT 1
+                """, SUBJECT_TYPE, caseId, taskType));
+        if (activeRun != null) {
+            Map<String, Object> existingRun = getRun(numberAsLong(activeRun.get("id")));
+            existingRun.put("deduplicated", true);
+            return existingRun;
+        }
 
         Long workflowId = null;
         String workflowStage = null;

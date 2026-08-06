@@ -4,6 +4,7 @@ from app.agent_runtime.graph.nodes.artifact import _risk_groups, _risk_summary
 from app.agent_runtime.graph.nodes.domain_tasks import _normalize_domain
 from app.agent_runtime.graph.nodes.retrieval import _fallback_rule_findings, _normalize_finding
 from app.agent_runtime.graph.nodes.validation import _validate_one
+from app.agent_runtime.graph.contract_review import _route_after_reflection
 
 
 def _task():
@@ -126,3 +127,10 @@ def test_report_summary_and_groups_are_deterministic():
         "primaryMessage": "优先处理 1 项高风险问题",
     }
     assert groups[0]["domainKey"] == "payment"
+
+
+def test_reflection_uses_limited_report_after_one_targeted_retry():
+    assert _route_after_reflection({
+        "coverage": {"status": "NEED_MORE_EVIDENCE"},
+        "retry_state": {"reflection_rounds": 1},
+    }) == "compose_limited_report"
