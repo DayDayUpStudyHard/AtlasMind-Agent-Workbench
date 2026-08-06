@@ -883,9 +883,10 @@ async def extract_contract_intake(
 async def _dispatch_via_router(router, request) -> None:
     """Execute a run via RuntimeRouter with progress updates and persistence."""
     from app.agent_runtime.api_models import AgentTaskContext
-    from app.agent_runtime.persistence import MySqlRunStore
+    from app.agent_runtime.persistence import MySqlReportStore, MySqlRunStore
 
     run_store = MySqlRunStore()
+    report_store = MySqlReportStore()
     run_id = request.run_id
     heartbeat_task: asyncio.Task | None = None
 
@@ -902,7 +903,36 @@ async def _dispatch_via_router(router, request) -> None:
             await run_store.update_run(run_id, status="WAITING_HUMAN", progress=85,
                                        current_step="等待人工确认")
         elif result.status == "COMPLETED":
-            # Graph completed: artifact was already persisted by graph's persist_report node
+            # Graphs normally persist inside persist_report. Keep a second
+            # guard here so a successful graph response cannot hide a missing
+            # report when a node was skipped or failed silently.
+            report = await report_store.get_report(run_id)
+            if not report and result.artifact:
+                try:
+                    await report_store.save_report(
+                        request.project_id or request.subject_id,
+                        run_id,
+                        request.task_type,
+                        result.artifact,
+                    )
+                    report = await report_store.get_report(run_id)
+                except Exception as exc:
+                    logger.exception("Report fallback persist failed for run %s", run_id)
+                    await run_store.update_run(
+                        run_id,
+                        status="FAILED",
+                        progress=0,
+                        error_message=f"Report persistence failed: {exc}",
+                    )
+                    return
+            if not report:
+                await run_store.update_run(
+                    run_id,
+                    status="FAILED",
+                    progress=0,
+                    error_message="Agent finished without generating a report",
+                )
+                return
             await run_store.update_run(run_id, status="COMPLETED", progress=100,
                                        current_step="Graph 产物已生成")
         else:

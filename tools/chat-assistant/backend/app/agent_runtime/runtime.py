@@ -163,6 +163,28 @@ class GraphAdapter:
             )
 
         artifact = final_state.get("artifact") or {}
+        if not artifact:
+            # A graph can return a partial checkpoint state after an internal
+            # routing failure. Do not let the API report a false completion.
+            return AgentResult(
+                run_id=context.run_id,
+                status="FAILED",
+                artifact={
+                    "artifactError": (
+                        "Contract graph ended without a report artifact "
+                        f"(lastNode={final_state.get('current_node') or 'unknown'})"
+                    )
+                },
+                observations=final_state.get("observations") or [],
+                citations=final_state.get("citations") or [],
+                graph_info={
+                    "runtimeEngine": "langgraph",
+                    "graphName": final_state.get("graph_name", ""),
+                    "graphVersion": final_state.get("graph_version", ""),
+                    "stateRevision": final_state.get("state_revision", 0),
+                    "lastNode": final_state.get("current_node", ""),
+                },
+            )
         return AgentResult(
             run_id=context.run_id,
             status="COMPLETED",

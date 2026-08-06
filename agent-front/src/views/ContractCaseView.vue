@@ -66,6 +66,59 @@
       </div>
     </section>
 
+    <section v-if="reviewSummaryView.id" class="review-panel review-panel-prominent">
+      <div class="review-score">
+        <span>{{ riskStatusLabel(reviewSummaryView.riskStatus) }}</span>
+        <strong>{{ reviewSummaryView.riskScore ?? 0 }}</strong>
+        <small>规则引擎评分 · Agent 生成解释</small>
+      </div>
+      <div class="review-main">
+        <div class="review-prominent-head">
+          <div>
+            <span class="section-kicker">审查结果已生成</span>
+            <h3>{{ reviewSummaryView.title || '合同审查报告' }}</h3>
+          </div>
+          <span class="review-run-badge" v-if="reviewSummaryView.runId">运行 #{{ reviewSummaryView.runId }}</span>
+        </div>
+        <p>{{ reviewSummaryView.summary || '审查已完成，请展开查看风险和处理计划。' }}</p>
+        <div class="review-highlight-grid">
+          <div><strong>{{ reviewReportRisks.length }}</strong><span>风险发现</span></div>
+          <div><strong>{{ reviewReportPlan.length }}</strong><span>处理建议</span></div>
+          <div><strong>{{ formatDate(reviewSummaryView.createTime) }}</strong><span>生成时间</span></div>
+        </div>
+        <div class="review-result-footer">
+          <span>合同审查报告{{ reviewSummaryView.createTime ? ` · ${formatDate(reviewSummaryView.createTime)}` : '' }}</span>
+          <button type="button" class="primary-button small" @click="showReviewReport = !showReviewReport">
+            {{ showReviewReport ? '收起完整结果' : '展开完整结果' }}
+          </button>
+        </div>
+        <div v-if="showReviewReport" class="review-result-detail">
+          <section v-if="reviewReportRisks.length">
+            <strong>重点风险 · {{ reviewReportRisks.length }} 项</strong>
+            <div v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-result-item">
+              <span>{{ severityLabel(risk.severity) }}</span>
+              <div>
+                <b>{{ risk.title || risk.name || `风险 ${index + 1}` }}</b>
+                <p>{{ risk.description || risk.summary || risk.detail || '请展开下方审查发现查看证据与处理建议。' }}</p>
+              </div>
+            </div>
+          </section>
+          <section v-if="reviewReportPlan.length">
+            <strong>处理计划 · {{ reviewReportPlan.length }} 项</strong>
+            <div v-for="(item, index) in reviewReportPlan" :key="item.id || index" class="review-result-item">
+              <span>{{ item.id || index + 1 }}</span>
+              <div>
+                <b>{{ item.title || item.action || item.name || '待处理事项' }}</b>
+                <p>{{ item.acceptance || item.description || item.ownerRole || '请结合审查发现确认处理人和完成标准。' }}</p>
+              </div>
+            </div>
+          </section>
+          <pre v-if="reviewSummaryView.reportMarkdown" class="review-report-markdown">{{ reviewSummaryView.reportMarkdown }}</pre>
+          <pre v-else-if="reviewSummaryView.contentJson" class="review-report-json">{{ prettyReportContent(reviewSummaryView.contentJson) }}</pre>
+        </div>
+      </div>
+    </section>
+
     <section v-if="documentPipelineActive" class="document-progress-panel">
       <div class="document-progress-copy">
         <span class="section-kicker">合同文件处理</span>
@@ -791,8 +844,15 @@ let caseRefreshInFlight = false
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
-const reviewReportRisks = computed(() => arrayField(c.value.reviewSummary?.risksJson).filter(item => item && typeof item === 'object'))
-const reviewReportPlan = computed(() => arrayField(c.value.reviewSummary?.planJson).filter(item => item && typeof item === 'object'))
+const reviewSummaryView = computed(() => {
+  const direct = c.value.reviewSummary
+  if (direct?.id) return direct
+  return (Array.isArray(c.value.reports) ? c.value.reports : []).find(report =>
+    ['CONTRACT_REVIEW_REPORT', 'CONTRACT_REVIEW'].includes(String(report?.reportType || '').toUpperCase())
+  ) || {}
+})
+const reviewReportRisks = computed(() => arrayField(reviewSummaryView.value?.risksJson).filter(item => item && typeof item === 'object'))
+const reviewReportPlan = computed(() => arrayField(reviewSummaryView.value?.planJson).filter(item => item && typeof item === 'object'))
 const analysisStages = computed(() => {
   const workflow = analysisWorkflow.value
   const status = String(workflow.status || '').toUpperCase()
@@ -1795,6 +1855,14 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-empty{margin:8px 0 0;color:var(--atlas-subtle);font-size:11px;line-height:1.55}
 
 .review-panel{display:grid;grid-template-columns:180px 1fr;gap:18px;margin-bottom:20px;padding:18px;background:linear-gradient(90deg,rgba(66,111,166,.08),rgba(63,127,93,.07));border:1px solid var(--atlas-border);border-radius:6px}
+.review-panel:not(.review-panel-prominent){display:none}
+.review-panel-prominent{margin-top:20px;border-color:rgba(66,111,166,.28);box-shadow:0 8px 24px rgba(34,58,80,.08)}
+.review-prominent-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.review-run-badge{padding:5px 8px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-primary);background:var(--atlas-surface);font-size:10px;font-weight:900;white-space:nowrap}
+.review-highlight-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px}
+.review-highlight-grid div{display:flex;flex-direction:column;gap:4px;padding:9px;background:rgba(255,255,255,.72);border:1px solid var(--atlas-border);border-radius:4px}
+.review-highlight-grid strong{color:var(--atlas-text);font-size:17px}
+.review-highlight-grid span{color:var(--atlas-subtle);font-size:10px}
 .review-score{display:flex;flex-direction:column;gap:4px;padding-right:18px;border-right:1px solid var(--atlas-border)}
 .review-score span{font-size:12px;font-weight:900;color:var(--atlas-primary)}
 .review-score strong{font-family:var(--atlas-font-display);font-size:46px;line-height:1;color:var(--atlas-text)}

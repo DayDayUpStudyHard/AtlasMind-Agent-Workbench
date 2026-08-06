@@ -318,7 +318,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                         + "evidence_snapshot_hash AS evidenceSnapshotHash, create_time AS createTime "
                         + "FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
         List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
-                SELECT rp.id, rp.report_type AS reportType, rp.title, rp.summary,
+                SELECT rp.id, rp.run_id AS runId, rp.report_type AS reportType, rp.title, rp.summary,
                        health_status AS riskStatus, health_score AS riskScore,
                        dimensions_json AS dimensionsJson, risks_json AS risksJson,
                        plan_json AS planJson, citations_json AS citationsJson,
@@ -332,6 +332,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                    OR (ar.subject_type=? AND ar.subject_id=?)
                 ORDER BY
                     CASE WHEN rp.report_type IN ('CONTRACT_REVIEW_REPORT','CONTRACT_REVIEW') THEN 0 ELSE 1 END,
+                    COALESCE(ar.id, 0) DESC,
                     rp.id DESC
                 LIMIT 8
                 """, SUBJECT_TYPE, caseId, SUBJECT_TYPE, caseId);
