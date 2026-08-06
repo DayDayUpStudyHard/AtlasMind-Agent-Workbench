@@ -345,6 +345,28 @@
       </div>
     </section>
 
+    <section
+      v-if="!reviewSummaryView.id && analysisWorkflow.status === 'READY_FOR_REVIEW'"
+      class="review-panel review-panel-prominent review-empty-state"
+    >
+      <div class="review-score review-empty-score">
+        <span>待发起</span>
+        <strong>—</strong>
+        <small>当前还没有合同审查报告</small>
+      </div>
+      <div class="review-main">
+        <span class="section-kicker">合同审查尚未开始</span>
+        <h3>解析已完成，等待发起风险审查</h3>
+        <p>合同文本和时间节点已经准备好。点击下方按钮后，Agent 才会检索证据、分析风险并生成审查报告。</p>
+        <div class="review-result-footer">
+          <span>当前状态：待发起合同审查</span>
+          <button type="button" class="primary-button small" :disabled="running" @click="startRun('CONTRACT_REVIEW')">
+            开始合同审查
+          </button>
+        </div>
+      </div>
+    </section>
+
     <!-- Review overview -->
     <section class="review-panel" v-if="c.reviewSummary?.id">
       <div class="review-score">
