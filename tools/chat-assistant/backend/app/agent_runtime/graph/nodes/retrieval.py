@@ -232,6 +232,7 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
     case_id = int(state.get("subject_id") or 0)
     task_input = state.get("task_input") or {}
     timeline_node_id = int(task_input.get("timelineNodeId") or 0)
+    node: dict[str, Any] = {}
 
     async def _retrieve() -> tuple[dict[str, Any], list[dict[str, Any]]]:
         from ...contract_store import ContractStore
@@ -280,12 +281,22 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "contractEvidence": normalized_contract_hits,
             "missingEvidence": verification.get("missingEvidence") or [],
             "conclusion": verification.get("conclusion"),
+            "fulfillmentContext": {
+                "timelineNode": node,
+                "verification": verification,
+            },
         },
         "status": "DONE" if not verification.get("error") else "FAILED",
     }
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "retrieve_fulfillment_evidence",
+        "fulfillment_context": {
+            "timelineNode": node,
+            "verification": verification,
+            "evidenceDocuments": evidence_documents,
+            "contractEvidence": normalized_contract_hits,
+        },
         "citations": citations,
         "retrieval_validation": {
             "fulfillment": {

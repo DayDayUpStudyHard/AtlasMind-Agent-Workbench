@@ -11,6 +11,9 @@
       </div>
       <div class="case-actions">
         <button class="primary-button" @click="handlePrimaryAction" :disabled="running || primaryAction.disabled">{{ running ? '运行中' : primaryAction.label }}</button>
+        <button class="quiet-button revision-upload-button" type="button" @click="openRevisionUpload">
+          上传修改后合同
+        </button>
         <details class="task-menu">
           <summary class="quiet-button">更多 Agent 任务</summary>
           <div class="task-menu-panel" role="menu">
@@ -117,15 +120,83 @@
           </button>
         </div>
         <div v-if="showReviewReport" class="review-result-detail">
+          <section v-if="reviewCoverageChecklist.length" class="review-coverage-block">
+            <strong>审查覆盖清单 · {{ reviewCoverageChecklist.length }} 项</strong>
+            <div class="review-coverage-grid">
+              <article v-for="item in reviewCoverageChecklist" :key="item.domainKey" class="review-coverage-item" :class="String(item.coverageState || '').toLowerCase()">
+                <div class="review-coverage-head">
+                  <span>{{ item.coverageState || 'UNKNOWN' }}</span>
+                  <b>{{ item.domainName }}</b>
+                </div>
+                <p>{{ item.reason }}</p>
+                <small>证据 {{ item.evidenceCount || 0 }} · 发现 {{ item.findingCount || 0 }} · {{ (item.requiredClauseTypes || []).join('、') || '未指定' }}</small>
+                <details v-if="item.highlights && item.highlights.length">
+                  <summary>查看重点</summary>
+                  <ul>
+                    <li v-for="hit in item.highlights" :key="hit">{{ hit }}</li>
+                  </ul>
+                </details>
+              </article>
+            </div>
+            <p v-if="reviewCoverageSummary.totalDomains" class="review-coverage-summary">
+              共 {{ reviewCoverageSummary.totalDomains }} 个领域，已覆盖 {{ reviewCoverageSummary.coveredDomains || 0 }} 个，
+              待补证 {{ (reviewCoverageSummary.partialDomains || 0) + (reviewCoverageSummary.missingDomains || 0) + (reviewCoverageSummary.ambiguousDomains || 0) }} 个。
+            </p>
+          </section>
           <section v-if="reviewReportRisks.length">
             <strong>重点风险 · {{ reviewReportRisks.length }} 项</strong>
-            <div v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-result-item">
-              <span>{{ severityLabel(risk.severity) }}</span>
-              <div>
-                <b>{{ risk.title || risk.name || `风险 ${index + 1}` }}</b>
-                <p>{{ risk.description || risk.summary || risk.detail || '请展开下方审查发现查看证据与处理建议。' }}</p>
+            <article v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-risk-card">
+              <div class="review-risk-headline">
+                <span>{{ severityLabel(risk.severity) }}</span>
+                <div>
+                  <b>{{ findingHeadline(risk) || risk.title || risk.name || `风险 ${index + 1}` }}</b>
+                  <p>{{ findingOneLine(risk) || risk.description || risk.summary || risk.detail || '请展开查看证据与处理建议。' }}</p>
+                </div>
               </div>
-            </div>
+              <div class="review-risk-meta">
+                <small>{{ findingDomainName(risk) }}</small>
+                <small v-if="findingHasContractBasis(risk)">合同依据已命中</small>
+                <small v-if="findingHasPolicyBasis(risk)">知识库依据已命中</small>
+                <small v-if="findingReviewQuestions(risk).length">{{ findingReviewQuestions(risk).length }} 个复核问题</small>
+              </div>
+              <details>
+                <summary>查看详细说明</summary>
+                <div class="review-risk-detail-grid">
+                  <div>
+                    <span>风险解释</span>
+                    <p>{{ findingExplanation(risk) || '暂无详细解释' }}</p>
+                  </div>
+                  <div>
+                    <span>业务影响</span>
+                    <p>{{ findingBusinessImpact(risk) || '暂无业务影响说明' }}</p>
+                  </div>
+                  <div>
+                    <span>处理建议</span>
+                    <p>{{ findingRevisionAdvice(risk) || '暂无处理建议' }}</p>
+                  </div>
+                  <div>
+                    <span>合同依据</span>
+                    <p>{{ findingContractBasis(risk) }}</p>
+                  </div>
+                  <div>
+                    <span>知识库依据</span>
+                    <p>{{ findingKnowledgeBasis(risk) }}</p>
+                  </div>
+                  <div>
+                    <span>证据状态</span>
+                    <p>{{ findingEvidenceStatus(risk) || '暂无' }}</p>
+                  </div>
+                  <div>
+                    <span>校验理由</span>
+                    <p>{{ findingValidationReasons(risk).join('；') || '暂无' }}</p>
+                  </div>
+                  <div>
+                    <span>人工复核问题</span>
+                    <p>{{ findingReviewQuestions(risk).join('；') || '暂无' }}</p>
+                  </div>
+                </div>
+              </details>
+            </article>
           </section>
           <section v-if="reviewReportPlan.length">
             <strong>处理计划 · {{ reviewReportPlan.length }} 项</strong>
@@ -325,14 +396,33 @@
                   <span v-if="latestFulfillmentCheck(selectedTimelineNode).needsRecheck">新证据待重新核验</span>
                 </div>
               </div>
+              <div class="fulfillment-audit-summary">
+                <span>节点可用性：{{ nodeUsabilityLabel(requirementRows(latestFulfillmentCheck(selectedTimelineNode))[0]?.nodeUsability) }}</span>
+                <span>证据状态：{{ proofStatusLabel(requirementRows(latestFulfillmentCheck(selectedTimelineNode))[0]?.proofStatus) }}</span>
+                <span>子项总数：{{ fulfillmentAuditSummary(latestFulfillmentCheck(selectedTimelineNode)).total }}</span>
+                <span>证据充足：{{ fulfillmentAuditSummary(latestFulfillmentCheck(selectedTimelineNode)).SUPPORTED }}</span>
+                <span>部分支撑：{{ fulfillmentAuditSummary(latestFulfillmentCheck(selectedTimelineNode)).PARTIAL }}</span>
+                <span>证据不足：{{ fulfillmentAuditSummary(latestFulfillmentCheck(selectedTimelineNode)).INSUFFICIENT }}</span>
+              </div>
               <p>{{ latestFulfillmentCheck(selectedTimelineNode).summary || '等待核验结果生成。' }}</p>
               <div v-if="requirementRows(latestFulfillmentCheck(selectedTimelineNode)).length" class="fulfillment-requirements">
                 <small>合同要求 · 证据 · 判断 · 缺口</small>
                 <article v-for="(row, index) in requirementRows(latestFulfillmentCheck(selectedTimelineNode))" :key="index">
                   <div><span>合同要求</span><p>{{ row.requirement || '待人工复核合同要求' }}</p></div>
                   <div><span>证据</span><p>{{ row.evidence || '暂无充分证据' }}</p></div>
-                  <div><span>判断</span><p>{{ row.judgement || row.judgment || '需人工复核' }}</p></div>
+                  <div><span>判断</span><p>{{ proofStatusLabel(row.proofStatus || row.proof_status) }} · {{ nodeUsabilityLabel(row.nodeUsability || row.node_usability) }}</p></div>
                   <div><span>缺口</span><p>{{ row.gap || '暂无明确缺口' }}</p></div>
+                  <div v-if="row.reason"><span>说明</span><p>{{ row.reason }}</p></div>
+                  <div v-if="row.nextStep"><span>下一步</span><p>{{ row.nextStep }}</p></div>
+                  <div v-if="requirementMaterialChecklist(row).length"><span>建议材料</span><p>{{ requirementMaterialChecklist(row).join('；') }}</p></div>
+                  <details v-if="requirementEvidenceSnapshot(row).length">
+                    <summary>查看证据快照</summary>
+                    <ul class="evidence-snapshot-list">
+                      <li v-for="item in requirementEvidenceSnapshot(row)" :key="`${item.documentId || item.fileName || ''}-${item.contentHash || ''}`">
+                        {{ evidenceSnapshotLabel(item) }}
+                      </li>
+                    </ul>
+                  </details>
                   <em>{{ row.required === false ? '辅助项' : '必需项' }}</em>
                 </article>
               </div>
@@ -451,10 +541,17 @@
     </section>
 
     <!-- Documents -->
-    <section class="side-section">
+    <section class="side-section" data-section="documents">
       <div class="section-header">
         <h3>合同文件 · {{ c.documents?.length || 0 }} 份</h3>
         <button class="quiet-button small" @click="showUpload = !showUpload">{{ showUpload ? '取消' : '+ 上传文件' }}</button>
+      </div>
+      <div class="revision-upload-callout">
+        <div>
+          <strong>需要上传修改后的合同？</strong>
+          <small>系统会按新的主合同版本解析，后续可发起版本差异复核或重新审查。</small>
+        </div>
+        <button type="button" class="primary-button small" @click="openRevisionUpload">上传修改版</button>
       </div>
 
       <!-- Upload form -->
@@ -744,7 +841,13 @@
           <small v-if="group.highCount">{{ group.highCount }} 项需优先处理</small>
         </div>
 
-        <article v-for="f in group.items" :key="f.id" class="finding-card" :class="'finding-' + (f.severity || 'MEDIUM').toLowerCase()">
+        <article
+          v-for="f in group.items"
+          :key="f.id"
+          class="finding-card"
+          :class="['finding-' + (f.severity || 'MEDIUM').toLowerCase(), { 'finding-closed': findingClosed(f) }]"
+          :data-finding-id="f.id"
+        >
           <div class="finding-summary-row">
             <div class="finding-rank">
               <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
@@ -835,6 +938,55 @@
       </section>
     </section>
 
+    <button
+      v-if="riskFloatItems.length"
+      type="button"
+      class="risk-float-toggle"
+      :class="{ active: riskFloatVisible }"
+      @click="riskFloatVisible = !riskFloatVisible"
+    >
+      <span>风险</span>
+      <strong>{{ openFindingCount || riskFloatItems.length }}</strong>
+    </button>
+
+    <aside v-if="riskFloatItems.length && riskFloatVisible" class="risk-float-panel" aria-label="合同风险处理浮窗">
+      <div class="risk-float-head">
+        <div>
+          <span>风险处理</span>
+          <strong>{{ openFindingCount }} / {{ riskFloatItems.length }}</strong>
+        </div>
+        <small>{{ openFindingCount ? '待处理' : '已处理完' }}</small>
+      </div>
+      <div class="risk-float-list">
+        <article
+          v-for="f in riskFloatItems"
+          :key="f.id || f.findingKey || f.title"
+          class="risk-float-item"
+          :class="{ done: findingClosed(f), high: f.severity === 'HIGH' }"
+        >
+          <button type="button" class="risk-float-title" @click="scrollToFinding(f)">
+            <span :class="'sev-'+ (f.severity || 'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
+            <strong>{{ findingHeadline(f) }}</strong>
+          </button>
+          <p>{{ findingKeyPoint(f) }}</p>
+          <div class="risk-float-status">
+            <small>{{ findingStatusLabel(f.status) }}</small>
+            <small>{{ findingDomainName(f) }}</small>
+          </div>
+          <div v-if="f.id && f.status === 'OPEN'" class="risk-float-actions">
+            <button type="button" @click="updateFinding(f.id, 'REMEDIATED')">标记已完成</button>
+            <button type="button" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
+          </div>
+          <div v-else-if="!f.id" class="risk-float-done report-only">
+            报告风险，详情区生成后可处理
+          </div>
+          <div v-else class="risk-float-done">
+            {{ f.status === 'ACCEPTED_EXCEPTION' ? '已接受例外' : findingStatusLabel(f.status) }}
+          </div>
+        </article>
+      </div>
+    </aside>
+
     <!-- Obligations -->
     <section class="side-section" v-if="c.obligations?.length">
       <h3>履约义务 · {{ c.obligations.length }} 条</h3>
@@ -863,6 +1015,7 @@ const route = useRoute(); const router = useRouter(); const message = useMessage
 const c = ref({}); const loading = ref(true); const running = ref(false)
 const expandedFindings = reactive(new Set())
 const showReviewReport = ref(false)
+const riskFloatVisible = ref(true)
 const showUpload = ref(false)
 const uploading = ref(false)
 const upload = ref({ mode: 'file', docType: 'MAIN', fileName: '', filePath: '', contentText: '', file: null })
@@ -901,6 +1054,19 @@ const reviewSummaryView = computed(() => {
     ['CONTRACT_REVIEW_REPORT', 'CONTRACT_REVIEW'].includes(String(report?.reportType || '').toUpperCase())
   ) || {}
 })
+const reviewContentView = computed(() => {
+  const raw = reviewSummaryView.value?.contentJson
+  if (raw && typeof raw === 'object') return raw
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw)
+      return parsed && typeof parsed === 'object' ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+})
 const canVersionReview = computed(() => {
   const versions = (Array.isArray(c.value.documents) ? c.value.documents : [])
     .filter(document => String(document?.documentType || '').toUpperCase() === 'MAIN')
@@ -917,6 +1083,8 @@ const canObligationExtraction = computed(() =>
 )
 const reviewReportRisks = computed(() => arrayField(reviewSummaryView.value?.risksJson).filter(item => item && typeof item === 'object'))
 const reviewReportPlan = computed(() => arrayField(reviewSummaryView.value?.planJson).filter(item => item && typeof item === 'object'))
+const reviewCoverageChecklist = computed(() => arrayField(reviewContentView.value?.coverage?.checklist).filter(item => item && typeof item === 'object'))
+const reviewCoverageSummary = computed(() => reviewContentView.value?.coverage?.summary || {})
 const analysisStages = computed(() => {
   const workflow = analysisWorkflow.value
   const status = String(workflow.status || '').toUpperCase()
@@ -967,6 +1135,26 @@ const findingGroups = computed(() => {
     }))
     .sort((a, b) => b.highCount - a.highCount || a.name.localeCompare(b.name, 'zh-CN'))
 })
+const floatingFindings = computed(() => {
+  const severityOrder = { HIGH: 0, MEDIUM: 1, LOW: 2 }
+  const statusOrder = { OPEN: 0, REMEDIATED: 1, ACCEPTED_EXCEPTION: 2, DISMISSED: 3 }
+  return [...(Array.isArray(c.value.findings) ? c.value.findings : [])].sort((a, b) =>
+    (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9)
+    || (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)
+    || String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN')
+  )
+})
+const riskFloatItems = computed(() => {
+  if (floatingFindings.value.length) return floatingFindings.value
+  return reviewReportRisks.value.map((risk, index) => ({
+    ...risk,
+    id: risk.id || null,
+    findingKey: risk.findingKey || `report-risk-${index}`,
+    status: risk.status || 'REPORT_ONLY',
+    _reportOnly: true,
+  }))
+})
+const openFindingCount = computed(() => riskFloatItems.value.filter(finding => finding.status === 'OPEN').length)
 const intakeAttentionCount = computed(() => {
   const keys = ['contractTitle', 'contractType', 'amount', 'currency', 'signedDate', 'effectiveDate', 'expiryDate']
   return keys.filter(key => intakeFieldTone(key) !== 'ok').length + (intakeFields.value?.ourSide ? 0 : 1)
@@ -1270,6 +1458,21 @@ function handlePrimaryAction() {
   if (action.taskType) startRun(action.taskType)
 }
 
+function openRevisionUpload() {
+  upload.value = {
+    mode: 'file',
+    docType: 'MAIN',
+    fileName: '',
+    filePath: '',
+    contentText: '',
+    file: null,
+  }
+  showUpload.value = true
+  nextTick(() => {
+    document.querySelector('[data-section="documents"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  })
+}
+
 function openIntakeConfirmation() {
   if (!intakeFields.value) checkPendingIntake()
   if (intakeFields.value) showIntakeModal.value = true
@@ -1284,6 +1487,26 @@ async function updateFinding(findingId, status) {
   } catch (e) {
     message.error('更新审查发现失败')
   }
+}
+function findingClosed(finding) {
+  return finding?.status && finding.status !== 'OPEN'
+}
+function scrollToFinding(finding) {
+  if (!finding?.id) {
+    showReviewReport.value = true
+    nextTick(() => {
+      document.querySelector('.review-result-detail')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    return
+  }
+  const key = findingExpansionKey(finding)
+  expandedFindings.add(key)
+  nextTick(() => {
+    const target = document.getElementById(`finding-detail-${finding.id}`)
+      || document.querySelector(`[data-finding-id="${finding.id}"]`)
+      || document.querySelector('[data-section="findings"]')
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  })
 }
 
 function startAdditionalTask(taskType) {
@@ -1456,6 +1679,38 @@ function arrayField(value) {
 }
 function requirementRows(check) {
   return arrayField(check?.requirementJson).map(item => typeof item === 'object' ? item : { requirement: String(item) })
+}
+function fulfillmentAuditSummary(check) {
+  const rows = requirementRows(check)
+  const counts = { SUPPORTED: 0, PARTIAL: 0, INSUFFICIENT: 0, UNCLEAR: 0, UNKNOWN: 0 }
+  for (const row of rows) {
+    const key = String(row.proofStatus || row.proof_status || '').toUpperCase()
+    if (counts[key] == null) counts.UNKNOWN += 1
+    else counts[key] += 1
+  }
+  return { total: rows.length, ...counts }
+}
+function proofStatusLabel(value) {
+  return {
+    SUPPORTED: '证据充足',
+    PARTIAL: '部分支撑',
+    INSUFFICIENT: '证据不足',
+    UNCLEAR: '条款不清',
+  }[String(value || '').toUpperCase()] || value || '待确认'
+}
+function nodeUsabilityLabel(value) {
+  return {
+    USABLE: '节点可用',
+    LIMITED: '谨慎使用',
+    HUMAN_REQUIRED: '人工确认',
+    UNUSABLE: '暂不可用',
+  }[String(value || '').toUpperCase()] || value || '待确认'
+}
+function requirementMaterialChecklist(row) {
+  return arrayField(row?.materialChecklist || row?.evidenceExpected)
+}
+function requirementEvidenceSnapshot(row) {
+  return arrayField(row?.evidenceSnapshot)
 }
 function fulfillmentConclusionLabel(value) {
   return {
@@ -1751,6 +2006,14 @@ function findingContractBasis(finding) {
 function findingKnowledgeBasis(finding) {
   return findingDetail(finding).knowledgeBasis?.summary || policyLabel(finding?.policyCitation, finding?.ruleKey)
 }
+function findingEvidenceStatus(finding) {
+  const detail = findingDetail(finding)
+  return detail.evidenceStatus || finding?.evidenceStatus || ''
+}
+function findingValidationReasons(finding) {
+  const detail = findingDetail(finding)
+  return arrayField(detail.validationReasons || finding?.validationReasons).map(String).filter(Boolean)
+}
 function findingHasContractBasis(finding) {
   const detail = findingDetail(finding)
   return Boolean(finding?.contractCitation || detail.contractBasis?.citations?.length || detail.contractCitationIds?.length)
@@ -1810,6 +2073,8 @@ function formatBytes(size) {
 .case-header h1{margin:8px 0 6px;font-family:var(--atlas-font-display);font-size:36px;color:var(--atlas-text)}
 .case-header p{color:var(--atlas-muted);font-size:14px;max-width:600px}
 .case-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+.revision-upload-button{border-color:rgba(63,127,93,.32);color:#347254;background:#f3faf6}
+.revision-upload-button:hover{border-color:#347254;background:#edf7f1}
 .task-menu{position:relative;display:block}
 .task-menu summary{list-style:none}
 .task-menu summary::-webkit-details-marker{display:none}
@@ -1973,6 +2238,36 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .review-result-item>span{display:inline-flex;align-items:flex-start;justify-content:center;height:20px;padding:3px 5px;background:var(--atlas-surface-soft);color:var(--atlas-primary);font-size:10px;font-weight:900}
 .review-result-item b{display:block;color:var(--atlas-text);font-size:12px;line-height:1.45}
 .review-result-item p{margin:3px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.review-coverage-block{padding:12px;background:#f6fafc;border:1px solid var(--atlas-border);border-radius:4px}
+.review-coverage-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:10px}
+.review-coverage-item{padding:10px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface)}
+.review-coverage-item.covered{border-left:3px solid #3f7f5d}
+.review-coverage-item.partial{border-left:3px solid #a67834}
+.review-coverage-item.missing,.review-coverage-item.ambiguous{border-left:3px solid #b35c56}
+.review-coverage-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.review-coverage-head span{padding:2px 6px;border-radius:3px;background:#edf2f7;color:var(--atlas-primary);font-size:9px;font-weight:900}
+.review-coverage-item p{margin:8px 0 0;color:var(--atlas-text);font-size:11px;line-height:1.55}
+.review-coverage-item small{display:block;margin-top:6px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.review-coverage-item details{margin-top:8px}
+.review-coverage-item summary{cursor:pointer;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.review-coverage-item ul{margin:8px 0 0;padding-left:16px;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.review-coverage-summary{margin:10px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.review-risk-card{padding:11px 0;border-top:1px solid var(--atlas-border)}
+.review-risk-headline{display:grid;grid-template-columns:48px minmax(0,1fr);gap:10px;align-items:flex-start}
+.review-risk-headline>span{display:inline-flex;align-items:center;justify-content:center;height:20px;padding:3px 5px;background:var(--atlas-surface-soft);color:var(--atlas-primary);font-size:10px;font-weight:900}
+.review-risk-headline b{display:block;color:var(--atlas-text);font-size:12px;line-height:1.45}
+.review-risk-headline p{margin:3px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.review-risk-meta{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0 0 58px}
+.review-risk-meta small{padding:2px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:9px;font-weight:800}
+.review-risk-card details{margin:8px 0 0 58px}
+.review-risk-card summary{cursor:pointer;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.review-risk-detail-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:8px}
+.review-risk-detail-grid div{padding:8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface)}
+.review-risk-detail-grid span{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:9px;font-weight:900}
+.review-risk-detail-grid p{margin:0;color:var(--atlas-text);font-size:11px;line-height:1.55;white-space:pre-wrap}
+.fulfillment-audit-summary{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.fulfillment-audit-summary span{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:10px;font-weight:800;background:var(--atlas-surface)}
+.evidence-snapshot-list{margin:8px 0 0;padding-left:16px;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .review-report-markdown,.review-report-json{max-height:280px;overflow:auto;margin:0;padding:12px;color:#354452;background:#f7f9fb;border:1px solid var(--atlas-border);font:11px/1.7 'JetBrains Mono','Fira Code',monospace;white-space:pre-wrap;word-break:break-word}
 
 .side-section{margin-bottom:20px;padding:18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
@@ -2004,6 +2299,8 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .finding-sev.sev-low{color:#2f694b;background:#e8f3ec;border:1px solid #bfd8c8}
 .finding-card{position:relative;margin-top:8px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid #8290a0;border-radius:4px;overflow:hidden}
 .finding-card.finding-high{border-left-color:#a84640}.finding-card.finding-medium{border-left-color:#a67834}.finding-card.finding-low{border-left-color:#477b5d}
+.finding-card.finding-closed{opacity:.68;background:#f6f8fa}
+.finding-card.finding-closed .finding-key-action{background:#f1f3f5;border-left-color:#9aa7b2}
 .finding-summary-row{display:grid;grid-template-columns:68px minmax(0,1fr) auto;gap:14px;align-items:start;padding:15px 16px}
 .finding-rank{display:flex;flex-direction:column;align-items:flex-start;gap:7px}
 .finding-rank small{color:var(--atlas-subtle);font-size:9px;font-weight:700}
@@ -2033,10 +2330,37 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .verification-list ul{margin:0;padding-left:16px;color:var(--atlas-text);font-size:12px;line-height:1.7}
 .verification-list li+li{margin-top:3px}
 .finding-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
+.risk-float-toggle{position:fixed;right:20px;top:78px;z-index:62;display:flex;align-items:center;gap:7px;min-height:38px;padding:0 12px;border:1px solid rgba(66,111,166,.34);border-radius:999px;background:#fff;color:var(--atlas-primary);box-shadow:0 10px 28px rgba(24,38,52,.18);font-size:11px;font-weight:900;cursor:pointer}
+.risk-float-toggle strong{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;border-radius:999px;background:var(--atlas-primary);color:#fff;font-size:11px}
+.risk-float-toggle.active{background:#f2f7fb;border-color:var(--atlas-primary)}
+.risk-float-panel{position:fixed;right:18px;top:124px;z-index:61;width:304px;max-height:calc(100vh - 148px);display:flex;flex-direction:column;background:rgba(255,255,255,.98);border:1px solid var(--atlas-border);border-radius:6px;box-shadow:0 18px 50px rgba(24,38,52,.22);backdrop-filter:blur(8px)}
+.risk-float-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 13px;border-bottom:1px solid var(--atlas-border);background:#f7fafc}
+.risk-float-head span{display:block;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.risk-float-head strong{display:block;margin-top:2px;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:22px;line-height:1}
+.risk-float-head small{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:10px;font-weight:900;background:var(--atlas-surface)}
+.risk-float-list{overflow:auto;padding:8px;display:grid;gap:8px}
+.risk-float-item{padding:10px;border:1px solid var(--atlas-border);border-left:3px solid #a67834;border-radius:4px;background:var(--atlas-surface);transition:opacity .18s ease,background-color .18s ease}
+.risk-float-item.high{border-left-color:#a84640}
+.risk-float-item.done{opacity:.58;background:#f1f4f6;border-left-color:#9aa7b2}
+.risk-float-title{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;align-items:start;width:100%;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
+.risk-float-title span{display:inline-flex;align-items:center;justify-content:center;height:19px;border-radius:3px;font-size:9px;font-weight:900}
+.risk-float-title .sev-high{color:#903933;background:#f8e7e5}.risk-float-title .sev-medium{color:#7b591f;background:#fbf2df}.risk-float-title .sev-low{color:#2f694b;background:#e8f3ec}
+.risk-float-title strong{min-width:0;color:var(--atlas-text);font-size:12px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.risk-float-item p{margin:7px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.risk-float-status{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.risk-float-status small{padding:2px 5px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:9px;font-weight:800}
+.risk-float-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:9px}
+.risk-float-actions button{min-height:30px;border:1px solid var(--atlas-border);border-radius:4px;background:#fff;color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}
+.risk-float-actions button:hover{border-color:var(--atlas-primary);background:#f3f7fa}
+.risk-float-done{margin-top:9px;padding:6px;border:1px solid #d6dde4;border-radius:4px;background:#eef2f5;color:#6d7a86;font-size:10px;font-weight:900;text-align:center}
+.risk-float-done.report-only{color:#7b591f;background:#fff8e6;border-color:#ead4a2}
 .run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
 .run-row-failed{align-items:flex-start;flex-wrap:wrap}.run-row-failed .run-error-message{flex:1 0 100%;margin:0 0 2px 78px;color:#9d4b45;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .section-header h3{margin:0!important}
+.revision-upload-callout{display:flex;align-items:center;justify-content:space-between;gap:14px;margin:12px 0 0;padding:12px 14px;border:1px solid rgba(63,127,93,.22);border-left:4px solid #3f7f5d;border-radius:4px;background:#f4faf6}
+.revision-upload-callout strong{display:block;color:var(--atlas-text);font-size:13px}
+.revision-upload-callout small{display:block;margin-top:3px;color:var(--atlas-muted);font-size:11px;line-height:1.45}
 .upload-form{margin:12px 0;padding:14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
 .upload-file-mode{display:flex;flex-direction:column;gap:8px}
 .upload-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
@@ -2130,6 +2454,12 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .loader{width:20px;height:20px;border:3px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
+@media (max-width:760px){
+  .risk-float-toggle{right:14px;top:auto;bottom:18px}
+  .risk-float-panel{left:12px;right:12px;top:auto;bottom:66px;width:auto;max-height:58vh}
+  .risk-float-list{grid-template-columns:1fr}
+}
+
 /* Fulfillment timeline workbench */
 .timeline-panel{padding:0;overflow:hidden}
 .timeline-panel-head{margin:0;padding:18px 20px;border-bottom:1px solid var(--atlas-border)}
@@ -2219,7 +2549,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}
   .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
   .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}
-  .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}
+  .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}.review-coverage-grid,.review-risk-detail-grid{grid-template-columns:1fr}.review-risk-meta,.review-risk-card details{margin-left:0}.fulfillment-audit-summary{flex-direction:column;align-items:flex-start}
 }
 @media(prefers-reduced-motion:reduce){.finding-expand{transition:none}}
 </style>
