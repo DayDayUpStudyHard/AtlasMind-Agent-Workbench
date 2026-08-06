@@ -95,6 +95,66 @@ def test_missing_clause_rule_does_not_borrow_unrelated_contract_citation():
     assert findings[0]["contractCitationIds"] == []
 
 
+def test_missing_clause_rule_has_actionable_fallback_guidance():
+    findings = _fallback_rule_findings(
+        {
+            "domainKey": "term_change_termination",
+            "domainName": "期限、变更与终止",
+            "requiredClauseTypes": ["TERMINATION"],
+        },
+        [{
+            "sourceType": "KB_CHUNK",
+            "sourceId": "KB_CHUNK:77",
+            "title": "终止管理标准",
+            "snippet": "应明确终止条件、通知期限、结算和资料交接。",
+        }],
+        [{
+            "ruleKey": "PROC-TERM-002",
+            "ruleTitle": "合同到期处理",
+            "clauseType": "TERMINATION",
+            "checkType": "MISSING",
+            "checkConfig": {"fields": ["transitionService", "dataMigration"]},
+            "severity": "MEDIUM",
+            "detail": "未找到TERMINATION类型条款",
+            "description": "应明确合同到期后的过渡服务安排和数据迁移义务",
+        }],
+    )
+    finding = findings[0]
+    assert finding["ruleKey"] == "PROC-TERM-002"
+    assert "终止条件、通知方式" in finding["riskExplanation"]
+    assert "过渡服务" in finding["revisionAdvice"]
+    assert len(finding["negotiationAdvice"]) > 20
+    assert len(finding["reviewQuestions"]) >= 2
+    assert len(finding["verificationPoints"]) >= 2
+
+
+def test_successful_llm_result_cannot_drop_deterministic_rule_finding(monkeypatch):
+    import app.agent_runtime.graph.nodes.retrieval as retrieval
+
+    class FakeService:
+        def analyze_contract_risk_domain(self, *args):
+            return {"domainConclusion": "存在终止条款缺口", "findings": []}
+
+    monkeypatch.setattr("app.services.llm_service.LLMService", FakeService)
+    state = {
+        "domain_results": {"term_change_termination": [{
+            "sourceType": "KB_CHUNK", "sourceId": "KB_CHUNK:77", "snippet": "应明确终止条件和交接。",
+        }]},
+        "rule_findings": [{
+            "ruleKey": "PROC-TERM-002", "ruleTitle": "合同到期处理", "clauseType": "TERMINATION",
+            "checkType": "MISSING", "checkConfig": {"fields": ["transitionService"]},
+            "severity": "MEDIUM", "detail": "未找到TERMINATION类型条款",
+        }],
+        "domain_tasks": [{
+            "domainKey": "term_change_termination", "domainName": "期限、变更与终止",
+            "requiredClauseTypes": ["TERMINATION"],
+        }],
+        "case_snapshot": {}, "run_id": 1, "subject_id": 1,
+    }
+    result = retrieval.draft_domain_findings(state)
+    assert result["draft_findings"][0]["ruleKey"] == "PROC-TERM-002"
+
+
 def test_validator_rejects_citation_not_returned_by_retrieval():
     finding = {
         "title": "引用不存在",

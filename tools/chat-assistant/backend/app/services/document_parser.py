@@ -6,6 +6,7 @@ import importlib
 import re
 import shlex
 import shutil
+import unicodedata
 from pathlib import Path
 from typing import Callable, Iterable, Iterator
 
@@ -462,3 +463,85 @@ class HybridChunker:
     def _normalize(self, text: str) -> str:
         lines = [line.strip() for line in text.splitlines()]
         return "\n".join(line for line in lines if line)
+
+
+def _assess_extracted_text_quality_v2(text: str) -> dict:
+    """Stricter quality gate for OCR-like garbage and glyph soup."""
+    value = str(text or "")
+    compact_length = len(re.sub(r"\s+", "", value))
+    malformed_numbers = len(_MALFORMED_NUMBER_PATTERN.findall(value))
+    suspicious_parties = len(_SUSPICIOUS_PARTY_PATTERN.findall(value))
+    embedded_latin = len(_EMBEDDED_LATIN_PATTERN.findall(value))
+    latin_run_count = len(re.findall(r"[A-Za-z]{2,6}", value))
+    replacement_chars = value.count("\ufffd") + value.count("\x00")
+    mojibake_markers = sum(value.count(marker) for marker in ("閿", "閵", "閻", "闂", "鐟"))
+
+    cjk_chars = 0
+    latin_chars = 0
+    digit_chars = 0
+    punctuation_chars = 0
+    weird_chars = 0
+    for ch in value:
+        if ch.isspace():
+            continue
+        category = unicodedata.category(ch)
+        if ("\u4e00" <= ch <= "\u9fff") or ("\u3400" <= ch <= "\u4dbf") or ("\u3000" <= ch <= "\u303f"):
+            cjk_chars += 1
+        elif ch.isdigit():
+            digit_chars += 1
+        elif "A" <= ch <= "Z" or "a" <= ch <= "z":
+            latin_chars += 1
+        elif category.startswith("P"):
+            punctuation_chars += 1
+        else:
+            weird_chars += 1
+
+    total_non_space = max(1, cjk_chars + latin_chars + digit_chars + punctuation_chars + weird_chars)
+    cjk_ratio = cjk_chars / total_non_space
+    weird_ratio = weird_chars / total_non_space
+    punctuation_ratio = punctuation_chars / total_non_space
+
+    signals: list[dict] = []
+    for name, count in (
+        ("MALFORMED_NUMBER", malformed_numbers),
+        ("SUSPICIOUS_PARTY", suspicious_parties),
+        ("EMBEDDED_LATIN_GLYPH", embedded_latin),
+        ("LATIN_RUN", latin_run_count),
+        ("REPLACEMENT_CHARACTER", replacement_chars),
+        ("MOJIBAKE", mojibake_markers),
+    ):
+        if count:
+            signals.append({"type": name, "count": count})
+
+    density_base = max(compact_length / 1000.0, 0.25)
+    weighted_errors = (
+        malformed_numbers * 4.0
+        + suspicious_parties * 3.0
+        + embedded_latin * 1.2
+        + replacement_chars * 4.0
+        + mojibake_markers * 2.0
+    )
+    score = max(0.0, min(1.0, 1.0 - weighted_errors / (18.0 * density_base)))
+    low_cjk_ratio = compact_length >= 40 and cjk_ratio < 0.35 and (
+        weird_ratio > 0.08 or punctuation_ratio > 0.3 or latin_chars >= cjk_chars
+    )
+    mixed_garble = compact_length >= 40 and cjk_ratio > 0.5 and latin_run_count >= 4 and (
+        embedded_latin >= 1 or latin_chars >= 2 or weird_ratio > 0.02
+    )
+    if low_cjk_ratio or mixed_garble:
+        signals.append({"type": "LOW_CJK_RATIO", "count": round(cjk_ratio, 4)})
+        score = min(score, 0.35)
+
+    severe = malformed_numbers > 0 or replacement_chars > 0 or suspicious_parties >= 2
+    level = "LOW" if severe or score < 0.62 or low_cjk_ratio or mixed_garble else "MEDIUM" if signals or score < 0.88 else "HIGH"
+    return {
+        "level": level,
+        "score": round(score, 4),
+        "requiresOcr": level == "LOW",
+        "requiresReview": level != "HIGH",
+        "signals": signals,
+        "textLength": len(value),
+    }
+
+
+assess_extracted_text_quality = _assess_extracted_text_quality_v2

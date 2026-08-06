@@ -384,6 +384,8 @@ def _normalize_finding(raw: dict[str, Any], task: dict[str, Any],
         suggested_action = "REQUEST_LEGAL_REVIEW"
     return {
         "findingKey": str(raw.get("findingKey") or f"{domain_key}:llm_{index + 1}")[:160],
+        "ruleKey": str(raw.get("ruleKey") or "").strip() or None,
+        "ruleTitle": str(raw.get("ruleTitle") or "").strip() or None,
         "clauseType": clause_type,
         "severity": severity if severity in {"HIGH", "MEDIUM", "LOW"} else "MEDIUM",
         "domainKey": domain_key,
@@ -419,6 +421,113 @@ def _normalize_finding(raw: dict[str, Any], task: dict[str, Any],
     }
 
 
+_RULE_GUIDANCE: dict[str, dict[str, str]] = {
+    "ACCEPTANCE": {
+        "impact": "缺少客观验收标准会使交付是否合格、整改是否完成和付款是否到期都难以举证；发生争议时，双方可能只能依赖单方解释或事后补充材料。",
+        "revision": "补充可核验的验收对象、指标和通过阈值，明确交付后的验收期限、验收材料、异议方式、整改期限以及整改后仍不合格时的扣款、重做或解除后果；避免只写“甲方满意”“按甲方要求”等不可操作表述。",
+        "negotiation": "底线是验收标准和异议期限必须写入合同或附件。可以协商指标数值和整改次数，但不能接受无限期验收或以单方满意作为唯一标准。",
+        "questions": "请确认是否已有技术规格书、验收单模板或项目负责人认可的量化指标，并确认验收未通过是否影响付款。",
+        "verification": "核对合同正文与技术附件是否包含指标、验收期限、异议及整改后果。",
+    },
+    "TERMINATION": {
+        "impact": "终止条件、通知方式或终止后的结算与交接不清，会导致解除是否生效、已完成工作如何结算、资料和数据如何返还等问题无法快速判断，并放大持续履约和争议风险。",
+        "revision": "明确到期、任意解除和违约解除的触发条件，写明通知形式、提前通知期限、生效时间、费用结算、未完成交付、资料/数据返还、保密和知识产权存续义务；如涉及迁移或过渡服务，应列出期限、责任方和交接清单。",
+        "negotiation": "终止权应与对方的补救机会和已发生费用结算绑定。可协商通知期限和过渡期，但不能接受只赋予一方无限制解除权或终止后责任全部空缺。",
+        "questions": "请确认当前交易是否需要任意解除、过渡服务、数据迁移或终止后的持续保密义务。",
+        "verification": "核对终止通知、解除生效、结算、交接、数据返还和存续条款是否分别有明确文字依据。",
+    },
+    "PAYMENT": {
+        "impact": "付款前提、发票要求或逾期责任不清，会造成付款时点争议、现金流安排失真和税务凭证风险，也可能在交付质量存在争议时缺少扣款依据。",
+        "revision": "明确合同价款、计价口径、付款里程碑、验收或发票作为付款前提的关系、发票类型和税率、付款期限、账户变更核验方式以及逾期付款责任；将付款节点与可验证的交付或验收结果绑定。",
+        "negotiation": "底线是付款条件、发票和结算期限可执行且可举证。付款比例和周期可以协商，但不能接受付款触发条件完全由一方单方决定。",
+        "questions": "请确认金额、税率、付款比例、发票类型、验收与付款的先后关系及逾期责任是否已有附件或补充协议。",
+        "verification": "核对价款、付款节点、发票、税费、结算和逾期责任是否相互一致。",
+    },
+    "LIABILITY": {
+        "impact": "责任边界、赔偿范围或补救期限不清，会增加损失认定和追偿成本；责任上限、免责或第三方索赔缺失时，暴露的财务和经营风险难以预估。",
+        "revision": "按违约类型明确责任主体、损失范围、违约金或赔偿计算方式、责任上限及其例外，补充第三方索赔、数据损失、知识产权侵权和补救期限的处理机制，并避免免责条款覆盖故意或重大过失。",
+        "negotiation": "责任上限、重大违约例外和第三方索赔责任是核心底线。可协商一般违约金和补救期限，但应保留对故意、重大过失、保密和侵权的追责。",
+        "questions": "请确认本合同是否涉及第三方索赔、数据损失、知识产权侵权或需要保险覆盖的高风险履约活动。",
+        "verification": "核对违约类型、赔偿范围、责任上限、免责例外、补救期限和索赔流程是否完整。",
+    },
+    "CONFIDENTIALITY": {
+        "impact": "保密信息范围、例外或存续期限不清，可能导致商业秘密保护不足，终止后泄露难以追责，也会增加数据共享和返还风险。",
+        "revision": "明确保密信息范围、允许披露的法定或必要例外、接收方人员和分包商责任、保护措施、泄露通知、资料返还/删除以及合同终止后的存续期限。",
+        "negotiation": "可以协商保密期限和例外范围，但应保留对法定披露、最小必要披露和泄露通知的控制，并确保分包方承担同等义务。",
+        "questions": "请确认是否会接触源代码、个人信息、生产数据、商业秘密或第三方保密资料。",
+        "verification": "核对保密定义、例外、保护措施、泄露处理、返还删除和存续期限。",
+    },
+    "IP": {
+        "impact": "成果归属、背景知识产权和第三方授权不清，可能导致交付成果无法使用、重复授权或侵权索赔，后续改造和商业化也可能受限。",
+        "revision": "区分背景知识产权、履约中新产生的成果和第三方材料，明确归属、许可范围、付款与权利转移的关系、交付源文件/文档的义务，以及第三方侵权担保和替换方案。",
+        "negotiation": "核心成果的使用权、源文件交付和第三方侵权责任必须可执行。可协商独占/非独占许可和地域期限，但不能让背景成果被无意转让。",
+        "questions": "请确认交付物是否包含软件、设计文件、专利、论文、数据集或第三方组件，以及我方需要永久使用还是仅限本项目使用。",
+        "verification": "核对成果归属、背景权利保留、第三方授权、源文件交付和侵权赔偿安排。",
+    },
+    "DATA_PROTECTION": {
+        "impact": "数据处理目的、范围、存储位置和删除义务不清，会造成个人信息或重要数据合规风险，发生泄露时也难以确定责任和通知路径。",
+        "revision": "明确处理目的、数据类别、最小化范围、存储和跨境位置、访问控制、保留期限、删除返还、分包处理、事件通知和监管配合义务，并约定审计与整改机制。",
+        "negotiation": "数据处理范围和安全事件通知时限是底线。可以协商审计频次和技术标准，但不能接受无限制复用数据或不设泄露通知责任。",
+        "questions": "请确认合同是否涉及个人信息、生产经营数据、跨境传输、云服务或分包商处理。",
+        "verification": "核对数据类型、处理目的、存储位置、保留删除、分包、安全事件和审计条款。",
+    },
+}
+
+
+def _rule_requirement_text(rule: dict[str, Any]) -> str:
+    config = rule.get("checkConfig") or {}
+    if isinstance(config, str):
+        try:
+            import json
+            config = json.loads(config)
+        except (TypeError, ValueError):
+            config = {}
+    if not isinstance(config, dict):
+        config = {}
+    check_type = str(rule.get("checkType") or "MISSING").upper()
+    if check_type == "CONTAINS" and config.get("keywords"):
+        return "应包含：" + "、".join(str(value) for value in config["keywords"][:8])
+    if check_type == "SEMANTIC" and config.get("forbidden"):
+        return "不得使用或不得仅使用：" + "、".join(str(value) for value in config["forbidden"][:5])
+    if check_type == "THRESHOLD" and config.get("field"):
+        return f"{config['field']} 应满足 {config.get('operator', 'gte')} {config.get('value')}"
+    if config.get("fields"):
+        return "应明确：" + "、".join(str(value) for value in config["fields"][:8])
+    return str(rule.get("description") or "应有可执行、可核验的条款约定").strip()
+
+
+def _rule_fallback_guidance(rule: dict[str, Any]) -> dict[str, Any]:
+    clause_type = str(rule.get("clauseType") or "OTHER").upper()
+    guidance = _RULE_GUIDANCE.get(clause_type, {
+        "impact": "关键合同义务或控制要求缺少明确依据，可能导致履约边界、责任认定和后续复核出现争议。",
+        "revision": "根据适用业务补充责任主体、履行动作、完成标准、期限、证据要求和未履行后果，并与合同附件保持一致。",
+        "negotiation": "先确认该要求是否适用于当前交易；适用时应形成可核验的书面条款，不要只保留原则性表述。",
+        "questions": "请业务负责人和法务确认该要求是否适用于当前交易，以及需要哪些材料证明已经满足。",
+        "verification": "核对合同正文、附件和补充协议中是否已有同一要求的明确约定。",
+    })
+    requirement = _rule_requirement_text(rule)
+    detail = str(rule.get("detail") or "确定性规则未通过").strip()
+    check_type = str(rule.get("checkType") or "MISSING").upper()
+    rule_name = rule.get("ruleTitle") or rule.get("title") or rule.get("ruleKey") or "未命名规则"
+    explanation = (
+        f"确定性规则“{rule_name}”检查的是：{requirement}。本次结果为：{detail}。"
+        "这表示当前检索到的合同条款不足以证明该要求已被明确约定，不能仅凭条款类型存在就视为已满足。"
+    )
+    if check_type == "MISSING":
+        explanation += "当前属于缺失型发现，合同原文引用为空；需要补充条款或确认其他附件是否已经承担同一义务。"
+    else:
+        explanation += "当前属于条款内容校验未通过，仍需结合命中的合同原文确认是完全缺失、表述不足还是仅字段未结构化提取。"
+    explanation += f"业务影响：{guidance['impact']}"
+    return {
+        "riskExplanation": explanation,
+        "businessImpact": guidance["impact"],
+        "revisionAdvice": guidance["revision"] + f"本条规则的最低补充重点是：{requirement}。",
+        "negotiationAdvice": guidance["negotiation"],
+        "reviewQuestions": [guidance["questions"], f"规则“{rule_name}”是否适用当前交易？"],
+        "verificationPoints": [guidance["verification"], f"复核规则结果：{detail}"],
+    }
+
+
 def _fallback_rule_findings(task: dict[str, Any], evidence: list[dict[str, Any]],
                             rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     allowed_types = {str(value).upper() for value in task.get("requiredClauseTypes") or []}
@@ -434,15 +543,19 @@ def _fallback_rule_findings(task: dict[str, Any], evidence: list[dict[str, Any]]
             str(item.get("sourceId")) for item in evidence
             if str(item.get("sourceType")) in {"KB_CHUNK", "KB_DOCUMENT", "STANDARD_CLAUSE"}
         ][:3]
+        guidance = _rule_fallback_guidance(rule)
+        rule_key = str(rule.get("ruleKey") or rule.get("rule_key") or "").strip()
+        rule_title = str(rule.get("ruleTitle") or rule.get("title") or "规则检查发现").strip()
         raw = {
-            "findingKey": f"{task.get('domainKey')}:{rule.get('ruleKey') or index}",
+            "findingKey": f"{task.get('domainKey')}:{rule_key or index}",
+            "ruleKey": rule_key,
+            "ruleTitle": rule_title,
             "clauseType": rule.get("clauseType") or "OTHER",
             "severity": rule.get("severity") or "MEDIUM",
-            "title": rule.get("ruleTitle") or "规则检查发现",
-            "riskExplanation": f"规则检查发现：{rule.get('detail') or rule.get('description') or '需要人工复核'}",
-            "businessImpact": "模型分析未完成，当前仅保留确定性规则发现，具体影响需要法务结合合同全文复核。",
-            "revisionAdvice": "根据规则要求补充或修改对应条款，并在完成后重新发起合同审查。",
-            "reviewQuestions": ["请确认该规则发现是否适用于当前交易背景。"],
+            "title": rule_title,
+            **guidance,
+            "oneLineSummary": f"{rule_title}：{rule.get('detail') or rule.get('description') or '规则要求未被合同明确满足'}",
+            "keyPoint": f"先核对并补足：{_rule_requirement_text(rule)}",
             "contractCitationIds": contract_ids,
             "policyCitationIds": policy_ids,
             "confidenceLevel": "LOW",
@@ -483,7 +596,19 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
                 normalized = _normalize_finding(raw, task, evidence, index)
                 if normalized:
                     findings.append(normalized)
-            return key, findings[:3], "COMPLETED", str((response or {}).get("domainConclusion") or "")
+            # Keep up to six model findings, then append every uncovered
+            # deterministic rule so the quality gate cannot hide a rule result.
+            findings = findings[:6]
+            seen_rule_keys = {
+                str(item.get("ruleKey") or "").strip()
+                for item in findings
+                if str(item.get("ruleKey") or "").strip()
+            }
+            findings.extend([
+                item for item in _fallback_rule_findings(task, evidence, matched_rules)
+                if str(item.get("ruleKey") or "").strip() not in seen_rule_keys
+            ])
+            return key, findings, "COMPLETED", str((response or {}).get("domainConclusion") or "")
         except Exception as exc:
             logger.warning("LLM domain analysis failed for %s: %s", task.get("domainName"), exc)
             fallback = _fallback_rule_findings(task, evidence, matched_rules)

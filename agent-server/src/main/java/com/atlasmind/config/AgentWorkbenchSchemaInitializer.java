@@ -315,6 +315,8 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
         addColumnIfMissing("contract_document", "deleted", "TINYINT NOT NULL DEFAULT 0");
+        addColumnIfMissing("contract_document", "preprocess_status",
+                "VARCHAR(16) DEFAULT 'PENDING' COMMENT 'PENDING|READY|FAILED|SKIPPED'");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_timeline_evidence_link (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,

@@ -34,6 +34,9 @@ FIELD_KEYS = (
 CONTRACT_TYPES = {"SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA", "OTHER"}
 _REQUIRED_FIELDS = {"contractTitle", "contractType", "partyA", "partyB"}
 _MAX_EXCERPT_CHARS = 48_000
+_AMOUNT_LABEL_PATTERN = "(?:\u5408\u540c(?:\u603b)?\u91d1\u989d|\u5408\u540c\u4ef7\u6b3e|\u542b\u7a0e\u603b\u4ef7|\u603b\u4ef7)"
+_AMOUNT_CURRENCY_PATTERN = "(?:\u4eba\u6c11\u5e01|RMB|CNY|\uffe5)"
+
 
 
 def _citation(text: str, quote: str) -> dict | None:
@@ -121,17 +124,62 @@ def _normalize_amount(value: Any) -> float | None:
     return float(amount)
 
 
+
+def _extract_amount_hint(text: str) -> tuple[str | None, dict | None]:
+    amount_match = re.search(
+        f"{_AMOUNT_LABEL_PATTERN}\\s*(?:\u4e3a|\u662f)?\\s*[:\uff1a]?\\s*"
+        f"(?:(?P<prefix_currency>{_AMOUNT_CURRENCY_PATTERN})\\s*)?"
+        f"(?P<number>[0-9][0-9,\uff0c]*(?:\\.\\d+)?)\\s*(?P<unit>\u4e07|\u4ebf)?\\s*"
+        f"(?:(?P<suffix_currency>{_AMOUNT_CURRENCY_PATTERN})\\s*)?(?:\u5143)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not amount_match:
+        return None, None
+    raw_amount = amount_match.group("number") + (amount_match.group("unit") or "")
+    return raw_amount, _citation(text, amount_match.group(0).strip())
+
 def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
     """Extract conservative candidates without calling the model."""
     hints = {key: _field() for key in FIELD_KEYS}
 
     title = None
     title_quote = None
-    for line in (line.strip() for line in text.splitlines()[:20]):
-        if 2 <= len(line) <= 120 and any(word in line for word in ("合同", "协议", "确认书")):
-            title = line
-            title_quote = line
-            break
+    # Read first 30 lines, merge short consecutive lines (PDF often splits titles)
+    raw_lines = [line.strip() for line in text.splitlines()[:30]]
+    merged_lines: list[str] = []
+    structured_line_pattern = re.compile(
+        r"(?:甲方|乙方|合同(?:总)?金额|合同价款|生效日期|合同生效日|到期日期|合同到期日|"
+        r"签订日期|签订时间|签署日期|签署时间|所属部门|业务部门|需求部门|采购部门|经办部门)\s*[:：]"
+    )
+    i = 0
+    while i < len(raw_lines):
+        line = raw_lines[i]
+        if not line:
+            i += 1
+            continue
+        # If this line is short (< 80 chars) and next line also short, merge
+        while (i + 1 < len(raw_lines) and len(line) < 80
+               and raw_lines[i + 1] and len(raw_lines[i + 1]) < 80
+               and not structured_line_pattern.search(line)
+               and not structured_line_pattern.search(raw_lines[i + 1])):
+            i += 1
+            line = line + raw_lines[i]
+        merged_lines.append(line)
+        i += 1
+
+    # Find the longest merged line containing contract keywords
+    candidates = [
+        (line, len(line))
+        for line in merged_lines
+        if 2 <= len(line) <= 200
+        and any(word in line for word in ("合同", "协议", "确认书"))
+        and not structured_line_pattern.search(line)
+    ]
+    if candidates:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        title = candidates[0][0]
+        title_quote = title
     if not title and file_name:
         title = re.sub(r"\.(txt|pdf|docx?|md)$", "", file_name, flags=re.IGNORECASE).strip()
     if title:
@@ -140,8 +188,15 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
             _citation(text, title_quote or ""),
         )
 
-    party_a = _line_match(text, ("甲方", "委托方", "采购方", "买方", "买受人", "需方", "发包人", "定作人"))
-    party_b = _line_match(text, ("乙方", "受托方", "供应商", "卖方", "出卖人", "供方", "承包人", "承揽人", "服务方"))
+    # ── Party identification: expanded terminology for construction/procurement ──
+    party_a = _line_match(text, (
+        "甲方", "委托方", "采购方", "买方", "买受人", "需方", "发包人", "定作人",
+        "业主", "发包方", "招标人", "建设方", "需方",
+    ))
+    party_b = _line_match(text, (
+        "乙方", "受托方", "供应商", "卖方", "出卖人", "供方", "承包人", "承揽人", "服务方",
+        "承包方", "承包商", "设计方", "施工方", "监理方", "投标人",
+    ))
     if party_a:
         hints["partyA"] = _field(party_a[0], 0.78, _citation(text, party_a[1]))
     if party_b:
@@ -164,20 +219,6 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
     hints["contractType"] = _field(
         contract_type, 0.8 if type_quote else 0.45, _citation(text, type_quote)
     )
-
-    amount_match = re.search(
-        r"(?:合同(?:总)?金额|合同价款|含税总价|总价)\s*(?:为|是)?\s*[：:]?\s*"
-        r"(?:人民币)?\s*[¥￥]?\s*([0-9][0-9,，]*(?:\.\d+)?)\s*(万|亿)?\s*元?",
-        text,
-    )
-    if amount_match:
-        raw_amount = amount_match.group(1) + (amount_match.group(2) or "")
-        hints["amount"] = _field(
-            _normalize_amount(raw_amount), 0.84, _citation(text, amount_match.group(0).strip())
-        )
-        hints["currency"] = _field(
-            "CNY", 0.88, _citation(text, amount_match.group(0).strip())
-        )
 
     for key, labels in (
         ("signedDate", ("签订日期", "签订时间", "签署日期", "签署时间", "签约日期", "签约时间")),
@@ -234,17 +275,10 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         type_quote = next(word for word in ("服务采购", "技术服务", "咨询服务", "运维服务") if word in text)
         hints["contractType"] = _field("SERVICE_PROCUREMENT", 0.8, _citation(text, type_quote))
 
-    actual_amount = re.search(
-        r"(?:合同(?:总)?金额|合同价款|含税总价|总价)\s*(?:为|是)?\s*[:：]?\s*"
-        r"(?:人民币|RMB|CNY|￥)?\s*([0-9][0-9,]*(?:\.\d+)?)\s*(万|亿)?\s*元?",
-        text,
-    )
-    if actual_amount:
-        raw_amount = actual_amount.group(1) + (actual_amount.group(2) or "")
-        hints["amount"] = _field(
-            _normalize_amount(raw_amount), 0.84, _citation(text, actual_amount.group(0).strip())
-        )
-        hints["currency"] = _field("CNY", 0.88, _citation(text, actual_amount.group(0).strip()))
+    raw_amount, amount_citation = _extract_amount_hint(text)
+    if raw_amount is not None:
+        hints["amount"] = _field(_normalize_amount(raw_amount), 0.84, amount_citation)
+        hints["currency"] = _field("CNY", 0.88, amount_citation)
 
     for key, labels in (
         ("signedDate", ("签订日期", "签订时间", "签署日期", "签署时间", "签约日期", "签约时间")),
@@ -528,6 +562,7 @@ def extract_intake(intake_id: int) -> dict:
             conn.commit()
 
         text = str(intake.get("content_text") or "")
+        # Fallback: read cleaned document text if intake text is empty
         if not text.strip() and intake.get("case_id"):
             with _conn() as conn:
                 with conn.cursor() as cur:
@@ -549,6 +584,30 @@ def extract_intake(intake_id: int) -> dict:
             raise ValueError("Contract intake content hash does not match")
 
         hints = deterministic_hints(text, str(intake.get("file_name") or ""))
+
+        # ── Merge preprocessor-identified parties as high-confidence hints ──
+        if intake.get("case_id"):
+            try:
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """SELECT party_name, party_role
+                               FROM contract_party
+                               WHERE case_id=%s""",
+                            (intake["case_id"],),
+                        )
+                        for row in cur.fetchall():
+                            name = str(row.get("party_name") or "").strip()
+                            role = str(row.get("party_role") or "").upper()
+                            if not name:
+                                continue
+                            # Preprocessor parties have higher confidence
+                            if role == "OUR_ENTITY":
+                                hints["partyA"] = _field(name, 0.95, _citation(text, name))
+                            elif role == "COUNTERPARTY":
+                                hints["partyB"] = _field(name, 0.95, _citation(text, name))
+            except Exception:
+                pass  # DB not available, use regex hints only
         raw: dict = {}
         llm_error = None
         try:

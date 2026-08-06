@@ -17,6 +17,19 @@ class DocumentParserQualityTest(unittest.TestCase):
         self.assertTrue(result["requiresOcr"])
         self.assertGreater(len(result["signals"]), 0)
 
+    def test_marks_glyph_soup_as_low_quality(self):
+        sample = (
+            "\u3014\u63d0 til1lf)\u6c11\u4e3b\u65e5\u79df\u4e16 \u00eciI\u6210\u5305\u5546"
+            "\u5177\u6709\u63d0\u4f9b\u8be5\u8d44\u6296\u80fd\u529b\u4e4b\u65e5"
+            " \u7684\u540e\u8005\u5f00\u59cb\u8ba1\u7b97\u3009\u4e4b\u5185\u65e0\u507f"
+            " !Jt\u4f9b. 4 \u8bbe\u8ba1\u627f\u5305\u5546\u4eba\u5458"
+        )
+        result = assess_extracted_text_quality(sample)
+
+        self.assertEqual("LOW", result["level"])
+        self.assertTrue(result["requiresOcr"])
+        self.assertTrue(any(item["type"] == "LOW_CJK_RATIO" for item in result["signals"]))
+
     def test_keeps_clean_contract_text(self):
         result = assess_extracted_text_quality(
             "乙方应在合同生效后十五日内完成初步设计，并向甲方提交完整设计文件。"

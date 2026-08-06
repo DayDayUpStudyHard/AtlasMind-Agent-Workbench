@@ -321,6 +321,54 @@ def parse_contract_document(document_id: int) -> dict:
                 if not content.strip():
                     raise ValueError("Contract document text is empty")
 
+                # ── Unified text preprocessing: OCR cleanup + party identification ──
+                preprocess_result = None
+                try:
+                    from .contract_text_preprocessor import ContractTextPreprocessor
+                    llm = LLMService()
+                    preprocessor = ContractTextPreprocessor(llm)
+                    preprocess_result = preprocessor.process(
+                        content, str(document.get("file_name") or "")
+                    )
+                    cleaned_text = str(preprocess_result.cleaned_text or "").strip()
+                    cleaned_changed = bool(cleaned_text and cleaned_text != content)
+                    if cleaned_text:
+                        content = cleaned_text
+                    preprocess_status = "READY" if cleaned_text else "SKIPPED"
+                    cur.execute(
+                        "UPDATE contract_document SET content_text=%s, preprocess_status=%s WHERE id=%s",
+                        (content, preprocess_status, document_id),
+                    )
+                    if preprocess_result.has_parties:
+                        _write_preprocess_parties(
+                            cur, document_id, document["case_id"],
+                            preprocess_result.parties,
+                        )
+                    _update_job(cur, job_id, "PROCESSING", "TEXT_PREPROCESSED", 25)
+                    _append_job_trace(
+                        cur, job_id, "TEXT_PREPROCESSED",
+                        f"文本预处理完成：修正 {len(preprocess_result.corrections)} 处 OCR 错误，"
+                        f"识别 {len(preprocess_result.parties)} 个合同主体，"
+                        f"质量评级 {preprocess_result.quality_overall}",
+                        {"documentId": document_id},
+                        {
+                            **preprocess_result.to_dict(),
+                            "preprocessStatus": preprocess_status,
+                            "cleanedChanged": cleaned_changed,
+                        },
+                    )
+                    logger.info(
+                        "Preprocess %s: %d corrections, %d parties, quality=%s, llm=%s",
+                        preprocess_status,
+                        len(preprocess_result.corrections),
+                        len(preprocess_result.parties),
+                        preprocess_result.quality_overall,
+                        preprocess_result.llm_used,
+                    )
+                    conn.commit()
+                except Exception as exc:
+                    logger.warning("Text preprocessing failed, using raw text: %s", exc)
+
                 clauses = split_contract_text(content)
                 if not clauses:
                     raise ValueError("No contract clauses could be extracted")
@@ -1165,6 +1213,44 @@ def _clean_rule_condition(condition: str | None, quote: str) -> str:
     return candidate or raw
 
 
+def _write_preprocess_parties(cur, document_id: int, case_id: int, parties: list[dict]) -> None:
+    """Write preprocessor-identified parties to contract_party table.
+
+    Only inserts if the party doesn't already exist for this case.
+    """
+    for party in parties:
+        role = str(party.get("role") or "").upper()
+        full_name = str(party.get("fullName") or "").strip()
+        label = str(party.get("label") or "").strip()
+        if not full_name or role not in ("A", "B"):
+            continue
+        # Check if this party already exists
+        cur.execute(
+            """SELECT id FROM contract_party
+               WHERE case_id=%s AND party_name=%s LIMIT 1""",
+            (case_id, full_name),
+        )
+        existing = cur.fetchone()
+        if existing:
+            # Update role if more specific
+            party_role = "OUR_ENTITY" if role == "A" else "COUNTERPARTY"
+            cur.execute(
+                "UPDATE contract_party SET party_role=%s WHERE id=%s",
+                (party_role, existing["id"]),
+            )
+        else:
+            party_role = "OUR_ENTITY" if role == "A" else "COUNTERPARTY"
+            cur.execute(
+                """INSERT INTO contract_party
+                   (case_id, party_name, party_role)
+                   VALUES (%s,%s,%s)""",
+                (case_id, full_name, party_role),
+            )
+        logger.info(
+            "Preprocess party: %s → role=%s (%s)", full_name[:60], role, label,
+        )
+
+
 def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list[dict], dict]:
     if not nodes:
         return [], {"status": "SKIPPED", "reason": "NO_CANDIDATES"}
@@ -1997,3 +2083,161 @@ def _resolve_local_file(file_path: str) -> Path:
         if candidate.exists():
             return candidate.resolve()
     raise FileNotFoundError(f"合同文件不存在: {file_path}")
+def _generic_timeline_label(node_type: str) -> str:
+    return {
+        "PAYMENT": "付款/开票节点",
+        "ACCEPTANCE": "验收节点",
+        "DELIVERY": "交付/服务节点",
+        "NOTICE": "通知节点",
+        "RENEWAL": "续签节点",
+        "TERMINATION": "终止/到期节点",
+        "PENALTY": "违约/逾期节点",
+    }.get(node_type, "合同时间节点")
+
+
+def _rule_timeline_label(node_type: str, quote: str, condition: str | None) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        return _generic_timeline_label(node_type)
+    if node_type == "TERMINATION" and "涓嶅彲鎶楀姏" in quote:
+        return "涓嶅彲鎶楀姏缁堟鏉′欢"
+    action = _rule_action_from_quote(quote, condition)
+    if action:
+        return action[:48]
+    compact = re.sub(r"\s+", " ", quote).strip()
+    if node_type == "PAYMENT" and "鍙戠エ" in compact:
+        return "寮€绁ㄦ湡闄?"
+    if node_type == "PAYMENT":
+        return "浠樻鏈熼檺"
+    if node_type == "ACCEPTANCE":
+        return "楠屾敹鏈熼檺"
+    if node_type == "DELIVERY":
+        return "鏈嶅姟/浜や粯鏈熼檺"
+    if node_type == "NOTICE":
+        return "涔﹂潰閫氱煡鏈熼檺"
+    if node_type == "RENEWAL":
+        return "缁鍗忓晢鏈熼檺"
+    if node_type == "TERMINATION":
+        return "瑙ｉ櫎/缁堟鏉′欢"
+    return compact[:32] or "鍚堝悓鏃堕棿鑺傜偣"
+
+
+def _rule_business_meaning(node: dict, quote: str) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        label = _generic_timeline_label(str(node.get("nodeType") or ""))
+        return f"原文识别质量较低，当前仅提取为“{label}”，请人工复核原文后确认具体义务。"
+    action = _rule_action_from_quote(quote, node.get("condition"))
+    if action:
+        return f"合同要求：{action}"
+    label = node.get("label") or "合同时间节点"
+    date_or_condition = node.get("condition") or node.get("date") or "约定期限"
+    return f"请关注“{label}”对应的合同期限：{date_or_condition}。"
+
+
+def _generic_timeline_label(node_type: str) -> str:
+    return {
+        "PAYMENT": "\u4ed8\u6b3e/\u5f00\u7968\u8282\u70b9",
+        "ACCEPTANCE": "\u9a8c\u6536\u8282\u70b9",
+        "DELIVERY": "\u4ea4\u4ed8/\u670d\u52a1\u8282\u70b9",
+        "NOTICE": "\u901a\u77e5\u8282\u70b9",
+        "RENEWAL": "\u7eed\u7b7e\u8282\u70b9",
+        "TERMINATION": "\u7ec8\u6b62/\u5230\u671f\u8282\u70b9",
+        "PENALTY": "\u8fdd\u7ea6/\u903e\u671f\u8282\u70b9",
+    }.get(node_type, "\u5408\u540c\u65f6\u95f4\u8282\u70b9")
+
+
+def _rule_timeline_label(node_type: str, quote: str, condition: str | None) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        return _generic_timeline_label(node_type)
+    if node_type == "TERMINATION" and "涓嶅彲鎶楀姏" in quote:
+        return "涓嶅彲鎶楀姏缁堟鏉′欢"
+    action = _rule_action_from_quote(quote, condition)
+    if action:
+        return action[:48]
+    compact = re.sub(r"\s+", " ", quote).strip()
+    if node_type == "PAYMENT" and "鍙戠エ" in compact:
+        return "\u5f00\u7968\u671f\u9650"
+    if node_type == "PAYMENT":
+        return "\u4ed8\u6b3e\u671f\u9650"
+    if node_type == "ACCEPTANCE":
+        return "\u9a8c\u6536\u671f\u9650"
+    if node_type == "DELIVERY":
+        return "\u670d\u52a1/\u4ea4\u4ed8\u671f\u9650"
+    if node_type == "NOTICE":
+        return "\u4e66\u9762\u901a\u77e5\u671f\u9650"
+    if node_type == "RENEWAL":
+        return "\u7eed\u7b7e\u534f\u5546\u671f\u9650"
+    if node_type == "TERMINATION":
+        return "\u89e3\u9664/\u7ec8\u6b62\u6761\u4ef6"
+    return compact[:32] or "\u5408\u540c\u65f6\u95f4\u8282\u70b9"
+
+
+def _rule_business_meaning(node: dict, quote: str) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        label = _generic_timeline_label(str(node.get("nodeType") or ""))
+        return (
+            "\u539f\u6587\u8bc6\u522b\u8d28\u91cf\u8f83\u4f4e\uff0c\u5f53\u524d\u4ec5\u63d0\u53d6\u4e3a"
+            f"\u201c{label}\u201d\uff0c\u8bf7\u4eba\u5de5\u590d\u6838\u539f\u6587\u540e\u786e\u8ba4\u5177\u4f53\u4e49\u52a1\u3002"
+        )
+    action = _rule_action_from_quote(quote, node.get("condition"))
+    if action:
+        return f"\u5408\u540c\u8981\u6c42\uff1a{action}"
+    label = node.get("label") or "\u5408\u540c\u65f6\u95f4\u8282\u70b9"
+    date_or_condition = node.get("condition") or node.get("date") or "\u7ea6\u5b9a\u671f\u9650"
+    return f"\u8bf7\u5173\u6ce8\u201c{label}\u201d\u5bf9\u5e94\u7684\u5408\u540c\u671f\u9650\uff1a{date_or_condition}\u3002"
+def _rule_timeline_label(node_type: str, quote: str, condition: str | None) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        return _generic_timeline_label(node_type)
+    if node_type == "TERMINATION" and "涓嶅彲鎶楀姏" in quote:
+        return "\u7ec8\u6b62/\u5230\u671f\u6761\u4ef6"
+    action = _rule_action_from_quote(quote, condition)
+    if action:
+        if assess_extracted_text_quality(action).get("level") == "LOW":
+            return _generic_timeline_label(node_type)
+        if len(re.sub(r"\s+", "", action)) <= 4 and not any(ch.isdigit() for ch in action):
+            return _generic_timeline_label(node_type)
+        return action[:48]
+    compact = re.sub(r"\s+", " ", quote).strip()
+    if assess_extracted_text_quality(compact).get("level") == "LOW":
+        return _generic_timeline_label(node_type)
+    if node_type == "PAYMENT" and "鍙戠エ" in compact:
+        return "\u5f00\u7968\u671f\u9650"
+    if node_type == "PAYMENT":
+        return "\u4ed8\u6b3e\u671f\u9650"
+    if node_type == "ACCEPTANCE":
+        return "\u9a8c\u6536\u671f\u9650"
+    if node_type == "DELIVERY":
+        return "\u670d\u52a1/\u4ea4\u4ed8\u671f\u9650"
+    if node_type == "NOTICE":
+        return "\u4e66\u9762\u901a\u77e5\u671f\u9650"
+    if node_type == "RENEWAL":
+        return "\u7eed\u7b7e\u534f\u5546\u671f\u9650"
+    if node_type == "TERMINATION":
+        return "\u89e3\u9664/\u7ec8\u6b62\u6761\u4ef6"
+    return compact[:32] or "\u5408\u540c\u65f6\u95f4\u8282\u70b9"
+
+
+def _rule_business_meaning(node: dict, quote: str) -> str:
+    if assess_extracted_text_quality(quote).get("level") == "LOW":
+        label = _generic_timeline_label(str(node.get("nodeType") or ""))
+        return (
+            "\u539f\u6587\u8bc6\u522b\u8d28\u91cf\u8f83\u4f4e\uff0c\u5f53\u524d\u4ec5\u63d0\u53d6\u4e3a"
+            f"\u201c{label}\u201d\uff0c\u8bf7\u4eba\u5de5\u590d\u6838\u539f\u6587\u540e\u786e\u8ba4\u5177\u4f53\u4e49\u52a1\u3002"
+        )
+    action = _rule_action_from_quote(quote, node.get("condition"))
+    if action:
+        if assess_extracted_text_quality(action).get("level") == "LOW":
+            label = _generic_timeline_label(str(node.get("nodeType") or ""))
+            return (
+                "\u539f\u6587\u8bc6\u522b\u8d28\u91cf\u8f83\u4f4e\uff0c\u5f53\u524d\u4ec5\u63d0\u53d6\u4e3a"
+                f"\u201c{label}\u201d\uff0c\u8bf7\u4eba\u5de5\u590d\u6838\u539f\u6587\u540e\u786e\u8ba4\u5177\u4f53\u4e49\u52a1\u3002"
+            )
+        if len(re.sub(r"\s+", "", action)) <= 4 and not any(ch.isdigit() for ch in action):
+            label = _generic_timeline_label(str(node.get("nodeType") or ""))
+            return (
+                "\u539f\u6587\u8bc6\u522b\u8d28\u91cf\u8f83\u4f4e\uff0c\u5f53\u524d\u4ec5\u63d0\u53d6\u4e3a"
+                f"\u201c{label}\u201d\uff0c\u8bf7\u4eba\u5de5\u590d\u6838\u539f\u6587\u540e\u786e\u8ba4\u5177\u4f53\u4e49\u52a1\u3002"
+            )
+        return f"\u5408\u540c\u8981\u6c42\uff1a{action}"
+    label = node.get("label") or "\u5408\u540c\u65f6\u95f4\u8282\u70b9"
+    date_or_condition = node.get("condition") or node.get("date") or "\u7ea6\u5b9a\u671f\u9650"
+    return f"\u8bf7\u5173\u6ce8\u201c{label}\u201d\u5bf9\u5e94\u7684\u5408\u540c\u671f\u9650\uff1a{date_or_condition}\u3002"

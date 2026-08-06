@@ -78,6 +78,14 @@ class ContractIntakeExtractorTest(unittest.TestCase):
         self.assertEqual(125000.0, result["fields"]["amount"]["value"])
         self.assertEqual("RULE_VERIFIED", result["fields"]["amount"]["source"])
 
+    def test_deterministic_hints_support_suffix_currency_amount(self):
+        text = "合同金额：10cny\n甲方：A\n乙方：B"
+
+        hints = deterministic_hints(text, "sample.txt")
+
+        self.assertEqual(10.0, hints["amount"]["value"])
+        self.assertEqual("CNY", hints["currency"]["value"])
+
     def test_case_backfill_patch_maps_validated_fields(self):
         validated = {
             "fields": {

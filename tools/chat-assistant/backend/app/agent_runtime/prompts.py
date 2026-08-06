@@ -256,7 +256,8 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         "audit; the frontend will show concise fields first and reveal the detailed fields on demand.\n\n"
         "Return ONLY one valid JSON object in Simplified Chinese:\n"
         '{"domainConclusion":"string","findings":[{'
-        '"findingKey":"DOMAIN_KEY:stable_key","clauseType":"LIABILITY|PAYMENT|CONFIDENTIALITY|ACCEPTANCE|TERMINATION|IP|DATA_PROTECTION|OTHER",'
+        '"findingKey":"DOMAIN_KEY:stable_key","ruleKey":"原样复制确定性规则的ruleKey或空字符串","ruleTitle":"原样复制规则标题或空字符串",'
+        '"clauseType":"LIABILITY|PAYMENT|CONFIDENTIALITY|ACCEPTANCE|TERMINATION|IP|DATA_PROTECTION|OTHER",'
         '"severity":"HIGH|MEDIUM|LOW","domainKey":"string","domainName":"string",'
         '"sourceBasis":"CONTRACT_AND_POLICY|CONTRACT_ONLY|POLICY_ONLY|INSUFFICIENT_EVIDENCE",'
         '"title":"20字以内的明确风险标题","oneLineSummary":"40至80字的结论",'
@@ -281,11 +282,20 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         "INSUFFICIENT_EVIDENCE, LOW confidence, and REQUEST_MATERIAL or REQUEST_LEGAL_REVIEW.\n"
         "3. Contract consequences and AI-inferred consequences must remain separate. Never place an "
         "inference in explicitConsequence.\n"
-        "4. Produce zero to three non-duplicate material findings. Do not manufacture a risk merely "
-        "to fill the domain. A clean domain may return an empty findings array.\n"
-        "5. Missing or ambiguous mandatory language may be a finding only when the supplied policy, "
-        "standard clause, or deterministic rule establishes the expectation.\n"
-        "6. Explain the chain: current clause or absence -> rule gap -> concrete impact -> revision -> "
+        "4. First process every deterministicRuleFinding. For each material rule finding, return one "
+        "finding with the exact same ruleKey and ruleTitle, even when the contract citation list is empty. "
+        "Never replace a rule finding with a generic sentence such as '请补充或修改对应条款'.\n"
+        "5. Review the complete available evidence, not only the first matching clause. Be strict about "
+        "missing, ambiguous, contradictory, one-sided, discretionary, undefined, unenforceable, or "
+        "non-measurable language; inspect duties, timing, responsible party, evidence, acceptance, "
+        "remedies, termination effects, data/IP and regulatory dependencies signaled by this domain.\n"
+        "6. Return zero to six non-duplicate material findings. Do not manufacture a risk without a "
+        "contract citation, policy citation, or deterministic rule finding. A clean domain may return empty.\n"
+        "7. For every finding, fill riskExplanation, businessImpact, revisionAdvice, negotiationAdvice, "
+        "reviewQuestions and verificationPoints with concrete content. Explain what is missing or "
+        "unclear, why it matters, exactly what to add/change, and what a human must verify.\n"
+        "8. Contract consequences and AI-inferred consequences remain separate.\n"
+        "9. Explain the chain: current clause or absence -> rule gap -> concrete impact -> revision -> "
         "negotiation position -> human review question."
     ),
     "contract_intake": (

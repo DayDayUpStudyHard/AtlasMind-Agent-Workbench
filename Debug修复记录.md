@@ -2,6 +2,252 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 合同文档预处理：统一 OCR 清洗 + 主体识别
+
+**日期**：2026-08-06
+
+### 调整原因
+
+- PDF 扫描件提取的合同文本存在严重的 OCR 乱码："质保盒"（应为质保金）、"血1满"（应为届满）、"草包商"（应为承包商）、"设计尿包商"（应为设计承包商）、"liEI" 等非中文乱码块。
+- 乱码文本直接进入 timeline 正则提取和 clause 分类，导致时间节点展示不可读、合同条款无法正确分类。
+- 工程合同使用"业主""设计承包商""发包方"等非标准称谓，原 `deterministic_hints()` 只匹配字面"甲方""乙方"，无法识别主体角色。
+- 上述两个问题各自独立处理（timeline 靠正则、主体靠 hints），没有共享 LLM 理解结果，造成重复调用和上下文割裂。
+- 合同标题跨行显示（如"中电投分宜电厂扩建工程(2x660MW机组)"在上一行，"勘察设计合同"在下一行），原提取只取第一行命中行，标题不完整。
+
+### 实现
+
+**新增 `contract_text_preprocessor.py`**：一次 LLM 调用同时完成 OCR 文本清洗、主体识别和质量标记。
+
+- 注入 50+ 中文工程合同高频术语词典（质保金、竣工验收、违约金、勘察设计等），指导 LLM 根据上下文推断 OCR 错误修正。
+- 列出常见 OCR 形近字对照表（盒→金、血→期/届、尿→承/建、曰→日 等）。
+- 两档修复策略：明显 OCR 错误积极修正，模糊的标记 low-confidence 保留原文。
+- 输出结构化 JSON：`cleanedText`（清洗后全文）、`parties`（识别的主体及 A/B 角色推定）、`quality`（GOOD/FAIR/POOR + 乱码段落标记）、`corrections`（每处修正可审计）。
+- LLM 调用接入 `LLMService._call_llm_with_retry`（熔断器+最多 2 次重试），不再裸调 `analysis_client` 绕过保护。
+- 预处理结果写入 `contract_document.content_text`（清洗后文本覆盖原乱码）和 `contract_party`（主体角色）。
+- 新增 `contract_document.preprocess_status` 列（PENDING/READY/FAILED/SKIPPED），前端可感知预处理状态。
+
+**修改 `contract_document_parser.py`**：`parse_contract_document()` 在 PDF 文本提取后立即调用 `ContractTextPreprocessor.process()`，清洗后的文本替代原始 `content` 变量，后续 clause 切分和 timeline 提取均使用清洗文本。新增 `_write_preprocess_parties()` 将主体写入 `contract_party` 表。
+
+**修改 `contract_intake_extractor.py`**：
+- `deterministic_hints()` 标题提取增强：读取前 30 行，合并短行（<80 字连续合并），取最长包含"合同/协议"的候选行——解决标题跨行截断。
+- 甲方/乙方关键词从 17 个扩展到 22 个，增加"业主、发包方、招标人、建设方、承包方、设计方、施工方、监理方、投标人"等工程行业称谓。
+- `extract_intake()` 新增：在 `deterministic_hints()` 后查询 `contract_party` 表，读取预处理已识别的主体，以 0.95 高置信度覆盖 hints 中的 partyA/partyB。
+
+**Java 侧**：`AgentWorkbenchSchemaInitializer` 新增 `contract_document.preprocess_status` 列（`VARCHAR(16) DEFAULT 'PENDING'`）。
+
+### 当前状态与已知问题
+
+- 预处理管道已搭建完成，`deepseek-v4-flash` 可正常调用。
+- **LLM 返回了响应但 `cleanedText` 未生效**：定位到 `_parse_response()` 解析 LLM JSON 失败或 `cleanedText` 字段为空时，`data.get("cleanedText") or text` 静默回退到原始乱码文本。`llm_used=True` 被错误标记为成功。
+- 修复方向：加日志输出 LLM 实际返回的前 500 字符；若 `cleanedText` 与原始文本完全相同，标记 `llm_used=False`，不伪装成功。
+- 后续计划：在 LLM 预处理前增加确定性 OCR 正则清洗（如 `re.sub("草包商", "承包商", text)`），先做粗修再给 LLM 精修。
+
+---
+
+## 合同风险发现变得过于简略：确定性规则兜底与严格审查提示词
+
+**日期**：2026-08-06
+
+### 现象
+
+合同审查中出现“未找到TERMINATION类型条款”或“未找到ACCEPTANCE类型条款”时，前端只能看到“模型分析未完成”“根据规则要求补充或修改对应条款”等模板文本。即使 LLM 调用成功，也可能漏掉确定性规则发现；每个风险领域最多返回 3 条，导致复杂合同的风险覆盖不足。
+
+### 根因
+
+1. 规则引擎按 `contract_review_rule` 的 `checkType` 和 `clauseType` 对合同条款证据做确定性检查。`MISSING` 规则在合同中没有对应条款类型时产生发现，并不是 LLM 或前端临时生成的。
+2. LLM 兜底内容只有通用的影响、修改建议和人工复核问题，未结合规则类型、检查配置和规则描述展开。
+3. LLM 输出没有强制携带并覆盖 `ruleKey`，成功返回时可能不解释某条确定性规则；提示词的单领域上限为 3 条，也会降低召回。
+
+### 修复
+
+- 在 `retrieval.py` 中保留规则引擎的确定性结论，同时按验收、终止、付款、责任、保密、知识产权、数据保护等条款类型生成具体的风险影响、条款修订重点、谈判底线、复核问题和证据核对点。
+- 读取 `checkConfig` 的 `keywords`、`fields`、阈值和禁止措辞，把规则真正要求的内容写入兜底建议。
+- LLM 正常返回时，比较返回的 `ruleKey` 与确定性规则；模型漏掉的规则自动补入详细兜底发现，避免规则结果在 LLM 层丢失。
+- 提示词要求模型逐条覆盖 `deterministicRuleFindings`，严格检查缺失、模糊、矛盾、单方裁量、责任不清、期限不明和不可量化表述；单个领域最多输出 6 条有证据的风险，并强制填写解释、影响、修订、谈判和人工复核字段。
+- 归一化结果保留 `ruleKey` 和 `ruleTitle`，便于审计和前端显示风险来源。
+
+### 验证
+
+- 增加回归测试：缺失终止条款必须输出具体终止后结算、交接和数据返还建议；LLM 返回空 findings 时，确定性规则仍必须保留。
+- 运行 `python -m pytest -q tests/test_contract_risk_graph.py`。
+
+### 联动回归修复
+
+完整测试还发现合同发起页的标题识别回归：跨行标题合并逻辑把“合同金额”和日期等结构化字段拼进合同标题，导致标题变成整段元数据。现已在短行合并和标题候选筛选时排除带字段标签的行，保留跨行自然标题识别能力。
+
+最终运行 `python -m pytest -q`：69 项通过，保留 1 条 LangGraph 弃用警告，无测试失败。
+
+## 合同解析链路修复：OCR 预处理、质量识别与时间节点降噪
+
+**日期**：2026-08-06
+
+### 现象
+
+在新上传合同，尤其是扫描质量一般的 PDF 上，时间节点会出现以下问题：
+
+- 原文存在乱码、错字、符号污染，导致节点标题和说明难以阅读
+- PDF 原始文字层质量差时，没有足够稳定地触发 OCR 优化
+- LLM 预处理失败后，链路会退回到未经修整的原始文本，后续规则抽取进一步放大噪声
+- 时间节点 enrichment 依赖模型时，若外部 LLM 超时，前端会看到较粗糙的规则结果
+
+本次重点不是前端样式，而是先把后端“文本进入 Agent 前”的质量做扎实。
+
+### 根因
+
+1. `contract_text_preprocessor.py` 中存在确定性 OCR 清洗函数缺失的问题，导致失败分支不完整。
+2. 预处理链路之前更接近“整篇一次性丢给 LLM”，长合同更容易超时或返回不完整结果。
+3. `document_parser.py` 的文本质量检测对“中英混杂乱码 / glyph soup”识别不够敏感，低质量 PDF 文字层没有稳定降级到 OCR fallback。
+4. `contract_document_parser.py` 在低质量文本场景下，对时间节点 label / meaning 的回退不够保守，容易把脏片段直接展示出来。
+
+### 修复内容
+
+#### 1. 合同文本预处理器修复
+
+文件：
+`tools/chat-assistant/backend/app/agent_runtime/contract_text_preprocessor.py`
+
+处理：
+
+- 补上缺失的确定性清洗逻辑，修复 `_deterministic_ocr_fix` 缺失造成的异常分支
+- 增加稳定的规范化 / 清洗 helper，先做规则修正，再决定是否调用 LLM
+- 将“大文本一次性清洗”改为“分块预处理”，降低长合同超时和 JSON 不完整风险
+- 当 LLM 预处理失败、返回非法 JSON 或超时时，不再回退到原始 OCR 文本，而是回退到“确定性清洗后的文本”
+
+效果：
+
+- 即使 LLM 不可达，链路也能得到一份比原始 PDF 文字层更干净的文本
+- 后续规则抽取和节点构造不会再直接吃最脏的原始输入
+
+#### 2. PDF 文本质量识别增强
+
+文件：
+`tools/chat-assistant/backend/app/services/document_parser.py`
+
+处理：
+
+- 收紧文字层质量识别阈值
+- 新增 / 加强以下 heuristics：
+  - 中文字符占比过低
+  - 异常 Latin run 过多
+  - 中英符号混杂、明显乱码式 glyph soup 检测
+- 用 `_assess_extracted_text_quality_v2` 覆盖旧质量评估逻辑
+
+效果：
+
+- 之前“勉强有文字层但其实很脏”的 PDF，现在能更稳定地判为 `LOW`
+- 一旦判为低质量，会更可靠地触发 OCR 优化链路，而不是直接拿脏文字继续往下跑
+
+#### 3. 时间节点回退逻辑收紧
+
+文件：
+`tools/chat-assistant/backend/app/agent_runtime/contract_document_parser.py`
+
+处理：
+
+- 统一预处理结果持久化，确保 `TEXT_PREPROCESSED` trace 稳定落库
+- 只要存在清洗后的文本，就将 `preprocess_status` 标记为 `READY`
+- 对低质量片段增加更保守的 label / meaning fallback：
+  - 不再盲目把明显乱码片段直接作为节点标题
+  - 必要时退回到更通用的业务标签，例如“交付/服务节点”“验收节点”
+  - 含义说明改为明确提示“原文识别质量较低，需要复核”
+
+效果：
+
+- 虽然在 LLM enrichment 不可用时仍可能不够漂亮，但至少不会再把最离谱的乱码原样顶到前台
+- 节点信息从“误导性噪声”收敛为“可识别但需复核”的保守输出
+
+### 本次针对性验证
+
+重点复跑文档：
+
+- `contract_document.id = 50`
+- 文件名：`中电投分宜电厂扩建工程（2×660MW机组）勘察设计合同.pdf`
+
+验证动作：
+
+1. 多次重新执行 `parse_contract_document(50)`
+2. 确认预处理 trace 已写入数据库
+3. 确认低质量文字层会触发 OCR 优化 trace
+4. 抽查 `contract_timeline_node` 输出，观察标题、说明和兜底策略是否生效
+
+### 当前验证结果
+
+- 解析可以完成
+- `TEXT_PREPROCESSED` trace 已能稳定写出
+- `PDF_RECOGNITION_OPTIMIZATION` trace 已出现，说明 OCR fallback 被触发
+- 时间节点标题较之前已有改善，极端乱码节点已能回退到通用标签
+- 但外部 LLM 目前仍存在超时问题，因此部分 enrichment 仍然只能走规则 / fallback 分支
+
+当前仍可见的局限：
+
+- 某些节点标题不再是纯乱码，但仍偏长、偏 clause 原文截取
+- 模型超时时，节点“重点动作总结”无法完全达到理想效果
+- 这类残留问题更适合下一步继续做“规则侧标题压缩 + LLM 可用时二次润色”
+
+### 测试与编译验证
+
+已通过：
+
+- `python -m unittest discover -s tests -p 'test_contract_text_preprocessor.py'`
+- `python -m unittest discover -s tests -p 'test_document_parser_quality.py'`
+- 修改过的 Python 文件 `py_compile` 通过
+
+新增 / 覆盖的测试点：
+
+- 非法 JSON 返回时的确定性 fallback
+- 长文本分块清洗
+- glyph soup 式乱码文本的质量识别回归测试
+
+### 结论
+
+这次修复把合同解析链路从“模型一超时就把脏文本原样往后传”改成了“先确定性清洗，再按质量决定是否 OCR，再做节点抽取”的更稳妥路径。
+
+它已经显著降低了乱码直接进入时间节点展示的概率，但还没有根治所有展示问题。当前剩余问题的核心不再是链路失控，而是：
+
+- OCR / 原文质量本身仍有限
+- 外部 LLM 仍不稳定，导致节点摘要和语义润色经常只能 fallback
+
+后续若继续优化，优先级建议是：
+
+1. 继续增强低质量节点的标题压缩和摘要规则
+2. 恢复稳定的 LLM 调用后，再让模型对候选节点做二次语义整理
+3. 前端对“保守兜底节点”和“高置信度节点”做更清晰的层级展示
+
+## 合同文本预处理与时间节点重跑
+
+**日期**：2026-08-06
+
+### 现象
+
+合同详情里的时间节点仍然出现明显 OCR 乱码，且预处理任务有时会把原始文本当成“清洗成功”继续往后传。
+
+### 根因
+
+1. 预处理器把整篇文本一次性发给 LLM，长文容易截断或返回空 JSON。
+2. LLM 失败时直接回退到原始 OCR 文本，导致坏文本继续进入时间节点和风险分析链路。
+3. 预处理 trace 只在少数分支写入，导致后台看起来像“没跑过”。
+
+### 修复
+
+| 文件 | 改动 |
+|------|------|
+| `tools/chat-assistant/backend/app/agent_runtime/contract_text_preprocessor.py` | 新增保结构文本规范化、分块 LLM 清洗、确定性回退；LLM 失败时使用确定性清洗文本，不再把原始 OCR 文本伪装成成功结果 |
+| `tools/chat-assistant/backend/app/agent_runtime/contract_document_parser.py` | 预处理结果统一落库；无论是否走 LLM，都写入 `TEXT_PREPROCESSED` trace 和合同主体信息 |
+| `tools/chat-assistant/backend/tests/test_contract_text_preprocessor.py` | 新增回归测试：坏 JSON 回退确定性文本、长文本分块清洗 |
+
+### 验证
+
+- `python -m unittest discover -s tests -p 'test_contract_text_preprocessor.py'`
+- `python -m unittest discover -s tests -p 'test_document_parser_quality.py'`
+- `python -m py_compile app/agent_runtime/contract_text_preprocessor.py app/agent_runtime/contract_document_parser.py app/agent_runtime/graph/nodes/retrieval.py`
+- 重新解析 `doc#50`
+
+### 结果
+
+- `contract_document_job_trace` 已写入 `TEXT_PREPROCESSED`
+- `contract_document_job` 重新生成了 `TIMELINE_EXTRACTING`、`INDEXING`、`READY`
+- 当前环境下 LLM 仍有超时，预处理会回退到确定性清洗，但不会再把原始 OCR 文本当成成功结果继续传播
+
 ## 合同 Agent 架构收敛：有界反思、幂等运行与失败可观测
 
 **日期**：2026-08-06
@@ -90,6 +336,64 @@ ContractCaseView
 ```
 
 这次调整没有改变 Legacy Harness 作为回滚通道的定位，而是把 LangGraph 的运行边界、失败出口、重复运行保护和前端可观测性补齐，使 Agent 从“能运行”进一步变成“可控、可解释、可恢复”。
+
+## Graph Runtime 运行时修正：路由、Checkpoint、Resume、评测闭环
+
+**日期**：2026-08-06
+
+### 调整原因
+
+- G0-G4 搭建了 LangGraph 基础设施和 ContractReviewGraph / FulfillmentCheckGraph 节点骨架，但存在 10 个运行时 bug 导致图无法真正切换、履约 HITL 不可用、评测中心空壳。
+- P0 级（阻塞运行）：RuntimeRouter 路由不匹配（注册 key 用 graph name，查找 key 用 env var 值"langgraph"）；Checkpoint 未接入 LangGraph 协议签名；Resume 用 raw dict 而非 `Command(resume=...)`；`GraphAdapter.run()` 遇到 `GraphInterrupt` 不返回 `WAITING_HUMAN`；task_input 丢失导致履约图拿不到 timelineNodeId；SQL 列不存在导致管理端报错。
+- P1 级（功能不完整）：Pydantic 校验失败只 log 不阻断；ContractReviewGraph 没有真实检索和 LLM draft；评测 `startEvalRun()` 只插 RUNNING 记录不调 Python；评测 runtime_engine 被 env var 覆盖不稳定；图内 `persist_report` 和外层 `_dispatch_via_router` 重复保存报告。
+
+### 实现
+
+**P0 — 7 项阻塞修复**
+
+1. **Runtime 路由**：`RuntimeRouter._resolve()` 改为 DB 配置 → 环境变量 → legacy 默认值三级优先级；`langgraph` 作为运行模式按 task_type 映射到 graph name（`CONTRACT_REVIEW→contract_review`、`FULFILLMENT_CHECK→fulfillment_check`）。
+
+2. **Checkpoint 协议**：`MySqlCheckpointSaver` 重写为 LangGraph 0.4.10 严格签名：`get_tuple(config)`（`config` 为 `{"configurable":{"thread_id":"..."}}`）、`put(config, checkpoint, metadata, new_versions)`、`list(config, *, filter, before, limit)`、`put_writes(config, writes, task_id, task_path)`。新增 `aget_tuple`/`aput`/`aput_writes` 异步包装器。新增 `get_next_version()`。
+
+3. **Resume 用 `Command(resume={...})`**：`GraphAdapter.resume()` 改用 `Command(resume={"action":..., "manual_result":..., "note":...})`。RuntimeRouter.resume() 查 `agent_run.run_type` 确定正确的 graph adapter（`FULFILLMENT_CHECK→fulfillment_check`），不再遍历所有 adapter 拿第一个。
+
+4. **WAITING_HUMAN 状态**：`GraphAdapter.run()` catch `GraphInterrupt` 返回 `AgentResult(status="WAITING_HUMAN")`。`AgentResult.ok` 改为仅 `COMPLETED` 时为 True。`_dispatch_via_router` 三分支：`WAITING_HUMAN`→更新状态不写报告；`COMPLETED`→更新完成（图内 `persist_report` 已写）；其他→FAILED。
+
+5. **task_input 传递**：`GraphAdapter.run()` 的 `initial_state` 新增 `"task_input": context.task_input or {}`。
+
+6. **SQL 列名**：`EvalAdminController.listCases()` 中 `expected_finding_count` 改为 `COALESCE(JSON_LENGTH(expected_findings_json), 0)`。
+
+7. **artifact 未定义 bug**：`_dispatch_via_router` 的 else 分支改为 `(result.artifact or {}).get("artifactError", ...)` 防御式读取。
+
+**P1 — 3 项功能补全**
+
+8. **Pydantic 质量门禁**：`validate_schema` 写入 `schema_validation` state（`valid/errors/repair_count`）；新增 `repair_artifact` 节点作一次定向修复；新增 `_route_after_schema` 条件边：VALID→persist、INVALID+0→repair、INVALID+1→compose_limited_report。
+
+9. **ContractReviewGraph 真实检索**：新增 `retrieve_domain_evidence`（调 `ContractStore` 查合同条款+标准条款+知识库 chunk）、`run_deterministic_rules`（加载活跃审查规则）、`draft_domain_findings`（规则+证据对齐生成双引用发现）。图边改为 `create_domain_tasks → retrieve → rules → draft → validate`。
+
+10. **评测中心闭环**：Python 新增 `POST /internal/agent/evaluations/run`，Java `EvalAdminController.startEvalRun()` 通过 `AiGateway.runEvaluation()` 触发。Python 端 fire-and-forget（`asyncio.create_task` 后立即返回），后台逐 case 创建临时 contract_case+clause、调 `dispatch_with_mode(ctx, runtime)` 绕过全局配置、写 `agent_eval_result`、汇总更新 `agent_eval_run`。`finally` 块软删除临时合同数据。外围 `try/except` 确保任何异常写 FAILED。
+
+**二阶修正（3 项）**
+
+11. **Resume 可能跑错图**：`RuntimeRouter.resume()` 改为查 `agent_run.run_type` 映射到正确 graph，不再遍历取第一个非 legacy adapter。
+
+12. **评测同步阻塞超时**：改为 fire-and-forget 后立即返回 `{"status":"ACCEPTED"}`。
+
+13. **评测 runtime_engine 不稳定**：新增 `RuntimeRouter.dispatch_with_mode(ctx, mode)` 绕过 DB/env 配置，评测直接按参数选 adapter。
+
+### 修改文件
+
+- `app/agent_runtime/runtime.py`：`_resolve` DB 优先 + task_type 映射 + `dispatch_with_mode` + `resume` 按 run_type 路由
+- `app/agent_runtime/graph/checkpoint.py`：重写为 LangGraph 0.4.10 协议
+- `app/agent_runtime/graph/contract_review.py`：新增 3 个真实检索节点 + Pydantic 条件边
+- `app/agent_runtime/graph/fulfillment_check.py`：`build_fulfillment_check_graph(checkpointer=...)`
+- `app/agent_runtime/graph/nodes/retrieval.py`（新）：`retrieve_domain_evidence` + `run_deterministic_rules` + `draft_domain_findings`
+- `app/agent_runtime/graph/nodes/artifact.py`：`validate_schema` 硬门禁 + `repair_artifact` + `_route_after_schema`
+- `app/api/routes.py`：`_dispatch_via_router` 三分支 + `resume_agent_run` 端点 + `run_evaluation` fire-and-forget + `_run_evaluation_background` + `_fail_eval_run`
+- `agent-server/.../EvalAdminController.java`：注入 `AiGateway` + `startEvalRun` 调用 `runEvaluation`
+- `agent-server/.../AiGateway.java` / `HttpAiGateway.java`：新增 `runEvaluation(Long)`
+
+---
 
 ## Agent 图运行时架构升级：LangGraph DAG/状态机 + 评测中心 + 四阶段渐进迁移
 
