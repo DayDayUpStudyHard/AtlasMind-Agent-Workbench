@@ -71,6 +71,9 @@
                       <span>Agent</span>
                       <strong>{{ activity.run.currentStep || runTypeLabel(activity.run.runType) }}</strong>
                       <b>{{ runIsActive(activity.run.status) ? `${activity.run.progress || 0}%` : runStatusLabel(activity.run.status) }}</b>
+                      <small v-if="activity.run.runtimeEngine || activity.run.graphName" class="activity-runtime">
+                        {{ activityRuntimeLabel(activity.run) }}
+                      </small>
                     </div>
                   </div>
                   <div v-if="activityIsActive(activity)" class="pipeline-progress">
@@ -350,7 +353,11 @@ function activityMainLabel(activity) {
     return activity.run.currentStep || `${runTypeLabel(activity.run.runType)}进行中`
   }
   if (activity?.pipeline?.status === 'FAILED' || activity?.run?.status === 'FAILED') return '合同处理失败，点击查看原因'
-  if (activity?.run?.status === 'COMPLETED') return '审查结果已生成，点击查看合同详情'
+  if (activity?.run?.status === 'COMPLETED') {
+    return activity.run.runType === 'CONTRACT_ELEMENT_EXTRACTION'
+      ? '合同要素已生成，等待确认并可供后续 Agent 复用'
+      : '审查结果已生成，点击查看合同详情'
+  }
   if (activity?.pipeline?.status === 'READY') return '合同文件处理完成，等待下一步'
   return '合同处理记录'
 }
@@ -366,6 +373,7 @@ function runTypeLabel(type) {
     VERSION_REVIEW: '版本复核',
     OBLIGATION_EXTRACTION: '义务提取',
     FULFILLMENT_CHECK: '履约核验',
+    CONTRACT_ELEMENT_EXTRACTION: '合同要素提取',
     HEALTH_ANALYSIS: '健康分析',
     PROJECT_ONBOARDING: '项目接手',
     ENGINEERING_DECISION: '研发决策',
@@ -384,6 +392,14 @@ function runStatusLabel(status) {
     FAILED: '失败',
     CANCELLED: '已取消',
   }[status] || status || '未知'
+}
+function activityRuntimeLabel(run) {
+  const engine = String(run?.runtimeEngine || '').toLowerCase()
+  const parts = [engine === 'langgraph' ? 'LangGraph' : '传统运行时']
+  if (run?.graphName) parts.push(run.graphName)
+  if (run?.graphVersion) parts.push(run.graphVersion)
+  if (run?.model) parts.push(run.model)
+  return parts.join(' · ')
 }
 function activityUpdatedAt(activity) {
   return activity?.pipeline?.updateTime || activity?.pipeline?.createTime
@@ -452,6 +468,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .activity-stage>span{color:var(--atlas-primary);font-weight:900}
 .activity-stage strong{overflow:hidden;font-size:9px;font-weight:600;text-overflow:ellipsis;white-space:nowrap}
 .activity-stage b{color:var(--atlas-muted);font-size:9px;font-weight:800;white-space:nowrap}
+.activity-runtime{grid-column:2 / -1;color:var(--atlas-subtle);font-size:8px;line-height:1.3}
 .activity-meta{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:3px;color:var(--atlas-subtle);font-size:9px}
 .activity-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.contract-activity-row.error .activity-meta b{color:#b35c56}.contract-activity-row.done .activity-meta b{color:#3f7f5d}
 .activity-error-link{color:#b35c56;font-size:9px;font-weight:800;white-space:nowrap}

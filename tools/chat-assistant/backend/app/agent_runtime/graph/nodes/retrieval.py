@@ -201,6 +201,7 @@ def run_deterministic_rules(state: dict[str, Any]) -> dict[str, Any]:
     """Execute active deterministic rules and keep only actual violations."""
     case_id = int(state.get("subject_id") or 0)
     case_snapshot = state.get("case_snapshot") or {}
+    extracted_facts = (state.get("extraction_snapshot") or {}).get("elements") or []
     contract_type = str(case_snapshot.get("contractType") or "SERVICE_PROCUREMENT")
     try:
         from ...contract_store import ContractStore
@@ -585,6 +586,7 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
     domain_tasks = state.get("domain_tasks") or []
     case_snapshot = state.get("case_snapshot") or {}
     run_id = int(state.get("run_id") or 0)
+    extracted_facts = (state.get("extraction_snapshot") or {}).get("elements") or []
 
     def _analyze(task: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str]:
         key = str(task.get("domainKey") or task.get("domain") or "")
@@ -598,7 +600,7 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
             from app.services.llm_service import LLMService
 
             response = LLMService().analyze_contract_risk_domain(
-                case_snapshot, task, evidence, matched_rules, run_id,
+                case_snapshot, task, evidence, matched_rules, run_id, extracted_facts,
             )
             findings = []
             for index, raw in enumerate((response or {}).get("findings") or []):
@@ -653,6 +655,7 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
                 "domainKey": key,
                 "domainName": task.get("domainName"),
                 "evidenceCount": len(domain_results.get(key) or []),
+                "extractedFactCount": len(extracted_facts),
             },
             "output": {"status": status, "findingCount": len(findings), "conclusion": conclusion[:300]},
             "status": status,

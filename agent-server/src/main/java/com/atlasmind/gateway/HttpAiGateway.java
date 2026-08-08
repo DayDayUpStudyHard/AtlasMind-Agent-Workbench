@@ -109,6 +109,11 @@ public class HttpAiGateway implements AiGateway {
     }
 
     @Override
+    public Map<String, Object> resumeAgentRun(Long runId, Map<String, Object> payload) {
+        return request("POST", "/internal/agent/run/" + runId + "/resume", payload, timeoutSeconds);
+    }
+
+    @Override
     public Map<String, Object> cancelAgentRun(Long runId, Map<String, Object> payload) {
         return request("POST", "/internal/agent/run/" + runId + "/cancel", payload, timeoutSeconds);
     }

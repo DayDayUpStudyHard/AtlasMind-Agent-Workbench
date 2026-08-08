@@ -24,7 +24,7 @@
             <el-option label="研发项目" value="PROJECT" />
           </el-select>
           <el-select v-model="agentRunType" clearable placeholder="任务类型" @change="fetchAgentRuns">
-            <el-option v-for="item in runTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
+          <el-option v-for="item in runTypeOptions" :key="item.value" :label="item.label" :value="item.value" />
           </el-select>
           <el-select v-model="agentStatus" clearable placeholder="运行状态" @change="fetchAgentRuns">
             <el-option v-for="item in statusOptions" :key="item.value" :label="item.label" :value="item.value" />
@@ -264,6 +264,10 @@
             <div><span>对象 ID</span><strong>{{ activeAgentRun.subjectId || '-' }}</strong></div>
             <div><span>触发方式</span><strong>{{ activeAgentRun.triggerType || '-' }}</strong></div>
             <div><span>当前步骤</span><strong>{{ activeAgentRun.currentStep || '-' }}</strong></div>
+            <div><span>Runtime</span><strong>{{ activeAgentRun.runtimeEngine || 'legacy' }}</strong></div>
+            <div><span>Graph</span><strong>{{ activeAgentRun.graphName || '-' }} · {{ activeAgentRun.graphVersion || '-' }}</strong></div>
+            <div><span>模型</span><strong>{{ activeAgentRun.model || '-' }}</strong></div>
+            <div><span>Prompt 版本</span><strong>{{ activeAgentRun.promptVersion || '-' }}</strong></div>
           </div>
           <pre v-if="activeAgentRun.inputJson" class="json-box">{{ prettyJson(activeAgentRun.inputJson) }}</pre>
           <p v-if="activeAgentRun.errorMessage" class="error-text">{{ activeAgentRun.errorMessage }}</p>
@@ -274,11 +278,34 @@
           <div class="stat-grid">
             <div><span>运行步骤</span><strong>{{ activeAgentRun.traces?.length || 0 }}</strong></div>
             <div><span>工具调用</span><strong>{{ activeAgentRun.toolCalls?.length || 0 }}</strong></div>
+            <div><span>图节点</span><strong>{{ activeAgentRun.nodeExecutions?.length || 0 }}</strong></div>
             <div><span>失败工具</span><strong>{{ failedToolCount(activeAgentRun) }}</strong></div>
             <div><span>反思节点</span><strong>{{ eventCount(activeAgentRun, 'REFLECTION') }}</strong></div>
             <div><span>报告产物</span><strong>{{ activeAgentRun.reports?.length || 0 }}</strong></div>
             <div><span>审查发现</span><strong>{{ activeAgentRun.findings?.length || 0 }}</strong></div>
           </div>
+        </section>
+
+        <section class="detail-section">
+          <div class="section-title">Graph 节点执行</div>
+          <div v-if="activeAgentRun.nodeExecutions?.length" class="loop-list">
+            <article v-for="node in activeAgentRun.nodeExecutions" :key="node.id || `${node.runId}-${node.sequenceNo}`" class="loop-step">
+              <div class="loop-index">#{{ node.sequenceNo }}</div>
+              <div class="loop-body">
+                <div class="tool-row">
+                  <strong>{{ node.nodeName }}</strong>
+                  <el-tag size="small" :type="node.status === 'FAILED' ? 'danger' : 'success'" effect="plain">{{ node.status }}</el-tag>
+                  <span class="muted">{{ node.latencyMs || 0 }}ms · {{ formatDate(node.finishedAt || node.createTime) }}</span>
+                </div>
+                <div class="io-grid">
+                  <div><span>节点输入摘要</span><pre class="json-box compact">{{ prettyJson(node.inputSummary) }}</pre></div>
+                  <div><span>节点输出摘要</span><pre class="json-box compact">{{ prettyJson(node.outputSummary) }}</pre></div>
+                  <div v-if="node.errorMessage"><span>错误</span><p class="error-text">{{ node.errorMessage }}</p></div>
+                </div>
+              </div>
+            </article>
+          </div>
+          <el-empty v-else description="暂无节点执行记录，可能是旧运行或运行尚未写入检查点" />
         </section>
 
         <section class="detail-section">
@@ -592,6 +619,7 @@ const runTypeOptions = [
   { value: 'APPROVAL_DECISION', label: '审批决策' },
   { value: 'VERSION_REVIEW', label: '版本复核' },
   { value: 'OBLIGATION_EXTRACTION', label: '义务提取' },
+  { value: 'CONTRACT_ELEMENT_EXTRACTION', label: '合同要素提取' },
   { value: 'HEALTH_ANALYSIS', label: '健康分析' },
   { value: 'PROJECT_ONBOARDING', label: '项目接手' },
   { value: 'ENGINEERING_DECISION', label: '研发决策' },
@@ -718,6 +746,7 @@ function runTypeLabel(type) {
     APPROVAL_DECISION: '审批决策',
     VERSION_REVIEW: '版本复核',
     OBLIGATION_EXTRACTION: '义务提取',
+    CONTRACT_ELEMENT_EXTRACTION: '合同要素提取',
     FULFILLMENT_CHECK: '履约检查',
   }[type] || type || 'Agent 任务'
 }
@@ -800,6 +829,7 @@ function taskFallback(type) {
     APPROVAL_DECISION: '生成合同审批意见',
     VERSION_REVIEW: '复核合同版本变化',
     OBLIGATION_EXTRACTION: '提取合同履约义务',
+    CONTRACT_ELEMENT_EXTRACTION: '提取合同主体、金额、日期、义务和风险条款要素',
   }[type] || '执行 Agent 任务'
 }
 

@@ -469,6 +469,15 @@ def _assess_extracted_text_quality_v2(text: str) -> dict:
     """Stricter quality gate for OCR-like garbage and glyph soup."""
     value = str(text or "")
     compact_length = len(re.sub(r"\s+", "", value))
+    if compact_length == 0:
+        return {
+            "level": "LOW",
+            "score": 0.0,
+            "requiresOcr": True,
+            "requiresReview": True,
+            "signals": [{"type": "EMPTY_TEXT", "count": 1}],
+            "textLength": len(value),
+        }
     malformed_numbers = len(_MALFORMED_NUMBER_PATTERN.findall(value))
     suspicious_parties = len(_SUSPICIOUS_PARTY_PATTERN.findall(value))
     embedded_latin = len(_EMBEDDED_LATIN_PATTERN.findall(value))

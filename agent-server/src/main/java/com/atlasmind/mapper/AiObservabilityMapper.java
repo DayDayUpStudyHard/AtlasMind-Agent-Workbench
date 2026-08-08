@@ -182,12 +182,18 @@ public interface AiObservabilityMapper {
                 r.error_message AS errorMessage,
                 r.started_at AS startedAt,
                 r.finished_at AS finishedAt,
-                r.last_heartbeat_at AS lastHeartbeatAt,
-                r.create_time AS createTime,
-                (SELECT COUNT(*) FROM agent_run_trace t WHERE t.run_id = r.id) AS traceCount,
-                (SELECT COUNT(*) FROM agent_tool_call tc WHERE tc.run_id = r.id) AS toolCallCount,
-                (SELECT COUNT(*) FROM agent_tool_call tc WHERE tc.run_id = r.id AND tc.status = 'FAILED') AS failedToolCallCount,
-                (SELECT COUNT(*) FROM agent_report rp WHERE rp.run_id = r.id) AS reportCount,
+                 r.last_heartbeat_at AS lastHeartbeatAt,
+                 r.create_time AS createTime,
+                 r.runtime_engine AS runtimeEngine,
+                 r.graph_name AS graphName,
+                 r.graph_version AS graphVersion,
+                 r.model AS model,
+                 r.prompt_version AS promptVersion,
+                 (SELECT COUNT(*) FROM agent_run_trace t WHERE t.run_id = r.id) AS traceCount,
+                 (SELECT COUNT(*) FROM agent_tool_call tc WHERE tc.run_id = r.id) AS toolCallCount,
+                 (SELECT COUNT(*) FROM agent_tool_call tc WHERE tc.run_id = r.id AND tc.status = 'FAILED') AS failedToolCallCount,
+                 (SELECT COUNT(*) FROM agent_node_execution ne WHERE ne.run_id = r.id) AS nodeExecutionCount,
+                 (SELECT COUNT(*) FROM agent_report rp WHERE rp.run_id = r.id) AS reportCount,
                 (SELECT COUNT(*) FROM agent_action a WHERE a.run_id = r.id) AS actionCount
             FROM agent_run r
             LEFT JOIN contract_case c ON c.id = r.subject_id AND r.subject_type = 'CONTRACT_CASE'
@@ -282,9 +288,14 @@ public interface AiObservabilityMapper {
                 r.error_message AS errorMessage,
                 r.started_at AS startedAt,
                 r.finished_at AS finishedAt,
-                r.last_heartbeat_at AS lastHeartbeatAt,
-                r.create_time AS createTime,
-                r.update_time AS updateTime
+                 r.last_heartbeat_at AS lastHeartbeatAt,
+                 r.create_time AS createTime,
+                 r.update_time AS updateTime,
+                 r.runtime_engine AS runtimeEngine,
+                 r.graph_name AS graphName,
+                 r.graph_version AS graphVersion,
+                 r.model AS model,
+                 r.prompt_version AS promptVersion
             FROM agent_run r
             LEFT JOIN contract_case c ON c.id = r.subject_id AND r.subject_type = 'CONTRACT_CASE'
             LEFT JOIN agent_project p ON p.id = r.project_id
@@ -314,6 +325,23 @@ public interface AiObservabilityMapper {
             ORDER BY id ASC
             """)
     List<Map<String, Object>> listAgentRunToolCalls(@Param("runId") Long runId);
+
+    @Select("""
+            SELECT id, run_id AS runId, node_name AS nodeName,
+                   node_type AS nodeType, sequence_no AS sequenceNo,
+                   attempt, status, input_hash AS inputHash,
+                   output_hash AS outputHash, started_at AS startedAt,
+                   finished_at AS finishedAt, latency_ms AS latencyMs,
+                   llm_model AS llmModel, prompt_version AS promptVersion,
+                   token_input AS tokenInput, token_output AS tokenOutput,
+                   input_summary AS inputSummary, output_summary AS outputSummary,
+                   error_code AS errorCode, error_message AS errorMessage,
+                   create_time AS createTime
+            FROM agent_node_execution
+            WHERE run_id = #{runId}
+            ORDER BY sequence_no ASC, id ASC
+            """)
+    List<Map<String, Object>> listAgentRunNodeExecutions(@Param("runId") Long runId);
 
     @Select("""
             SELECT id, report_type AS reportType, title, summary,

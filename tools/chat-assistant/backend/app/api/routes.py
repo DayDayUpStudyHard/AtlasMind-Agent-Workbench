@@ -194,6 +194,7 @@ def _init_contract_runtime():
                     checkpointer,
                     graph_name="contract_review",
                     graph_version="v1",
+                    run_store=run_store,
                 ),
             )
             logger.info("Registered contract_review graph adapter")
@@ -211,11 +212,29 @@ def _init_contract_runtime():
                     checkpointer,
                     graph_name="fulfillment_check",
                     graph_version="v1",
+                    run_store=run_store,
                 ),
             )
             logger.info("Registered fulfillment_check graph adapter")
         except Exception as exc:
             logger.warning("fulfillment_check graph init failed: %s", exc)
+
+        try:
+            from app.agent_runtime.graph.contract_extraction import build_contract_extraction_graph
+            extraction_graph = build_contract_extraction_graph(checkpointer=checkpointer)
+            _contract_runtime_router.register(
+                "contract_extraction",
+                GraphAdapter(
+                    extraction_graph,
+                    checkpointer,
+                    graph_name="contract_extraction",
+                    graph_version="v1",
+                    run_store=run_store,
+                ),
+            )
+            logger.info("Registered contract_extraction graph adapter")
+        except Exception as exc:
+            logger.warning("contract_extraction graph init failed: %s", exc)
         logger.info("Graph adapters registered via RuntimeRouter")
     except Exception as exc:
         logger.info("Graph adapters not available (LangGraph may not be installed): %s", exc)
@@ -890,6 +909,21 @@ async def _dispatch_via_router(router, request) -> None:
     run_id = request.run_id
     heartbeat_task: asyncio.Task | None = None
 
+    async def mark_extraction_failed(error_message: str) -> None:
+        if request.task_type != "CONTRACT_ELEMENT_EXTRACTION":
+            return
+        try:
+            from app.agent_runtime.graph.contract_extraction import mark_extraction_workflow_failed
+
+            await asyncio.to_thread(
+                mark_extraction_workflow_failed,
+                int(request.subject_id or 0),
+                int(run_id),
+                error_message,
+            )
+        except Exception as exc:
+            logger.warning("Could not mark extraction workflow %s as failed: %s", run_id, exc)
+
     try:
         await run_store.update_run(run_id, status="CONTEXT_BUILDING", progress=5,
                                    current_step="Graph Runtime 开始执行")
@@ -903,6 +937,26 @@ async def _dispatch_via_router(router, request) -> None:
             await run_store.update_run(run_id, status="WAITING_HUMAN", progress=85,
                                        current_step="等待人工确认")
         elif result.status == "COMPLETED":
+            if request.task_type == "CONTRACT_ELEMENT_EXTRACTION":
+                artifact = result.artifact or {}
+                snapshot_id = artifact.get("extractionSnapshotId")
+                if not snapshot_id:
+                    message = "合同要素提取完成但没有生成提取快照"
+                    await run_store.update_run(
+                        run_id,
+                        status="FAILED",
+                        progress=0,
+                        error_message=message,
+                    )
+                    await mark_extraction_failed(message)
+                    return
+                await run_store.update_run(
+                    run_id,
+                    status="COMPLETED",
+                    progress=100,
+                    current_step=f"合同要素已生成（快照 #{snapshot_id}）",
+                )
+                return
             # Graphs normally persist inside persist_report. Keep a second
             # guard here so a successful graph response cannot hide a missing
             # report when a node was skipped or failed silently.
@@ -940,13 +994,16 @@ async def _dispatch_via_router(router, request) -> None:
             error_msg = str((result.artifact or {}).get("artifactError", "Graph execution failed"))[:500]
             await run_store.update_run(run_id, status="FAILED", progress=0,
                                        error_message=error_msg)
+            await mark_extraction_failed(error_msg)
     except Exception as exc:
         logger.exception("Graph dispatch failed for run %s", run_id)
+        error_message = str(exc)[:500]
         try:
             await run_store.update_run(run_id, status="FAILED", progress=0,
-                                       error_message=str(exc)[:500])
+                                       error_message=error_message)
         except Exception:
             pass
+        await mark_extraction_failed(error_message)
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -1097,6 +1154,55 @@ async def resume_agent_run(
 
     try:
         result = await router.resume(run_id, command)
+        from app.agent_runtime.persistence import MySqlReportStore, MySqlRunStore
+
+        run_store = MySqlRunStore()
+        if result.status == "WAITING_HUMAN":
+            await run_store.update_run(
+                run_id,
+                status="WAITING_HUMAN",
+                progress=85,
+                current_step="等待人工补充或确认",
+            )
+        elif result.status == "COMPLETED":
+            try:
+                run = await run_store.get_run(run_id)
+                report_store = MySqlReportStore()
+                report = await report_store.get_report(run_id)
+                if not report:
+                    await report_store.save_report(
+                        int(run.get("projectId") or run.get("subjectId") or 0),
+                        run_id,
+                        str(run.get("runType") or "FULFILLMENT_CHECK"),
+                        result.artifact or {},
+                    )
+                await run_store.update_run(
+                    run_id,
+                    status="COMPLETED",
+                    progress=100,
+                    current_step="已保存人工确认后的履约核验结果",
+                )
+            except Exception as exc:
+                error_message = f"履约核验报告保存失败: {exc}"[:500]
+                logger.exception("Could not persist resumed fulfillment run %s", run_id)
+                await run_store.update_run(
+                    run_id,
+                    status="FAILED",
+                    progress=0,
+                    error_message=error_message,
+                )
+                return {
+                    "runId": run_id,
+                    "status": "FAILED",
+                    "artifact": {"artifactError": error_message},
+                }
+        else:
+            await run_store.update_run(
+                run_id,
+                status="FAILED",
+                progress=0,
+                error_message=str((result.artifact or {}).get("artifactError") or "履约核验恢复失败")[:500],
+            )
         return {
             "runId": run_id,
             "status": result.status,

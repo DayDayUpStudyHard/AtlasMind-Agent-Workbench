@@ -74,6 +74,7 @@ public class AiObservabilityAdminController {
         Map<String, Object> data = new HashMap<>(run);
         data.put("traces", observabilityMapper.listAgentRunTraces(id));
         data.put("toolCalls", observabilityMapper.listAgentRunToolCalls(id));
+        data.put("nodeExecutions", observabilityMapper.listAgentRunNodeExecutions(id));
         data.put("reports", observabilityMapper.listAgentRunReports(id));
         data.put("findings", observabilityMapper.listAgentRunFindings(id));
         data.put("actions", observabilityMapper.listAgentRunActions(id));

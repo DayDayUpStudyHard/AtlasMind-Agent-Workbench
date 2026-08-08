@@ -13,6 +13,23 @@ from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
 
+_GRAPH_PROMPT_VERSIONS = {
+    "CONTRACT_REVIEW": "contract-review-graph-v1",
+    "FULFILLMENT_CHECK": "fulfillment-check-graph-v1",
+    "CONTRACT_ELEMENT_EXTRACTION": "contract-elements-v1",
+}
+
+
+def _runtime_model_metadata(task_type: str) -> tuple[str, str]:
+    """Return the configured model and stable prompt version for a graph."""
+    try:
+        from app.config import settings
+
+        model = str(getattr(settings, "llm_model", "") or "")
+    except Exception:
+        model = ""
+    return model, _GRAPH_PROMPT_VERSIONS.get(str(task_type or "").upper(), "")
+
 
 # ── Protocol & models ────────────────────────────────────────────────
 
@@ -99,15 +116,44 @@ class GraphAdapter:
         checkpointer: Any = None,
         graph_name: str = "",
         graph_version: str = "v1",
+        run_store: Any = None,
     ):
         self._graph = compiled_graph
         self._checkpointer = checkpointer
         self._graph_name = graph_name
         self._graph_version = graph_version
+        self._run_store = run_store
+
+    async def _persist_start_metadata(
+        self,
+        run_id: int,
+        graph_name: str,
+        graph_version: str,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        """Make a graph run identifiable even when it fails before checkpointing."""
+        writer = getattr(self._run_store, "set_runtime_metadata", None)
+        if not callable(writer):
+            return
+        try:
+            await writer(
+                run_id,
+                runtime_engine="langgraph",
+                graph_name=graph_name,
+                graph_version=graph_version,
+                model=model,
+                prompt_version=prompt_version,
+            )
+        except Exception as exc:
+            logger.debug("Could not persist graph runtime metadata for run %s: %s", run_id, exc)
 
     async def run(self, context: Any) -> AgentResult:
         """Execute the graph for a new run."""
         thread_id = f"run-{context.run_id}"
+        graph_name = self._graph_name or getattr(context, "graph_name", "unknown")
+        graph_version = self._graph_version or getattr(context, "graph_version", "v1")
+        model, prompt_version = _runtime_model_metadata(context.task_type)
 
         initial_state = {
             "run_id": context.run_id,
@@ -115,8 +161,10 @@ class GraphAdapter:
             "subject_id": context.subject_id,
             "task_type": context.task_type,
             "task_input": context.task_input or {},
-            "graph_name": self._graph_name or getattr(context, "graph_name", "unknown"),
-            "graph_version": self._graph_version or getattr(context, "graph_version", "v1"),
+            "graph_name": graph_name,
+            "graph_version": graph_version,
+            "model": model,
+            "prompt_version": prompt_version,
             "trigger_type": "MANUAL",
             "state_revision": 0,
             "case_snapshot": context.project or {},
@@ -131,6 +179,13 @@ class GraphAdapter:
                 "run_id": context.run_id,
             }
         }
+        await self._persist_start_metadata(
+            context.run_id,
+            graph_name,
+            graph_version,
+            model,
+            prompt_version,
+        )
         try:
             final_state = await self._graph.ainvoke(initial_state, config)
         except Exception as exc:
@@ -147,6 +202,8 @@ class GraphAdapter:
                         "runtimeEngine": "langgraph",
                         "graphName": initial_state.get("graph_name", ""),
                         "graphVersion": initial_state.get("graph_version", ""),
+                        "model": initial_state.get("model", ""),
+                        "promptVersion": initial_state.get("prompt_version", ""),
                         "waitState": initial_state.get("wait_state") or {"type": "WAITING_HUMAN"},
                     },
                 )
@@ -159,6 +216,32 @@ class GraphAdapter:
                     "runtimeEngine": "langgraph",
                     "graphName": initial_state.get("graph_name", ""),
                     "graphVersion": initial_state.get("graph_version", ""),
+                    "model": initial_state.get("model", ""),
+                    "promptVersion": initial_state.get("prompt_version", ""),
+                },
+            )
+
+        if final_state.get("__interrupt__"):
+            wait_state = final_state.get("wait_state") or {}
+            try:
+                snapshot = await self._graph.aget_state(config)
+                wait_state = (snapshot.values or {}).get("wait_state") or wait_state
+            except Exception:
+                pass
+            return AgentResult(
+                run_id=context.run_id,
+                status="WAITING_HUMAN",
+                artifact={},
+                observations=final_state.get("observations") or [],
+                citations=final_state.get("citations") or [],
+                graph_info={
+                    "runtimeEngine": "langgraph",
+                    "graphName": final_state.get("graph_name", self._graph_name),
+                    "graphVersion": final_state.get("graph_version", self._graph_version),
+                    "model": final_state.get("model", model),
+                    "promptVersion": final_state.get("prompt_version", prompt_version),
+                    "stateRevision": final_state.get("state_revision", 0),
+                    "waitState": wait_state,
                 },
             )
 
@@ -181,6 +264,8 @@ class GraphAdapter:
                     "runtimeEngine": "langgraph",
                     "graphName": final_state.get("graph_name", ""),
                     "graphVersion": final_state.get("graph_version", ""),
+                    "model": final_state.get("model", model),
+                    "promptVersion": final_state.get("prompt_version", prompt_version),
                     "stateRevision": final_state.get("state_revision", 0),
                     "lastNode": final_state.get("current_node", ""),
                 },
@@ -195,6 +280,8 @@ class GraphAdapter:
                 "runtimeEngine": "langgraph",
                 "graphName": final_state.get("graph_name", ""),
                 "graphVersion": final_state.get("graph_version", ""),
+                "model": final_state.get("model", model),
+                "promptVersion": final_state.get("prompt_version", prompt_version),
                 "stateRevision": final_state.get("state_revision", 0),
             },
         )
@@ -228,7 +315,37 @@ class GraphAdapter:
                 artifact={"artifactError": str(exc)},
             )
 
+        if final_state.get("__interrupt__"):
+            wait_state = final_state.get("wait_state") or {}
+            try:
+                snapshot = await self._graph.aget_state(config)
+                wait_state = (snapshot.values or {}).get("wait_state") or wait_state
+            except Exception:
+                pass
+            return AgentResult(
+                run_id=run_id,
+                status="WAITING_HUMAN",
+                artifact={},
+                observations=final_state.get("observations") or [],
+                citations=final_state.get("citations") or [],
+                graph_info={
+                    "runtimeEngine": "langgraph",
+                    "graphName": final_state.get("graph_name", self._graph_name),
+                    "graphVersion": final_state.get("graph_version", self._graph_version),
+                    "model": final_state.get("model", ""),
+                    "promptVersion": final_state.get("prompt_version", ""),
+                    "stateRevision": final_state.get("state_revision", 0),
+                    "waitState": wait_state,
+                },
+            )
+
         artifact = final_state.get("artifact") or {}
+        if not artifact:
+            return AgentResult(
+                run_id=run_id,
+                status="FAILED",
+                artifact={"artifactError": "Graph resumed without generating an artifact"},
+            )
         return AgentResult(
             run_id=run_id,
             status="COMPLETED",
@@ -239,6 +356,8 @@ class GraphAdapter:
                 "runtimeEngine": "langgraph",
                 "graphName": final_state.get("graph_name", ""),
                 "graphVersion": final_state.get("graph_version", ""),
+                "model": final_state.get("model", ""),
+                "promptVersion": final_state.get("prompt_version", ""),
                 "stateRevision": final_state.get("state_revision", 0),
             },
         )
@@ -370,6 +489,7 @@ class RuntimeRouter:
 
         # ── Read config: DB → env → default ──
         resolved = self._default
+        has_db_override = False
         try:
             from .persistence import _conn
             with _conn() as conn:
@@ -381,18 +501,34 @@ class RuntimeRouter:
                     row = cur.fetchone()
                     if row and row.get("config_value"):
                         resolved = str(row["config_value"])
+                        has_db_override = True
         except Exception:
             pass  # DB unavailable, use env/default
 
-        if resolved == self._default:
+        env_override = ""
+        if not has_db_override:
             env_key = f"AGENT_RUNTIME_{task_type}"
-            resolved = os.environ.get(env_key, self._default)
+            env_override = str(os.environ.get(env_key, "")).strip()
+            if env_override:
+                resolved = env_override
+
+        # Extraction has no meaningful legacy implementation. Use its graph
+        # by default while still allowing DB or environment configuration to
+        # opt out during a rollback.
+        if (
+            task_type == "CONTRACT_ELEMENT_EXTRACTION"
+            and not has_db_override
+            and not env_override
+            and self._adapters.get("contract_extraction") is not None
+        ):
+            resolved = "langgraph"
 
         # ── langgraph mode: map task_type → graph name ──
         if resolved == "langgraph":
             graph_name = {
                 "CONTRACT_REVIEW": "contract_review",
                 "FULFILLMENT_CHECK": "fulfillment_check",
+                "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
             }.get(task_type, "")
             if graph_name:
                 adapter = self._adapters.get(graph_name)
@@ -426,6 +562,7 @@ class RuntimeRouter:
             graph_name = {
                 "CONTRACT_REVIEW": "contract_review",
                 "FULFILLMENT_CHECK": "fulfillment_check",
+                "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
             }.get(context.task_type, "")
             adapter = self._adapters.get(graph_name) if graph_name else None
         else:
@@ -466,6 +603,7 @@ class RuntimeRouter:
                         _TASK_TO_GRAPH = {
                             "FULFILLMENT_CHECK": "fulfillment_check",
                             "CONTRACT_REVIEW": "contract_review",
+                            "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
                         }
                         graph_name = _TASK_TO_GRAPH.get(run_type)
         except Exception:

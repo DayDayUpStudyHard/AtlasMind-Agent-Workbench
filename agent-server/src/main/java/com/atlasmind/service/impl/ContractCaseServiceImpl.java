@@ -43,6 +43,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private static final Set<String> CONTRACT_TYPES = Set.of(
             "SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA", "OTHER");
     private static final Set<String> PRIORITIES = Set.of("LOW", "NORMAL", "HIGH", "CRITICAL");
+    private static final Set<String> FACT_REVIEW_STATUSES = Set.of(
+            "CONFIRMED", "NEEDS_REVIEW", "NEEDS_SUPPLEMENT", "NOT_APPLICABLE");
     private static final Pattern ABSOLUTE_DATE_PATTERN = Pattern.compile(
             "(20\\d{2})\\s*[-年./]\\s*(0?[1-9]|1[0-2])\\s*[-月./]\\s*(0?[1-9]|[12]\\d|3[01])\\s*日?");
     private static final Pattern MONTH_DAY_PATTERN = Pattern.compile(
@@ -247,8 +249,25 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
         c.put("parties", jdbcTemplate.queryForList(
                 "SELECT id, party_name AS partyName, party_role AS partyRole, contact_person AS contactPerson, contact_email AS contactEmail, risk_score AS riskScore FROM contract_party WHERE case_id=?", caseId));
+        List<Map<String, Object>> factDecisions = jdbcTemplate.queryForList("""
+                SELECT id, intake_id AS intakeId, document_id AS documentId,
+                       field_key AS fieldKey, proposed_value_json AS proposedValue,
+                       confirmed_value_json AS confirmedValue, decision_type AS decisionType,
+                       candidate_source AS candidateSource,
+                       candidate_confidence AS candidateConfidence,
+                       citations_json AS citations, validation_json AS validation,
+                       content_hash AS contentHash, parser_version AS parserVersion,
+                       schema_version AS schemaVersion, prompt_version AS promptVersion,
+                       llm_model AS llmModel, decided_by AS decidedBy,
+                       decided_at AS decidedAt
+                FROM contract_intake_fact_decision
+                WHERE case_id=? ORDER BY decided_at DESC, id DESC
+                """, caseId);
+        parseJsonFields(factDecisions, "proposedValue", "confirmedValue", "citations", "validation");
+        c.put("intakeFactDecisions", factDecisions);
         List<Map<String, Object>> documents = jdbcTemplate.queryForList(
                 "SELECT id, document_type AS documentType, file_name AS fileName,"
+                + " CASE WHEN file_path LIKE '/upload/%' THEN file_path ELSE NULL END AS previewUrl,"
                 + " file_size AS fileSize, version, parse_status AS parseStatus,"
                 + " parse_error AS parseError, parse_provider AS parseProvider,"
                 + " parse_quality AS parseQuality, parse_diagnostics_json AS parseDiagnostics,"
@@ -316,7 +335,10 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 "SELECT id, run_type AS runType, status, progress, current_step AS currentStep, "
                         + "error_message AS errorMessage, "
                         + "workflow_id AS workflowId, workflow_stage AS workflowStage, "
-                        + "evidence_snapshot_hash AS evidenceSnapshotHash, create_time AS createTime "
+                        + "evidence_snapshot_hash AS evidenceSnapshotHash, "
+                        + "runtime_engine AS runtimeEngine, graph_name AS graphName, "
+                        + "graph_version AS graphVersion, model, prompt_version AS promptVersion, "
+                        + "create_time AS createTime, update_time AS updateTime "
                         + "FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 10", SUBJECT_TYPE, caseId));
         List<Map<String, Object>> reports = jdbcTemplate.queryForList("""
                 SELECT rp.id, rp.run_id AS runId, rp.report_type AS reportType, rp.title, rp.summary,
@@ -343,6 +365,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         c.put("reviewSummary", reports.stream()
                 .filter(r -> Set.of("CONTRACT_REVIEW_REPORT", "CONTRACT_REVIEW").contains(str(r, "reportType")))
                 .findFirst().orElse(Map.of()));
+        attachExtractionFacts(c, caseId);
+        attachFactReviews(c, caseId);
         // Latest pending intake for confirmation modal
         c.put("pendingIntake", first(jdbcTemplate.queryForList(
                 "SELECT id, status, validated_json AS validatedJson,"
@@ -352,7 +376,153 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         return c;
     }
 
+    /**
+     * Expose the latest versioned fact snapshot separately from risk reports.
+     * Extraction is a reusable source of truth for review and fulfillment;
+     * older databases may not have V026 yet, so this is deliberately optional.
+     */
+    private void attachExtractionFacts(Map<String, Object> contractCase, Long caseId) {
+        contractCase.put("extractionSnapshot", null);
+        contractCase.put("contractElements", List.of());
+        contractCase.put("contractProfile", Map.of());
+        try {
+            Map<String, Object> mainDocument = first(jdbcTemplate.queryForList("""
+                    SELECT id
+                    FROM contract_document
+                    WHERE case_id=? AND document_type='MAIN' AND COALESCE(deleted,0)=0
+                    ORDER BY version DESC, id DESC
+                    LIMIT 1
+                    """, caseId));
+            if (mainDocument == null) return;
+
+            Map<String, Object> snapshot = first(jdbcTemplate.queryForList("""
+                    SELECT id, case_id AS caseId, document_id AS documentId,
+                           document_version AS documentVersion, content_hash AS contentHash,
+                           parser_version AS parserVersion, schema_version AS schemaVersion,
+                           prompt_version AS promptVersion, llm_model AS llmModel,
+                           retrieval_version AS retrievalVersion, status, snapshot_hash AS snapshotHash,
+                           source_run_id AS sourceRunId, confirmed_by AS confirmedBy,
+                           confirmed_at AS confirmedAt, error_message AS errorMessage,
+                           create_time AS createTime, update_time AS updateTime
+                    FROM contract_extraction_snapshot
+                    WHERE case_id=? AND document_id=?
+                      AND status IN ('READY_FOR_CONFIRMATION','CONFIRMED')
+                    ORDER BY (status='CONFIRMED') DESC, id DESC
+                    LIMIT 1
+                    """, caseId, mainDocument.get("id")));
+            if (snapshot == null) return;
+            attachExtractionProfile(snapshot);
+
+            List<Map<String, Object>> elements = jdbcTemplate.queryForList("""
+                    SELECT id, snapshot_id AS snapshotId, element_key AS elementKey,
+                           category, value_type AS valueType, raw_value AS rawValue,
+                           normalized_value_json AS normalizedValue, status, confidence,
+                           source, applicable, occurrence_no AS occurrenceNo,
+                           parent_element_id AS parentElementId, manual_override AS manualOverride,
+                           review_status AS reviewStatus, review_note AS reviewNote,
+                           reviewed_by AS reviewedBy, reviewed_at AS reviewedAt,
+                           validation_json AS validation, create_time AS createTime,
+                           update_time AS updateTime
+                    FROM contract_extracted_element
+                    WHERE snapshot_id=?
+                    ORDER BY category ASC, element_key ASC, occurrence_no ASC, id ASC
+                    """, snapshot.get("id"));
+            parseJsonFields(elements, "normalizedValue", "validation");
+
+            List<Map<String, Object>> candidates = jdbcTemplate.queryForList("""
+                    SELECT ec.id, ec.element_id AS elementId, ec.raw_value AS rawValue,
+                           ec.normalized_value_json AS normalizedValue, ec.source,
+                           ec.confidence, ec.selected, ec.reason, ec.create_time AS createTime
+                    FROM contract_element_candidate ec
+                    JOIN contract_extracted_element ee ON ee.id=ec.element_id
+                    WHERE ee.snapshot_id=?
+                    ORDER BY ec.element_id ASC, ec.confidence DESC, ec.id ASC
+                    """, snapshot.get("id"));
+            parseJsonFields(candidates, "normalizedValue");
+
+            List<Map<String, Object>> evidence = jdbcTemplate.queryForList("""
+                    SELECT l.id, l.element_id AS elementId, l.document_id AS documentId,
+                           l.clause_id AS clauseId, l.chunk_id AS chunkId,
+                           l.page_number AS pageNumber, l.paragraph_index AS paragraphIndex,
+                           l.quote, l.start_offset AS startOffset, l.end_offset AS endOffset,
+                           l.bbox_json AS bbox, l.retrieval_method AS retrievalMethod,
+                           l.score, l.create_time AS createTime,
+                           c.clause_number AS clauseNumber, c.title AS clauseTitle,
+                           c.content AS clauseContent, d.file_name AS documentFileName,
+                           CASE WHEN d.file_path LIKE '/upload/%' THEN d.file_path ELSE NULL END AS documentPreviewUrl
+                    FROM contract_element_evidence_link l
+                    JOIN contract_extracted_element ee ON ee.id=l.element_id
+                    LEFT JOIN contract_clause c ON c.id=l.clause_id
+                    LEFT JOIN contract_document d ON d.id=COALESCE(l.document_id, c.document_id)
+                    WHERE ee.snapshot_id=?
+                    ORDER BY l.element_id ASC, l.id ASC
+                    """, snapshot.get("id"));
+            parseJsonFields(evidence, "bbox");
+
+            Map<Long, List<Map<String, Object>>> evidenceByElement = new LinkedHashMap<>();
+            for (Map<String, Object> link : evidence) {
+                Long elementId = numberAsLongOrNull(link.get("elementId"));
+                if (elementId != null) evidenceByElement.computeIfAbsent(elementId, ignored -> new ArrayList<>()).add(link);
+            }
+            Map<Long, List<Map<String, Object>>> candidatesByElement = new LinkedHashMap<>();
+            for (Map<String, Object> candidate : candidates) {
+                Long elementId = numberAsLongOrNull(candidate.get("elementId"));
+                if (elementId != null) candidatesByElement.computeIfAbsent(elementId, ignored -> new ArrayList<>()).add(candidate);
+            }
+            for (Map<String, Object> element : elements) {
+                Long elementId = numberAsLongOrNull(element.get("id"));
+                element.put("evidence", elementId == null ? List.of() : evidenceByElement.getOrDefault(elementId, List.of()));
+                element.put("candidates", elementId == null ? List.of() : candidatesByElement.getOrDefault(elementId, List.of()));
+            }
+            snapshot.put("elementCount", elements.size());
+            snapshot.put("evidenceCount", evidence.size());
+            contractCase.put("extractionSnapshot", snapshot);
+            contractCase.put("contractElements", elements);
+            Object profile = parseJson(snapshot.get("profileJson"));
+            contractCase.put("contractProfile", profile instanceof Map ? profile : Map.of());
+        } catch (Exception ignored) {
+            // V026 is applied by the Python runtime. Keep the contract page
+            // usable during a rolling deployment before that migration lands.
+        }
+    }
+
+    private void attachFactReviews(Map<String, Object> contractCase, Long caseId) {
+        try {
+            contractCase.put("factReviews", jdbcTemplate.queryForList("""
+                    SELECT id, case_id AS caseId, fact_key AS factKey,
+                           fact_identity AS factIdentity, fact_label AS factLabel,
+                           value_hash AS valueHash, review_status AS reviewStatus,
+                           review_note AS reviewNote, reviewed_by AS reviewedBy,
+                           reviewed_at AS reviewedAt, create_time AS createTime,
+                           update_time AS updateTime
+                    FROM contract_fact_review
+                    WHERE case_id=?
+                    ORDER BY reviewed_at DESC, id DESC
+                    """, caseId));
+        } catch (Exception ignored) {
+            contractCase.put("factReviews", List.of());
+        }
+    }
+
     // ── Create ─────────────────────────────────────────────────────
+
+    private void attachExtractionProfile(Map<String, Object> snapshot) {
+        try {
+            Map<String, Object> profile = first(jdbcTemplate.queryForList("""
+                    SELECT profile_schema_version AS profileSchemaVersion,
+                           profile_json AS profileJson,
+                           profile_hash AS profileHash,
+                           profile_status AS profileStatus
+                    FROM contract_extraction_snapshot
+                    WHERE id=?
+                    LIMIT 1
+                    """, snapshot.get("id")));
+            if (profile != null) snapshot.putAll(profile);
+        } catch (Exception ignored) {
+            // The Python runtime owns the profile migration. Older databases
+            // still expose flat extraction elements, so the profile is optional.
+        }
+    }
 
     @Override
     @Transactional
@@ -607,6 +777,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SET status='CONFIRMED', confirmed_json=?, case_id=?, error_message=NULL
                 WHERE id=?
                 """, json(caseRequest), caseId, intakeId);
+        recordIntakeFactDecisions(caseId, intakeId, intake, request, userId);
         markAnalysisWorkflowConfirmed(caseId, intakeId);
 
         return Map.of("intakeId", intakeId, "status", "CONFIRMED", "case", getCase(caseId));
@@ -711,6 +882,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     public List<Map<String, Object>> listDocuments(Long caseId) {
         List<Map<String, Object>> documents = jdbcTemplate.queryForList(
                 "SELECT id, document_type AS documentType, file_name AS fileName,"
+                + " CASE WHEN file_path LIKE '/upload/%' THEN file_path ELSE NULL END AS previewUrl,"
                 + " file_size AS fileSize, version, parse_status AS parseStatus,"
                 + " parse_error AS parseError, parse_provider AS parseProvider,"
                 + " parse_quality AS parseQuality, parse_diagnostics_json AS parseDiagnostics,"
@@ -813,6 +985,19 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             analysisWorkflow.put("evidenceSnapshotHash", evidenceSnapshotHash);
             analysisWorkflow.put("confirmedVersion", workflow.get("confirmedVersion"));
             inputJson.put("analysisWorkflow", analysisWorkflow);
+        } else if ("CONTRACT_ELEMENT_EXTRACTION".equals(taskType)) {
+            Map<String, Object> workflow = prepareExtractionWorkflow(caseId, inputJson);
+            workflowId = numberAsLong(workflow.get("id"));
+            workflowStage = "FACT_EXTRACTION";
+            evidenceSnapshotHash = str(workflow, "evidenceSnapshotHash");
+            Map<String, Object> analysisWorkflow = new LinkedHashMap<>();
+            analysisWorkflow.put("workflowId", workflowId);
+            analysisWorkflow.put("stage", workflowStage);
+            analysisWorkflow.put("documentId", workflow.get("documentId"));
+            analysisWorkflow.put("documentVersion", workflow.get("documentVersion"));
+            analysisWorkflow.put("evidenceSnapshotHash", evidenceSnapshotHash);
+            analysisWorkflow.put("confirmedVersion", workflow.get("confirmedVersion"));
+            inputJson.put("analysisWorkflow", analysisWorkflow);
         }
 
         Long runId = insert("""
@@ -852,6 +1037,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     SET status='REVIEWING', current_stage='RISK_REVIEW', review_run_id=?, last_error=NULL
                     WHERE id=?
                     """, runId, workflowId);
+        } else if ("CONTRACT_ELEMENT_EXTRACTION".equals(taskType)) {
+            jdbcTemplate.update("""
+                    UPDATE contract_analysis_workflow
+                    SET extraction_run_id=?, extraction_status='RUNNING',
+                        current_stage='FACT_EXTRACTION', last_error=NULL
+                    WHERE id=?
+                    """, runId, workflowId);
+            jdbcTemplate.update("UPDATE contract_case SET last_run_id=?, last_run_at=NOW() WHERE id=?", runId, caseId);
         } else {
             jdbcTemplate.update("UPDATE contract_case SET last_run_id=?, last_run_at=NOW() WHERE id=?", runId, caseId);
         }
@@ -876,7 +1069,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Transactional
     public Map<String, Object> confirmFulfillmentCheck(Long checkId, Map<String, Object> request, String actor) {
         Map<String, Object> check = first(jdbcTemplate.queryForList("""
-                SELECT id, case_id AS caseId
+                SELECT id, case_id AS caseId, run_id AS runId
                 FROM contract_fulfillment_check
                 WHERE id=?
                 FOR UPDATE
@@ -895,6 +1088,15 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SET manual_result=?, manual_note=?, confirmed_by=?, confirmed_at=NOW()
                 WHERE id=?
                 """, result, note, actor == null || actor.isBlank() ? "authenticated-user" : actor, checkId);
+        Long runId = numberAsLongOrNull(check.get("runId"));
+        if (runId != null) {
+            dispatchFulfillmentResumeAfterCommit(
+                    checkId,
+                    runId,
+                    result,
+                    note,
+                    actor == null || actor.isBlank() ? "authenticated-user" : actor);
+        }
         return getCase(numberAsLong(check.get("caseId")));
     }
 
@@ -1012,7 +1214,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SELECT id, run_type AS runType, status, progress, current_step AS currentStep,
                        workflow_id AS workflowId, workflow_stage AS workflowStage,
                        evidence_snapshot_hash AS evidenceSnapshotHash,
-                       error_message AS errorMessage, create_time AS createTime
+                       runtime_engine AS runtimeEngine, graph_name AS graphName,
+                       graph_version AS graphVersion, model, prompt_version AS promptVersion,
+                       error_message AS errorMessage, create_time AS createTime, update_time AS updateTime
                 FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 20
                 """, SUBJECT_TYPE, caseId);
     }
@@ -1023,8 +1227,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SELECT id, subject_type AS subjectType, subject_id AS subjectId, run_type AS runType,
                        status, progress, current_step AS currentStep, error_message AS errorMessage,
                        workflow_id AS workflowId, workflow_stage AS workflowStage,
-                       evidence_snapshot_hash AS evidenceSnapshotHash,
-                       create_time AS createTime
+                       evidence_snapshot_hash AS evidenceSnapshotHash, runtime_engine AS runtimeEngine,
+                       graph_name AS graphName, graph_version AS graphVersion, model,
+                       prompt_version AS promptVersion, create_time AS createTime, update_time AS updateTime
                 FROM agent_run WHERE id=? AND subject_type=?
                 """, runId, SUBJECT_TYPE));
         if (run == null) throw new IllegalArgumentException("Run not found");
@@ -1073,6 +1278,87 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     WHERE id=? AND status='NEEDS_REVISION' AND deleted=0
                     """, caseId);
         }
+        return getCase(caseId);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> reviewContractElement(
+            Long caseId, Long elementId, Map<String, Object> request, String actor) {
+        if (elementId == null) throw new IllegalArgumentException("合同要素不能为空");
+        Map<String, Object> element = first(jdbcTemplate.queryForList("""
+                SELECT e.id, s.case_id AS caseId
+                FROM contract_extracted_element e
+                JOIN contract_extraction_snapshot s ON s.id=e.snapshot_id
+                WHERE e.id=? AND s.case_id=?
+                FOR UPDATE
+                """, elementId, caseId));
+        if (element == null) throw new IllegalArgumentException("合同要素不存在或不属于当前合同");
+
+        String reviewStatus = normalizeFactReviewStatus(request);
+        String note = str(request, "note").trim();
+        jdbcTemplate.update("""
+                UPDATE contract_extracted_element
+                SET review_status=?, review_note=?, reviewed_by=?, reviewed_at=NOW(),
+                    manual_override=1
+                WHERE id=?
+                """, reviewStatus, note.isBlank() ? null : note,
+                actor == null || actor.isBlank() ? "authenticated-user" : actor,
+                elementId);
+        return getCase(caseId);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> reviewContractFact(
+            Long caseId, Map<String, Object> request, String actor) {
+        Map<String, Object> contractCase = first(jdbcTemplate.queryForList(
+                "SELECT id FROM contract_case WHERE id=? AND deleted=0 FOR UPDATE", caseId));
+        if (contractCase == null) throw new IllegalArgumentException("合同案件不存在");
+
+        String factKey = str(request, "factKey").trim();
+        if (factKey.isBlank()) factKey = str(request, "elementKey").trim();
+        if (factKey.isBlank()) throw new IllegalArgumentException("合同事实字段不能为空");
+        String factIdentity = str(request, "factIdentity").trim();
+        if (factIdentity.isBlank()) factIdentity = factKey;
+        String factLabel = str(request, "factLabel").trim();
+        String reviewStatus = normalizeFactReviewStatus(request);
+        String note = str(request, "note").trim();
+        Object value = request.get("value");
+        String valueHash = value == null ? null : sha256(json(value));
+        String reviewer = actor == null || actor.isBlank() ? "authenticated-user" : actor;
+
+        jdbcTemplate.update("""
+                INSERT INTO contract_fact_review
+                    (case_id, fact_key, fact_identity, fact_label, value_hash,
+                     review_status, review_note, reviewed_by, reviewed_at)
+                VALUES (?,?,?,?,?,?,?,?,NOW())
+                ON DUPLICATE KEY UPDATE
+                    fact_key=VALUES(fact_key), fact_label=VALUES(fact_label),
+                    value_hash=VALUES(value_hash), review_status=VALUES(review_status),
+                    review_note=VALUES(review_note), reviewed_by=VALUES(reviewed_by),
+                    reviewed_at=NOW(), update_time=NOW()
+                """,
+                caseId, factKey, factIdentity, factLabel.isBlank() ? null : factLabel,
+                valueHash, reviewStatus, note.isBlank() ? null : note, reviewer);
+        return getCase(caseId);
+    }
+
+    @Override
+    @Transactional
+    public Map<String, Object> reviewTimelineNode(
+            Long caseId, Long timelineNodeId, Map<String, Object> request, String actor) {
+        ensureTimelineNode(caseId, timelineNodeId);
+        String reviewStatus = normalizeFactReviewStatus(request);
+        String note = str(request, "note").trim();
+        jdbcTemplate.update("""
+                UPDATE contract_timeline_node
+                SET review_status=?, review_note=?, reviewed_by=?, reviewed_at=NOW(),
+                    manual_override=1
+                WHERE id=? AND case_id=?
+                """, reviewStatus, note.isBlank() ? null : note,
+                actor == null || actor.isBlank() ? "authenticated-user" : actor,
+                timelineNodeId, caseId);
         return getCase(caseId);
     }
 
@@ -1153,6 +1439,91 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
             @Override public void afterCommit() { dispatchToPython(runId, caseId, taskType); }
         });
+    }
+
+    private void dispatchFulfillmentResumeAfterCommit(
+            Long checkId, Long runId, String result, String note, String actor) {
+        Runnable resume = () -> resumeFulfillmentInPython(checkId, runId, result, note, actor);
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            resume.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override public void afterCommit() { resume.run(); }
+        });
+    }
+
+    private void resumeFulfillmentInPython(
+            Long checkId, Long runId, String result, String note, String actor) {
+        String action;
+        String manualResult;
+        switch (result) {
+            case "COMPLETED" -> {
+                action = "CONFIRM";
+                manualResult = "SATISFIED";
+            }
+            case "FAILED" -> {
+                action = "CONFIRM";
+                manualResult = "NOT_SATISFIED";
+            }
+            case "NEEDS_MORE_EVIDENCE" -> {
+                action = "REQUEST_SUPPLEMENT";
+                manualResult = "PENDING";
+            }
+            default -> {
+                action = "KEEP_PENDING";
+                manualResult = "PENDING";
+            }
+        }
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("action", action);
+        payload.put("manualResult", manualResult);
+        payload.put("note", note);
+        payload.put("operatorId", actor);
+        try {
+            Map<String, Object> response = aiGateway.resumeAgentRun(runId, payload);
+            String status = str(response, "status").toUpperCase(Locale.ROOT);
+            if ("FAILED".equals(status)) {
+                String error = str((response.get("artifact") instanceof Map<?, ?> artifact)
+                        ? castMap(artifact) : Map.of(), "artifactError");
+                if (error.isBlank()) error = "履约核验恢复失败";
+                markFulfillmentResumeFailed(checkId, runId, error);
+            } else if ("WAITING_HUMAN".equals(status)) {
+                jdbcTemplate.update("""
+                        UPDATE agent_run SET status='WAITING_HUMAN', progress=85,
+                               current_step='等待补充证据或人工确认'
+                        WHERE id=?
+                        """, runId);
+            }
+        } catch (Exception exception) {
+            String error = exception.getMessage() == null || exception.getMessage().isBlank()
+                    ? "AI 服务不可用，履约核验未能恢复"
+                    : exception.getMessage();
+            markFulfillmentResumeFailed(checkId, runId, error);
+        }
+    }
+
+    private void markFulfillmentResumeFailed(Long checkId, Long runId, String error) {
+        String message = error == null ? "履约核验恢复失败" : error.substring(0, Math.min(500, error.length()));
+        jdbcTemplate.update("""
+                UPDATE agent_run SET status='FAILED', progress=0,
+                       current_step='履约核验恢复失败', error_message=?
+                WHERE id=?
+                """, message, runId);
+        jdbcTemplate.update("""
+                UPDATE contract_fulfillment_check
+                SET status='FAILED', summary=?, update_time=NOW()
+                WHERE id=?
+                """, message, checkId);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> castMap(Map<?, ?> value) {
+        Map<String, Object> result = new HashMap<>();
+        value.forEach((key, item) -> {
+            if (key != null) result.put(String.valueOf(key), item);
+        });
+        return result;
     }
 
     private void dispatchToPython(Long runId, Long caseId, String taskType) {
@@ -1289,13 +1660,74 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 SELECT id, case_id AS caseId, intake_id AS intakeId, document_id AS documentId,
                        document_version AS documentVersion, evidence_snapshot_hash AS evidenceSnapshotHash,
                        confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
-                       review_run_id AS reviewRunId, last_error AS lastError,
+                       review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
+                       extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                       last_error AS lastError,
                        confirmed_at AS confirmedAt, create_time AS createTime, update_time AS updateTime
                 FROM contract_analysis_workflow
                 WHERE case_id=?
                 ORDER BY id DESC LIMIT 1
                 """, caseId));
         return workflow == null ? Map.of() : workflow;
+    }
+
+    private Map<String, Object> prepareExtractionWorkflow(Long caseId, Map<String, Object> inputJson) {
+        Long requestedDocumentId = numberAsLongOrNull(inputJson.get("documentId"));
+        Map<String, Object> document;
+        if (requestedDocumentId != null) {
+            document = first(jdbcTemplate.queryForList("""
+                    SELECT id, version, content_hash AS contentHash, content_text AS contentText,
+                           parse_status AS parseStatus
+                    FROM contract_document
+                    WHERE id=? AND case_id=? AND document_type='MAIN' AND COALESCE(deleted,0)=0
+                    """, requestedDocumentId, caseId));
+        } else {
+            document = first(jdbcTemplate.queryForList("""
+                    SELECT id, version, content_hash AS contentHash, content_text AS contentText,
+                           parse_status AS parseStatus
+                    FROM contract_document
+                    WHERE case_id=? AND document_type='MAIN' AND COALESCE(deleted,0)=0
+                    ORDER BY version DESC, id DESC LIMIT 1
+                    """, caseId));
+        }
+        if (document == null || !"READY".equalsIgnoreCase(str(document, "parseStatus"))) {
+            throw new IllegalArgumentException("合同文档尚未解析完成，暂不能提取合同要素");
+        }
+
+        Long documentId = numberAsLong(document.get("id"));
+        Map<String, Object> workflow = first(jdbcTemplate.queryForList("""
+                SELECT id, case_id AS caseId, intake_id AS intakeId, document_id AS documentId,
+                       document_version AS documentVersion, evidence_snapshot_hash AS evidenceSnapshotHash,
+                       confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
+                       review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
+                       extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                       last_error AS lastError
+                FROM contract_analysis_workflow
+                WHERE case_id=? AND document_id=?
+                ORDER BY id DESC LIMIT 1
+                """, caseId, documentId));
+        if (workflow == null) {
+            Long workflowId = createAnalysisWorkflow(
+                    caseId, null, documentId, intValue(document.get("version"), 1));
+            String evidenceHash = str(document, "contentHash").isBlank()
+                    ? sha256(str(document, "contentText")) : str(document, "contentHash");
+            jdbcTemplate.update("""
+                    UPDATE contract_analysis_workflow
+                    SET evidence_snapshot_hash=?, status='READY_FOR_REVIEW', current_stage='RISK_REVIEW',
+                        last_error=NULL
+                    WHERE id=?
+                    """, evidenceHash, workflowId);
+            workflow = first(jdbcTemplate.queryForList("""
+                    SELECT id, case_id AS caseId, intake_id AS intakeId, document_id AS documentId,
+                           document_version AS documentVersion, evidence_snapshot_hash AS evidenceSnapshotHash,
+                           confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
+                           review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
+                           extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                           last_error AS lastError
+                    FROM contract_analysis_workflow WHERE id=?
+                    """, workflowId));
+        }
+        return workflow;
     }
 
     private void markAnalysisWorkflowConfirmed(Long caseId, Long intakeId) {
@@ -1351,6 +1783,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if ("PARSING".equals(status)) {
             throw new IllegalArgumentException("合同文档仍在解析，完成后才能发起风险审查");
         }
+        if ("FACT_EXTRACTION".equals(stage) && "RUNNING".equalsIgnoreCase(str(workflow, "extractionStatus"))) {
+            throw new IllegalArgumentException("合同要素提取正在运行，请等待当前任务完成");
+        }
         if ("WAITING_CONFIRMATION".equals(status)) {
             throw new IllegalArgumentException("请先确认合同识别结果，再发起风险审查");
         }
@@ -1392,6 +1827,16 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if (count == null || count == 0) {
             throw new IllegalArgumentException("时间节点不存在或不属于当前合同");
         }
+    }
+
+    private String normalizeFactReviewStatus(Map<String, Object> request) {
+        String status = str(request, "reviewStatus").trim().toUpperCase(Locale.ROOT);
+        if (status.isBlank()) status = str(request, "status").trim().toUpperCase(Locale.ROOT);
+        if (status.isBlank()) status = "CONFIRMED";
+        if (!FACT_REVIEW_STATUSES.contains(status)) {
+            throw new IllegalArgumentException("人工审核状态不合法");
+        }
+        return status;
     }
 
     private void dispatchDocumentParsingAfterCommit(Long documentId) {
@@ -1504,7 +1949,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private Map<String, Object> lockIntakeForConfirmation(Long intakeId, Long userId) {
         Map<String, Object> intake = first(jdbcTemplate.queryForList("""
                 SELECT i.id, i.status, i.file_name AS fileName, i.content_text AS contentText,
-                       i.case_id AS caseId
+                       i.case_id AS caseId, i.content_hash AS contentHash,
+                       i.validated_json AS validatedJson, i.schema_version AS schemaVersion,
+                       i.prompt_version AS promptVersion, i.model
                 FROM contract_intake i
                 LEFT JOIN contract_case c ON c.id=i.case_id AND c.deleted=0
                 WHERE i.id=?
@@ -1516,6 +1963,112 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 """, intakeId, userId, userId));
         if (intake == null) throw new IllegalArgumentException("合同识别任务不存在");
         return intake;
+    }
+
+    private void recordIntakeFactDecisions(
+            Long caseId, Long intakeId, Map<String, Object> intake,
+            Map<String, Object> request, Long userId) {
+        Map<String, Object> validated = objectMap(parseJson(intake.get("validatedJson")));
+        Map<String, Object> proposedFields = objectMap(validated.get("fields"));
+        String ourSide = normalizeOurSide(str(request, "ourSide"));
+        String ourEntity = str(request, "ourEntity").trim();
+        String counterparty = str(request, "counterparty").trim();
+
+        Map<String, Object> confirmed = new LinkedHashMap<>();
+        confirmed.put("contractTitle", request.get("title"));
+        confirmed.put("contractType", request.get("contractType"));
+        confirmed.put("partyA", "A".equals(ourSide) ? ourEntity : counterparty);
+        confirmed.put("partyB", "A".equals(ourSide) ? counterparty : ourEntity);
+        confirmed.put("ourSide", ourSide);
+        confirmed.put("amount", request.get("amount"));
+        confirmed.put("currency", request.get("currency"));
+        confirmed.put("signedDate", request.get("signedDate"));
+        confirmed.put("effectiveDate", request.get("effectiveDate"));
+        confirmed.put("expiryDate", request.get("expiryDate"));
+        confirmed.put("department", request.get("department"));
+
+        Map<String, Object> document = first(jdbcTemplate.queryForList("""
+                SELECT id, parse_provider AS parseProvider
+                FROM contract_document
+                WHERE case_id=? AND document_type='MAIN' AND COALESCE(deleted,0)=0
+                ORDER BY version DESC, id DESC LIMIT 1
+                """, caseId));
+        Long documentId = document == null ? null : numberAsLongOrNull(document.get("id"));
+        String parserVersion = document == null ? "" : str(document, "parseProvider");
+
+        for (Map.Entry<String, Object> entry : confirmed.entrySet()) {
+            String fieldKey = entry.getKey();
+            Object confirmedValue = entry.getValue();
+            Map<String, Object> proposed = objectMap(proposedFields.get(fieldKey));
+            Object proposedValue = proposed.get("value");
+            String decisionType;
+            if (confirmedValue == null || String.valueOf(confirmedValue).isBlank()) {
+                decisionType = "CLEARED";
+            } else if (proposedValue == null || String.valueOf(proposedValue).isBlank()) {
+                decisionType = "USER_SUPPLIED";
+            } else if (equivalentFactValue(proposedValue, confirmedValue)) {
+                decisionType = "ACCEPTED";
+            } else {
+                decisionType = "EDITED";
+            }
+            Map<String, Object> proposedWrapper = new LinkedHashMap<>();
+            proposedWrapper.put("value", proposedValue);
+            Map<String, Object> confirmedWrapper = new LinkedHashMap<>();
+            confirmedWrapper.put("value", confirmedValue);
+            Map<String, Object> validation = new LinkedHashMap<>();
+            validation.put("errors", proposed.getOrDefault("validationErrors", List.of()));
+            validation.put("decisionStatus", proposed.get("decisionStatus"));
+            validation.put("humanConfirmed", true);
+
+            jdbcTemplate.update("""
+                    INSERT INTO contract_intake_fact_decision
+                        (case_id, intake_id, document_id, field_key,
+                         proposed_value_json, confirmed_value_json, decision_type,
+                         candidate_source, candidate_confidence, citations_json,
+                         validation_json, content_hash, parser_version,
+                         schema_version, prompt_version, llm_model, decided_by)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON DUPLICATE KEY UPDATE
+                        case_id=VALUES(case_id), document_id=VALUES(document_id),
+                        proposed_value_json=VALUES(proposed_value_json),
+                        confirmed_value_json=VALUES(confirmed_value_json),
+                        decision_type=VALUES(decision_type),
+                        candidate_source=VALUES(candidate_source),
+                        candidate_confidence=VALUES(candidate_confidence),
+                        citations_json=VALUES(citations_json),
+                        validation_json=VALUES(validation_json),
+                        content_hash=VALUES(content_hash), parser_version=VALUES(parser_version),
+                        schema_version=VALUES(schema_version), prompt_version=VALUES(prompt_version),
+                        llm_model=VALUES(llm_model), decided_by=VALUES(decided_by),
+                        decided_at=NOW()
+                    """,
+                    caseId, intakeId, documentId, fieldKey,
+                    json(proposedWrapper), json(confirmedWrapper), decisionType,
+                    str(proposed, "source"), decimalOrNull(proposed.get("confidence")),
+                    json(proposed.getOrDefault("citations", List.of())), json(validation),
+                    intake.get("contentHash"), parserVersion,
+                    intake.get("schemaVersion"), intake.get("promptVersion"),
+                    intake.get("model"), userId);
+        }
+    }
+
+    private boolean equivalentFactValue(Object left, Object right) {
+        if (left instanceof Number || right instanceof Number) {
+            try {
+                return new BigDecimal(String.valueOf(left)).compareTo(
+                        new BigDecimal(String.valueOf(right))) == 0;
+            } catch (NumberFormatException ignored) {
+                // Fall through to normalized string comparison.
+            }
+        }
+        return String.valueOf(left).trim().equalsIgnoreCase(String.valueOf(right).trim());
+    }
+
+    private Map<String, Object> objectMap(Object value) {
+        if (!(value instanceof Map<?, ?> raw)) return Map.of();
+        Map<String, Object> result = new LinkedHashMap<>();
+        raw.forEach((key, item) -> result.put(String.valueOf(key), item));
+        return result;
     }
 
     private Long insert(String sql, Object... params) {
@@ -1617,6 +2170,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        n.business_meaning AS businessMeaning,
                        n.responsible_party AS responsibleParty,
                        n.source, n.status, n.confidence, n.citation_json AS citationJson,
+                       n.manual_override AS manualOverride,
+                       n.review_status AS reviewStatus, n.review_note AS reviewNote,
+                       n.reviewed_by AS reviewedBy, n.reviewed_at AS reviewedAt,
                        c.clause_number AS clauseNumber, c.title AS clauseTitle,
                        c.content AS clauseContent
                 FROM contract_timeline_node n
@@ -1650,6 +2206,11 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 added.put("confidence", node.get("confidence"));
                 added.put("responsibleParty", str(node, "responsibleParty"));
                 added.put("source", str(node, "source"));
+                added.put("manualOverride", node.get("manualOverride"));
+                added.put("reviewStatus", str(node, "reviewStatus"));
+                added.put("reviewNote", str(node, "reviewNote"));
+                added.put("reviewedBy", str(node, "reviewedBy"));
+                added.put("reviewedAt", node.get("reviewedAt"));
             }
         }
 

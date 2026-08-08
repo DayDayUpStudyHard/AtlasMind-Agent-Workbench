@@ -195,6 +195,20 @@ class RunStore(ABC):
         ...
 
     @abstractmethod
+    async def set_runtime_metadata(
+        self,
+        run_id: int,
+        *,
+        runtime_engine: str,
+        graph_name: str,
+        graph_version: str,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        """Persist runtime identity before a graph reaches its first checkpoint."""
+        ...
+
+    @abstractmethod
     async def heartbeat(self, run_id: int) -> None:
         ...
 
@@ -370,14 +384,18 @@ class MySqlRunStore(RunStore):
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
-                        """SELECT id, project_id AS projectId, run_type AS runType,
+                        """SELECT id, project_id AS projectId, subject_type AS subjectType,
+                                  subject_id AS subjectId, run_type AS runType,
                                   trigger_type AS triggerType, question, status,
                                   progress, current_step AS currentStep,
                                   error_message AS errorMessage,
                                   workflow_id AS workflowId, workflow_stage AS workflowStage,
                                   evidence_snapshot_hash AS evidenceSnapshotHash,
+                                  runtime_engine AS runtimeEngine, graph_name AS graphName,
+                                  graph_version AS graphVersion, model,
+                                  prompt_version AS promptVersion,
                                   started_at AS startedAt, finished_at AS finishedAt,
-                                  create_time AS createTime
+                                  create_time AS createTime, update_time AS updateTime
                            FROM agent_run WHERE id=%s""",
                         (run_id,),
                     )
@@ -428,12 +446,16 @@ class MySqlRunStore(RunStore):
                     )
                     if status in ("COMPLETED", "FAILED", "CANCELLED"):
                         cur.execute(
-                            "SELECT workflow_id AS workflowId FROM agent_run WHERE id=%s",
+                            "SELECT workflow_id AS workflowId, run_type AS runType FROM agent_run WHERE id=%s",
                             (run_id,),
                         )
                         workflow = cur.fetchone() or {}
                         workflow_id = workflow.get("workflowId")
-                        if workflow_id:
+                        # The analysis workflow's terminal state belongs to
+                        # risk review. Element extraction and fulfillment use
+                        # the same linkage for provenance, but must not make a
+                        # not-yet-reviewed contract look completed or failed.
+                        if workflow_id and str(workflow.get("runType") or "").upper() == "CONTRACT_REVIEW":
                             workflow_status = "COMPLETED" if status == "COMPLETED" else "FAILED"
                             cur.execute(
                                 """UPDATE contract_analysis_workflow
@@ -443,6 +465,44 @@ class MySqlRunStore(RunStore):
                                 (workflow_status, error_message[:4000] if error_message else None, workflow_id),
                             )
                 conn.commit()
+
+        await _run_sync(_update)
+
+    async def set_runtime_metadata(
+        self,
+        run_id: int,
+        *,
+        runtime_engine: str,
+        graph_name: str,
+        graph_version: str,
+        model: str,
+        prompt_version: str,
+    ) -> None:
+        def _update():
+            try:
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            """UPDATE agent_run
+                               SET runtime_engine=%s,
+                                   graph_name=%s,
+                                   graph_version=%s,
+                                   model=%s,
+                                   prompt_version=%s
+                               WHERE id=%s""",
+                            (
+                                str(runtime_engine or "")[:32],
+                                str(graph_name or "")[:64],
+                                str(graph_version or "")[:32],
+                                str(model or "")[:128],
+                                str(prompt_version or "")[:64],
+                                run_id,
+                            ),
+                        )
+                    conn.commit()
+            except Exception as exc:
+                # Older databases may not yet have the optional runtime columns.
+                logger.debug("Agent runtime metadata update skipped: %s", exc)
 
         await _run_sync(_update)
 
@@ -1120,9 +1180,19 @@ class MySqlReportStore(ReportStore):
                     if task_type == "FULFILLMENT_CHECK":
                         timeline_node_id = int(artifact.get("timelineNodeId") or 0)
                         if timeline_node_id:
+                            manual_result = str(
+                                (artifact.get("content") or {}).get("manualResult")
+                                or artifact.get("manualResult")
+                                or ""
+                            ).upper()
+                            check_status = (
+                                "PENDING"
+                                if manual_result in {"PENDING", "NEEDS_MORE_EVIDENCE"}
+                                else "COMPLETED"
+                            )
                             cur.execute(
                                 """UPDATE contract_fulfillment_check
-                                   SET status='COMPLETED',
+                                   SET status=%s,
                                        conclusion=%s,
                                        risk_level=%s,
                                        confidence_level=%s,
@@ -1137,6 +1207,7 @@ class MySqlReportStore(ReportStore):
                                      AND case_id=%s
                                      AND timeline_node_id=%s""",
                                 (
+                                    check_status,
                                     str(artifact.get("conclusion") or "NEEDS_REVIEW"),
                                     str(artifact.get("riskLevel") or "MEDIUM"),
                                     str(artifact.get("confidenceLevel") or "LOW"),

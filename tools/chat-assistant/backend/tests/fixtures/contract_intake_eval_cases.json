@@ -1,0 +1,56 @@
+{
+  "version": "contract-intake-eval-v1",
+  "cases": [
+    {
+      "id": "engineering-total-after-guarantee",
+      "fileName": "勘察设计合同.pdf",
+      "text": "勘察设计合同\n甲方：华能安源发电有限责任公司\n乙方：江西省电力设计院\n乙方应提交金额为合同总价10%的履约保函。\n本合同总价为人民币壹仟捌佰陆拾万元整（¥1860万元）。",
+      "modelOutput": {
+        "fields": {
+          "contractTitle": {"value": "勘察设计合同", "confidence": 0.92, "citations": [{"quote": "勘察设计合同"}]},
+          "partyA": {"value": "华能安源发电有限责任公司", "confidence": 0.95, "citations": [{"quote": "甲方：华能安源发电有限责任公司"}]},
+          "partyB": {"value": "江西省电力设计院", "confidence": 0.95, "citations": [{"quote": "乙方：江西省电力设计院"}]},
+          "amount": {"value": 18600000, "confidence": 0.95, "citations": [{"quote": "本合同总价为人民币壹仟捌佰陆拾万元整（¥1860万元）"}]},
+          "currency": {"value": "CNY", "confidence": 0.98, "citations": [{"quote": "¥1860万元"}]}
+        }
+      },
+      "expected": {
+        "contractTitle": "勘察设计合同",
+        "partyA": "华能安源发电有限责任公司",
+        "partyB": "江西省电力设计院",
+        "amount": 18600000,
+        "currency": "CNY"
+      }
+    },
+    {
+      "id": "title-after-contract-number",
+      "fileName": "HSG-2013024-01AY.pdf",
+      "text": "合同编号：HSG-2013024-01AY\n华能安源发电有限责任公司“上大压小”2X660MW二次再热机组工程勘察设计合同",
+      "modelOutput": {
+        "fields": {
+          "contractTitle": {"value": "华能安源发电有限责任公司“上大压小”2X660MW二次再热机组工程勘察设计合同", "confidence": 0.9, "citations": [{"quote": "华能安源发电有限责任公司“上大压小”2X660MW二次再热机组工程勘察设计合同"}]}
+        }
+      },
+      "expected": {
+        "contractTitle": "华能安源发电有限责任公司“上大压小”2X660MW二次再热机组工程勘察设计合同"
+      }
+    },
+    {
+      "id": "legal-parties-not-user-side",
+      "fileName": "技术服务合同.pdf",
+      "text": "技术服务合同\n委托方（甲方）：新疆库车县夏阔坦矿业开发有限责任公司\n受托方（乙方）：中国矿业大学",
+      "modelOutput": {
+        "fields": {
+          "contractTitle": {"value": "技术服务合同", "confidence": 0.9, "citations": [{"quote": "技术服务合同"}]},
+          "partyA": {"value": "新疆库车县夏阔坦矿业开发有限责任公司", "confidence": 0.95, "citations": [{"quote": "委托方（甲方）：新疆库车县夏阔坦矿业开发有限责任公司"}]},
+          "partyB": {"value": "中国矿业大学", "confidence": 0.95, "citations": [{"quote": "受托方（乙方）：中国矿业大学"}]}
+        }
+      },
+      "expected": {
+        "contractTitle": "技术服务合同",
+        "partyA": "新疆库车县夏阔坦矿业开发有限责任公司",
+        "partyB": "中国矿业大学"
+      }
+    }
+  ]
+}

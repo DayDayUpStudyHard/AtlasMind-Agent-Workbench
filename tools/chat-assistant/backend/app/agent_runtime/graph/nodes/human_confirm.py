@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 
-def wait_human_confirmation(state: dict[str, Any]) -> dict[str, Any]:
-    """Pause execution until a human confirms the fulfillment result."""
+def _build_wait_state(state: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     artifacts = state.get("artifacts") or {}
     judgements = artifacts.get("judgements") or []
     assessment = artifacts.get("fulfillmentAssessment") or {}
@@ -51,12 +50,37 @@ def wait_human_confirmation(state: dict[str, Any]) -> dict[str, Any]:
         ],
         "requiredAction": "CONFIRM | REQUEST_SUPPLEMENT | KEEP_PENDING",
     }
+    return wait_state, evidence_snapshot
 
+
+def prepare_human_confirmation(state: dict[str, Any]) -> dict[str, Any]:
+    """Materialize the HITL payload before the graph pauses."""
+    wait_state, evidence_snapshot = _build_wait_state(state)
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "prepare_human_confirmation",
+        "wait_state": wait_state,
+        "evidence_snapshot": evidence_snapshot,
+    }
+
+
+def wait_human_confirmation(state: dict[str, Any]) -> dict[str, Any]:
+    """Pause with LangGraph's native interrupt and accept a resume command."""
+    from langgraph.types import interrupt
+
+    response = interrupt(state.get("wait_state") or {"type": "WAITING_HUMAN_CONFIRMATION"})
+    response = response if isinstance(response, dict) else {}
+    wait_state = dict(state.get("wait_state") or {})
+    wait_state["responseReceived"] = True
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "wait_human_confirmation",
+        "manual_result": str(
+            response.get("manualResult") or response.get("manual_result") or "PENDING"
+        ).upper(),
+        "note": str(response.get("note") or ""),
+        "operator_id": str(response.get("operatorId") or response.get("operator_id") or ""),
         "wait_state": wait_state,
-        "evidence_snapshot": evidence_snapshot,
     }
 
 

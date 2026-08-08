@@ -233,6 +233,10 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     source VARCHAR(64) NOT NULL DEFAULT 'EXTRACTED',
                     status VARCHAR(64) NOT NULL DEFAULT 'EXTRACTED',
                     manual_override TINYINT NOT NULL DEFAULT 0,
+                    review_status VARCHAR(32),
+                    review_note TEXT,
+                    reviewed_by VARCHAR(128),
+                    reviewed_at DATETIME,
                     create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                     KEY idx_case_timeline (case_id, node_date),
@@ -283,9 +287,43 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_analysis_workflow_run (review_run_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // Workflow status is read and written by Java, while the Python
+        // runtime owns the versioned extraction fact tables themselves.
+        addColumnIfMissing("contract_analysis_workflow", "extraction_snapshot_id", "BIGINT");
+        addColumnIfMissing("contract_analysis_workflow", "extraction_run_id", "BIGINT");
+        addColumnIfMissing("contract_analysis_workflow", "extraction_status", "VARCHAR(32)");
+        addContractExtractionProfileColumnsIfPresent();
+        addContractFactReviewColumnsIfPresent();
+        addColumnIfMissing("contract_timeline_node", "review_status", "VARCHAR(32)");
+        addColumnIfMissing("contract_timeline_node", "review_note", "TEXT");
+        addColumnIfMissing("contract_timeline_node", "reviewed_by", "VARCHAR(128)");
+        addColumnIfMissing("contract_timeline_node", "reviewed_at", "DATETIME");
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_fact_review (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    fact_key VARCHAR(128) NOT NULL,
+                    fact_identity VARCHAR(256) NOT NULL,
+                    fact_label VARCHAR(256),
+                    value_hash VARCHAR(128),
+                    review_status VARCHAR(32) NOT NULL DEFAULT 'CONFIRMED',
+                    review_note TEXT,
+                    reviewed_by VARCHAR(128),
+                    reviewed_at DATETIME,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_case_fact_identity (case_id, fact_identity),
+                    KEY idx_case_fact_key (case_id, fact_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
         addColumnIfMissing("agent_run", "workflow_id", "BIGINT");
         addColumnIfMissing("agent_run", "workflow_stage", "VARCHAR(64)");
         addColumnIfMissing("agent_run", "evidence_snapshot_hash", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "runtime_engine", "VARCHAR(32)");
+        addColumnIfMissing("agent_run", "graph_name", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "graph_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "model", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "prompt_version", "VARCHAR(64)");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_fulfillment_check (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -363,6 +401,7 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     run_id BIGINT NOT NULL,
                     node_name VARCHAR(128) NOT NULL,
                     node_type VARCHAR(32) NOT NULL DEFAULT 'COMPUTE',
+                    sequence_no INT NOT NULL DEFAULT 0,
                     attempt INT NOT NULL DEFAULT 1,
                     status VARCHAR(32) NOT NULL DEFAULT 'PENDING',
                     input_hash CHAR(64) DEFAULT '',
@@ -374,6 +413,8 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     prompt_version VARCHAR(32) DEFAULT '',
                     token_input INT DEFAULT 0,
                     token_output INT DEFAULT 0,
+                    input_summary LONGTEXT,
+                    output_summary LONGTEXT,
                     error_code VARCHAR(32) DEFAULT '',
                     error_message TEXT,
                     create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -381,6 +422,19 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     INDEX idx_status (status)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        addColumnIfMissing("agent_node_execution", "node_type", "VARCHAR(32) NOT NULL DEFAULT 'COMPUTE'");
+        addColumnIfMissing("agent_node_execution", "sequence_no", "INT NOT NULL DEFAULT 0");
+        addColumnIfMissing("agent_node_execution", "attempt", "INT NOT NULL DEFAULT 1");
+        addColumnIfMissing("agent_node_execution", "input_hash", "CHAR(64) DEFAULT ''");
+        addColumnIfMissing("agent_node_execution", "output_hash", "CHAR(64) DEFAULT ''");
+        addColumnIfMissing("agent_node_execution", "llm_model", "VARCHAR(128) DEFAULT ''");
+        addColumnIfMissing("agent_node_execution", "prompt_version", "VARCHAR(64) DEFAULT ''");
+        addColumnIfMissing("agent_node_execution", "token_input", "INT DEFAULT 0");
+        addColumnIfMissing("agent_node_execution", "token_output", "INT DEFAULT 0");
+        addColumnIfMissing("agent_node_execution", "input_summary", "LONGTEXT");
+        addColumnIfMissing("agent_node_execution", "output_summary", "LONGTEXT");
+        addColumnIfMissing("agent_node_execution", "error_code", "VARCHAR(32) DEFAULT ''");
+        addColumnIfMissing("agent_node_execution", "error_message", "TEXT");
         // ── Evaluation center tables ─────────────────────────────────
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS agent_eval_dataset (
@@ -516,5 +570,31 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         if (count != null && count > 0) return;
         jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN `"
                 + columnName + "` " + definition);
+    }
+
+    private void addContractExtractionProfileColumnsIfPresent() {
+        Integer tableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='contract_extraction_snapshot'
+                """, Integer.class);
+        if (tableCount == null || tableCount == 0) return;
+        addColumnIfMissing("contract_extraction_snapshot", "profile_schema_version", "VARCHAR(64)");
+        addColumnIfMissing("contract_extraction_snapshot", "profile_json", "LONGTEXT");
+        addColumnIfMissing("contract_extraction_snapshot", "profile_hash", "VARCHAR(128)");
+        addColumnIfMissing("contract_extraction_snapshot", "profile_status", "VARCHAR(32)");
+    }
+
+    private void addContractFactReviewColumnsIfPresent() {
+        Integer tableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*)
+                FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='contract_extracted_element'
+                """, Integer.class);
+        if (tableCount == null || tableCount == 0) return;
+        addColumnIfMissing("contract_extracted_element", "review_status", "VARCHAR(32)");
+        addColumnIfMissing("contract_extracted_element", "review_note", "TEXT");
+        addColumnIfMissing("contract_extracted_element", "reviewed_by", "VARCHAR(128)");
+        addColumnIfMissing("contract_extracted_element", "reviewed_at", "DATETIME");
     }
 }

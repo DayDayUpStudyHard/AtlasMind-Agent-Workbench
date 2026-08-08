@@ -46,6 +46,38 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
     label = str(node.get("label") or "")
     business_meaning = str(node.get("businessMeaning") or "")
     clause_content = str(node.get("clauseContent") or "")[:12000]
+    extracted_facts = (state.get("extraction_snapshot") or {}).get("elements") or []
+
+    def _supporting_facts(text: str) -> list[dict[str, Any]]:
+        """Attach facts as context only; clause citations remain authoritative."""
+        lookup = " ".join([text, label, business_meaning, clause_content])
+        node_terms = {
+            "PAYMENT": ("payment_terms", "contract_amount"),
+            "ACCEPTANCE": ("acceptance_criteria", "required_materials"),
+            "DELIVERY": ("delivery_obligations", "required_materials"),
+            "NOTICE": ("notice_terms", "termination_conditions"),
+            "RENEWAL": ("termination_conditions", "expiry_date"),
+            "TERMINATION": ("termination_conditions", "notice_terms"),
+        }.get(node_type, ())
+        matched: list[dict[str, Any]] = []
+        for fact in extracted_facts:
+            if not isinstance(fact, dict):
+                continue
+            key = str(fact.get("elementKey") or "")
+            raw = str(fact.get("rawValue") or "")
+            if key not in node_terms and not raw:
+                continue
+            if key not in node_terms and not any(term and term in lookup for term in raw.split()[:8]):
+                continue
+            matched.append({
+                "elementKey": key,
+                "rawValue": raw[:800],
+                "status": fact.get("status"),
+                "confidence": fact.get("confidence"),
+                "snapshotId": (state.get("extraction_snapshot") or {}).get("id"),
+                "role": "辅助事实，不替代合同原文依据",
+            })
+        return matched[:4]
 
     items: list[dict[str, Any]] = []
     item_idx = 0
@@ -84,6 +116,7 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
             "responsibleParty": str(node.get("responsibleParty") or "UNKNOWN"),
             "evidenceExpected": item_hints,
             "ambiguity": "",
+            "supportingFacts": _supporting_facts(text),
         })
 
     if node_type == "PAYMENT":
@@ -119,4 +152,19 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
         "current_node": "decompose_requirements",
         "domain_tasks": items,
         "fulfillment_requirements": items,
+        "observations": [{
+            "callId": f"fulfillment-fact-context-{state.get('run_id', 0)}",
+            "planStepId": "attach_extracted_contract_facts",
+            "toolName": "loadContractExtractionFacts",
+            "arguments": {
+                "timelineNodeId": timeline_node_id,
+                "snapshotId": (state.get("extraction_snapshot") or {}).get("id"),
+            },
+            "output": {
+                "supportingFactCount": sum(len(item.get("supportingFacts") or []) for item in items),
+                "requirementCount": len(items),
+                "citationPolicy": "合同条款引用仍是必需项依据；提取事实仅作辅助上下文",
+            },
+            "status": "DONE",
+        }],
     }

@@ -58,5 +58,40 @@ class LlmServiceStructuredResponseTest(unittest.TestCase):
         self.assertEqual("示例合同", result["fields"]["contractTitle"]["value"])
 
 
+    def test_structured_completion_recovers_reasoning_only_json(self):
+        service = LLMService()
+        service._call_llm_with_retry = lambda *args, **kwargs: response(
+            reasoning_content=(
+                "Reasoning omitted. Final JSON: "
+                '{"elements":[{"elementKey":"contract_title","rawValue":"example contract"}]}'
+            )
+        )
+
+        result = service._structured_completion(
+            "Return contract elements as JSON.",
+            {"elementPack": {"elementKeys": ["contract_title"]}},
+        )
+
+        self.assertEqual("example contract", result["elements"][0]["rawValue"])
+
+    def test_structured_completion_disables_deepseek_thinking_for_json_tasks(self):
+        service = LLMService()
+        calls = []
+
+        def fake_call(fn, *args, **kwargs):
+            calls.append(fn.__defaults__[0])
+            return response('{"elements":[]}')
+
+        service._call_llm_with_retry = fake_call
+        service._structured_completion(
+            "Return JSON.",
+            {"elementPack": {"elementKeys": []}},
+            required_key="elements",
+        )
+
+        if service._uses_deepseek_reasoning_model():
+            self.assertEqual({"thinking": {"type": "disabled"}}, calls[0]["extra_body"])
+
+
 if __name__ == "__main__":
     unittest.main()

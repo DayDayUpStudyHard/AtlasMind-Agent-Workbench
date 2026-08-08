@@ -8,6 +8,7 @@ import logging
 import re
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
+from difflib import SequenceMatcher
 from typing import Any
 
 from app.config import settings
@@ -17,8 +18,8 @@ from .persistence import _conn
 
 logger = logging.getLogger(__name__)
 
-SCHEMA_VERSION = "contract-intake-v1"
-PROMPT_VERSION = "contract-intake-v1"
+SCHEMA_VERSION = "contract-intake-v2"
+PROMPT_VERSION = "contract-intake-v2"
 FIELD_KEYS = (
     "contractTitle",
     "contractType",
@@ -36,6 +37,16 @@ _REQUIRED_FIELDS = {"contractTitle", "contractType", "partyA", "partyB"}
 _MAX_EXCERPT_CHARS = 48_000
 _AMOUNT_LABEL_PATTERN = "(?:\u5408\u540c(?:\u603b)?\u91d1\u989d|\u5408\u540c\u4ef7\u6b3e|\u542b\u7a0e\u603b\u4ef7|\u603b\u4ef7)"
 _AMOUNT_CURRENCY_PATTERN = "(?:\u4eba\u6c11\u5e01|RMB|CNY|\uffe5)"
+_AMOUNT_VALUE_PATTERN = re.compile(
+    rf"(?:(?P<currency>{_AMOUNT_CURRENCY_PATTERN})\s*)?"
+    r"(?P<number>[0-9][0-9,，]*(?:\.\d+)?)\s*"
+    rf"(?P<unit>万|亿)?\s*(?P<yuan>元)?\s*(?P<suffix_currency>{_AMOUNT_CURRENCY_PATTERN})?",
+    re.IGNORECASE,
+)
+_TITLE_LABEL_PATTERN = re.compile(
+    r"^(?:合同)?(?:编号|编码|号|签订地点|签订日期|签订时间|填写说明|目录|附件)\s*[:：]?",
+    re.IGNORECASE,
+)
 
 
 
@@ -124,20 +135,198 @@ def _normalize_amount(value: Any) -> float | None:
     return float(amount)
 
 
+def _is_plausible_title(value: Any) -> bool:
+    title = re.sub(r"\s+", " ", str(value or "")).strip(" ：:;；")
+    if len(title) < 4 or len(title) > 256:
+        return False
+    if _TITLE_LABEL_PATTERN.match(title):
+        return False
+    return any(word in title for word in ("合同", "协议", "确认书"))
+
+
+def _amount_values_in_quote(quote: str) -> set[float]:
+    values: set[float] = set()
+    for match in _AMOUNT_VALUE_PATTERN.finditer(str(quote or "")):
+        if not (
+            match.group("currency") or match.group("suffix_currency")
+            or match.group("unit") or match.group("yuan")
+        ):
+            continue
+        suffix = str(quote or "")[match.end():match.end() + 2]
+        if suffix.lstrip().startswith("%"):
+            continue
+        raw = match.group("number") + (match.group("unit") or "")
+        normalized = _normalize_amount(raw)
+        if normalized is not None:
+            values.add(normalized)
+    return values
+
+
+def _extract_amount_candidates(text: str) -> list[dict[str, Any]]:
+    """Recall amount candidates while classifying percentages away from totals."""
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[int, str]] = set()
+
+    def append_candidate(
+        *, start: int, end: int, raw_value: str, normalized_value: float | None,
+        semantic_type: str, confidence: float, reason: str,
+    ) -> None:
+        key = (start, semantic_type)
+        if key in seen:
+            return
+        seen.add(key)
+        quote_start = max(0, start - 56)
+        quote_end = min(len(text), end + 56)
+        quote = text[quote_start:quote_end].strip()
+        actual_start = text.find(quote, quote_start, quote_end + 1) if quote else -1
+        citation = None if actual_start < 0 else {
+            "quote": quote,
+            "startOffset": actual_start,
+            "endOffset": actual_start + len(quote),
+        }
+        candidates.append({
+            "rawValue": raw_value,
+            "normalizedValue": normalized_value,
+            "semanticType": semantic_type,
+            "source": "RULE",
+            "confidence": confidence,
+            "citation": citation,
+            "selected": False,
+            "reason": reason,
+        })
+
+    for label_match in re.finditer(_AMOUNT_LABEL_PATTERN, text, flags=re.IGNORECASE):
+        tail_limit = min(len(text), label_match.end() + 160)
+        tail = text[label_match.end():tail_limit]
+        boundary_positions = [
+            index for marker in ("。", "；", ";", "\n")
+            if (index := tail.find(marker)) >= 0
+        ]
+        if boundary_positions:
+            tail = tail[:min(boundary_positions)]
+
+        for amount_match in _AMOUNT_VALUE_PATTERN.finditer(tail):
+            suffix = tail[amount_match.end():amount_match.end() + 3]
+            prefix = tail[:amount_match.start()]
+            has_percent = suffix.lstrip().startswith("%")
+            if has_percent:
+                start = label_match.end() + amount_match.start()
+                append_candidate(
+                    start=start,
+                    end=start + len(amount_match.group("number")) + len(suffix),
+                    raw_value=amount_match.group("number"),
+                    normalized_value=None,
+                    semantic_type="PERCENTAGE",
+                    confidence=0.98,
+                    reason="金额后紧跟百分号，不是合同总金额",
+                )
+                continue
+
+            has_money_marker = bool(
+                amount_match.group("currency")
+                or amount_match.group("suffix_currency")
+                or amount_match.group("unit")
+                or amount_match.group("yuan")
+            )
+            if not has_money_marker:
+                continue
+            raw_value = amount_match.group("number") + (amount_match.group("unit") or "")
+            normalized = _normalize_amount(raw_value)
+            if normalized is None:
+                continue
+            explicit_relation = bool(re.search(r"(?:为|是|[:：])\s*", prefix))
+            confidence = 0.94 if explicit_relation else 0.86
+            start = label_match.end() + amount_match.start()
+            append_candidate(
+                start=start,
+                end=start + len(amount_match.group(0)),
+                raw_value=amount_match.group(0).strip(),
+                normalized_value=normalized,
+                semantic_type="CONTRACT_TOTAL",
+                confidence=confidence,
+                reason="合同总价标签后的货币金额",
+            )
+            break
+
+    for match in re.finditer(r"(?<!\d)(\d+(?:\.\d+)?)\s*%", text):
+        append_candidate(
+            start=match.start(), end=match.end(), raw_value=match.group(0),
+            normalized_value=None, semantic_type="PERCENTAGE", confidence=0.98,
+            reason="百分比不是货币金额",
+        )
+
+    for match in _AMOUNT_VALUE_PATTERN.finditer(text):
+        suffix = text[match.end():match.end() + 2]
+        if suffix.lstrip().startswith("%"):
+            continue
+        if not (
+            match.group("currency") or match.group("suffix_currency")
+            or match.group("unit") or match.group("yuan")
+        ):
+            continue
+        raw_value = match.group("number") + (match.group("unit") or "")
+        normalized = _normalize_amount(raw_value)
+        if normalized is None:
+            continue
+        clause_start = max(
+            [text.rfind(marker, max(0, match.start() - 120), match.start()) for marker in ("。", "；", ";", "\n")]
+            + [-1]
+        ) + 1
+        clause_ends = [
+            index for marker in ("。", "；", ";", "\n")
+            if (index := text.find(marker, match.end(), min(len(text), match.end() + 120))) >= 0
+        ]
+        clause_end = min(clause_ends) if clause_ends else min(len(text), match.end() + 120)
+        nearby = text[clause_start:clause_end]
+        prefix = text[max(clause_start, match.start() - 40):match.start()]
+        if re.search(r"(?:合同(?:总)?金额|合同价款|含税总价|总价)\s*(?:为|是|[:：])\s*$", prefix):
+            semantic_type, confidence, reason = "CONTRACT_TOTAL", 0.94, "合同总额标签直接修饰该金额"
+        elif re.search(r"履约保函|保证金|质保金|担保", nearby):
+            semantic_type, confidence, reason = "GUARANTEE", 0.9, "保证金或担保金额"
+        elif re.search(r"违约金|赔偿金|罚款|扣罚", nearby):
+            semantic_type, confidence, reason = "PENALTY", 0.9, "违约、赔偿或罚款金额"
+        elif re.search(r"单价|每(?:人|件|套|台|吨|公斤|千克|小时|工日)|/[a-zA-Z\u4e00-\u9fff]", nearby):
+            semantic_type, confidence, reason = "UNIT_PRICE", 0.88, "单价或计量价格"
+        elif re.search(r"预付款|进度款|阶段款|尾款|付款|支付|结算", nearby):
+            semantic_type, confidence, reason = "PAYMENT_INSTALLMENT", 0.86, "分期付款或结算金额"
+        elif re.search(_AMOUNT_LABEL_PATTERN, nearby, flags=re.IGNORECASE):
+            semantic_type, confidence, reason = "CONTRACT_TOTAL", 0.86, "合同总额标签附近的货币金额"
+        else:
+            semantic_type, confidence, reason = "OTHER", 0.65, "未能确定业务类型的货币金额"
+        append_candidate(
+            start=match.start(), end=match.end(), raw_value=match.group(0).strip(),
+            normalized_value=normalized, semantic_type=semantic_type,
+            confidence=confidence, reason=reason,
+        )
+
+    totals = [item for item in candidates if item["semanticType"] == "CONTRACT_TOTAL"]
+    if totals:
+        selected = max(totals, key=lambda item: float(item.get("confidence") or 0.0))
+        selected["selected"] = True
+
+    compacted: list[dict[str, Any]] = []
+    for semantic_type in (
+        "CONTRACT_TOTAL", "GUARANTEE", "PAYMENT_INSTALLMENT",
+        "PENALTY", "UNIT_PRICE", "PERCENTAGE", "OTHER",
+    ):
+        typed = [item for item in candidates if item["semanticType"] == semantic_type]
+        typed.sort(
+            key=lambda item: (bool(item.get("selected")), float(item.get("confidence") or 0.0)),
+            reverse=True,
+        )
+        compacted.extend(typed[:4])
+    return compacted[:32]
+
+
 
 def _extract_amount_hint(text: str) -> tuple[str | None, dict | None]:
-    amount_match = re.search(
-        f"{_AMOUNT_LABEL_PATTERN}\\s*(?:\u4e3a|\u662f)?\\s*[:\uff1a]?\\s*"
-        f"(?:(?P<prefix_currency>{_AMOUNT_CURRENCY_PATTERN})\\s*)?"
-        f"(?P<number>[0-9][0-9,\uff0c]*(?:\\.\\d+)?)\\s*(?P<unit>\u4e07|\u4ebf)?\\s*"
-        f"(?:(?P<suffix_currency>{_AMOUNT_CURRENCY_PATTERN})\\s*)?(?:\u5143)?",
-        text,
-        flags=re.IGNORECASE,
+    selected = next(
+        (item for item in _extract_amount_candidates(text) if item.get("selected")),
+        None,
     )
-    if not amount_match:
+    if not selected:
         return None, None
-    raw_amount = amount_match.group("number") + (amount_match.group("unit") or "")
-    return raw_amount, _citation(text, amount_match.group(0).strip())
+    return str(selected["rawValue"]), selected.get("citation")
 
 def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
     """Extract conservative candidates without calling the model."""
@@ -149,9 +338,34 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
     raw_lines = [line.strip() for line in text.splitlines()[:30]]
     merged_lines: list[str] = []
     structured_line_pattern = re.compile(
-        r"(?:甲方|乙方|合同(?:总)?金额|合同价款|生效日期|合同生效日|到期日期|合同到期日|"
+        r"(?:甲方|乙方|合同(?:编号|编码|(?:总)?金额)|合同价款|生效日期|合同生效日|到期日期|合同到期日|"
         r"签订日期|签订时间|签署日期|签署时间|所属部门|业务部门|需求部门|采购部门|经办部门)\s*[:：]"
     )
+
+    # Covers commonly split PDF titles such as company / project / "勘察设计合同".
+    cover_candidates: list[tuple[str, str, int]] = []
+    for index, line in enumerate(raw_lines):
+        if not _is_plausible_title(line) or structured_line_pattern.search(line):
+            continue
+        parts = [line]
+        if len(line) <= 40 and re.search(r"(?:合同|协议|确认书)\s*$", line):
+            preceding = raw_lines[max(0, index - 2):index]
+            if preceding and all(
+                part
+                and len(part) <= 100
+                and not structured_line_pattern.search(part)
+                and not _TITLE_LABEL_PATTERN.match(part)
+                and not re.fullmatch(r"[\W_A-Z0-9-]+", part)
+                for part in preceding
+            ):
+                parts = preceding + parts
+        value = " ".join(parts)
+        if _is_plausible_title(value):
+            quote = "\n".join(parts)
+            cover_candidates.append((value, quote, len(value)))
+    if cover_candidates:
+        title, title_quote, _ = max(cover_candidates, key=lambda item: item[2])
+
     i = 0
     while i < len(raw_lines):
         line = raw_lines[i]
@@ -175,8 +389,9 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         if 2 <= len(line) <= 200
         and any(word in line for word in ("合同", "协议", "确认书"))
         and not structured_line_pattern.search(line)
+        and _is_plausible_title(line)
     ]
-    if candidates:
+    if not title and candidates:
         candidates.sort(key=lambda x: x[1], reverse=True)
         title = candidates[0][0]
         title_quote = title
@@ -201,6 +416,21 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         hints["partyA"] = _field(party_a[0], 0.78, _citation(text, party_a[1]))
     if party_b:
         hints["partyB"] = _field(party_b[0], 0.78, _citation(text, party_b[1]))
+
+    title_field = hints["contractTitle"]
+    title_value = str(title_field.get("value") or "")
+    title_prefix, separator, title_rest = title_value.partition(" ")
+    legal_parties = [value[0] for value in (party_a, party_b) if value]
+    if separator and len(title_prefix) >= 5 and legal_parties:
+        replacement = max(
+            legal_parties,
+            key=lambda value: SequenceMatcher(None, title_prefix, value).ratio(),
+        )
+        similarity = SequenceMatcher(None, title_prefix, replacement).ratio()
+        if similarity >= 0.82 and title_prefix != replacement:
+            title_field["value"] = f"{replacement} {title_rest}"
+            title_field["confidence"] = max(float(title_field.get("confidence") or 0), 0.86)
+            title_field["source"] = "RULE_NORMALIZED"
 
     if "保密协议" in text or "非披露协议" in text:
         contract_type = "NDA"
@@ -255,7 +485,7 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
 
     if not hints["contractTitle"]["value"]:
         for line in (line.strip() for line in text.splitlines()[:20]):
-            if 2 <= len(line) <= 120 and any(word in line for word in ("合同", "协议", "确认书")):
+            if 2 <= len(line) <= 120 and _is_plausible_title(line):
                 hints["contractTitle"] = _field(line, 0.82, _citation(text, line))
                 break
 
@@ -275,10 +505,19 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         type_quote = next(word for word in ("服务采购", "技术服务", "咨询服务", "运维服务") if word in text)
         hints["contractType"] = _field("SERVICE_PROCUREMENT", 0.8, _citation(text, type_quote))
 
-    raw_amount, amount_citation = _extract_amount_hint(text)
-    if raw_amount is not None:
-        hints["amount"] = _field(_normalize_amount(raw_amount), 0.84, amount_citation)
-        hints["currency"] = _field("CNY", 0.88, amount_citation)
+    amount_candidates = _extract_amount_candidates(text)
+    selected_amount = next((item for item in amount_candidates if item.get("selected")), None)
+    if selected_amount is not None:
+        hints["amount"] = _field(
+            selected_amount["normalizedValue"],
+            selected_amount["confidence"],
+            selected_amount.get("citation"),
+        )
+        hints["amount"].update({
+            "semanticType": "CONTRACT_TOTAL",
+            "candidates": amount_candidates,
+        })
+        hints["currency"] = _field("CNY", 0.88, selected_amount.get("citation"))
 
     for key, labels in (
         ("signedDate", ("签订日期", "签订时间", "签署日期", "签署时间", "签约日期", "签约时间")),
@@ -336,27 +575,48 @@ def _normalize_field(key: str, raw: Any, text: str, fallback: dict) -> dict:
     if value is not None and not citations:
         confidence = min(confidence, 0.55)
 
-    fallback_value = fallback.get("value")
-    fallback_confidence = float(fallback.get("confidence") or 0.0)
-    fallback_citations = fallback.get("citations") or []
-    if value is None and fallback_value is not None:
-        return dict(fallback)
+    validation_errors: list[str] = []
+    if key == "contractTitle" and value is not None and not _is_plausible_title(value):
+        validation_errors.append("标题候选是字段标签、通用页眉或不完整标题")
+    if key == "amount" and value is not None and citations:
+        cited_values = {
+            amount
+            for citation in citations
+            for amount in _amount_values_in_quote(citation.get("quote", ""))
+        }
+        if cited_values and float(value) not in cited_values:
+            validation_errors.append("模型金额与引用中的货币金额不一致")
 
-    # Exact label/amount/date matches are deterministic evidence. Prefer them
-    # when a model answer conflicts or cannot provide a verifiable quote.
-    if fallback_value is not None and fallback_citations and fallback_confidence >= 0.78:
-        comparable_value = str(value).strip().lower() if value is not None else ""
-        comparable_fallback = str(fallback_value).strip().lower()
-        if comparable_value != comparable_fallback or not citations:
-            preferred = dict(fallback)
-            preferred["source"] = "RULE_VERIFIED"
-            return preferred
+    fallback_value = fallback.get("value")
+    fallback_citations = fallback.get("citations") or []
+    model_usable = value is not None and bool(citations) and not validation_errors
+    if model_usable:
+        return {
+            "value": value,
+            "confidence": round(confidence, 2),
+            "citations": citations,
+            "source": "LLM",
+            "validationErrors": [],
+            "decisionStatus": "PROPOSED",
+        }
+
+    fallback_usable = fallback_value is not None and bool(fallback_citations)
+    if key == "contractTitle" and fallback_usable:
+        fallback_usable = _is_plausible_title(fallback_value)
+    if fallback_usable:
+        preferred = dict(fallback)
+        preferred["source"] = "RULE_FALLBACK"
+        preferred["validationErrors"] = validation_errors
+        preferred["decisionStatus"] = "PROPOSED"
+        return preferred
 
     return {
         "value": value,
         "confidence": round(confidence, 2),
         "citations": citations,
         "source": "LLM",
+        "validationErrors": validation_errors,
+        "decisionStatus": "NEEDS_REVIEW" if value is not None else "NOT_FOUND",
     }
 
 
@@ -390,6 +650,56 @@ def validate_extraction(raw: dict, text: str, hints: dict[str, dict] | None = No
         "needsConfirmation": list(dict.fromkeys(needs_confirmation)),
         "warnings": warnings,
     }
+
+
+def _enrich_intake_citations(cur: Any, case_id: int | None, validated: dict) -> dict:
+    if not case_id:
+        return validated
+    cur.execute(
+        """SELECT id, content_hash AS contentHash, parse_provider AS parseProvider
+           FROM contract_document
+           WHERE case_id=%s AND document_type='MAIN' AND COALESCE(deleted,0)=0
+           ORDER BY version DESC, id DESC LIMIT 1""",
+        (case_id,),
+    )
+    document = cur.fetchone() or {}
+    document_id = document.get("id")
+    clauses: list[dict[str, Any]] = []
+    if document_id:
+        cur.execute(
+            """SELECT id AS clauseId, clause_number AS clauseNumber,
+                      page_number AS pageNumber, content
+               FROM contract_clause
+               WHERE case_id=%s AND document_id=%s ORDER BY id""",
+            (case_id, document_id),
+        )
+        clauses = list(cur.fetchall())
+
+    for field in (validated.get("fields") or {}).values():
+        if not isinstance(field, dict):
+            continue
+        for citation in field.get("citations") or []:
+            if not isinstance(citation, dict):
+                continue
+            quote = str(citation.get("quote") or "").strip()
+            citation.update({
+                "documentId": document_id,
+                "contentHash": document.get("contentHash"),
+                "parserVersion": document.get("parseProvider"),
+            })
+            if not quote:
+                continue
+            clause = next(
+                (item for item in clauses if quote in str(item.get("content") or "")),
+                None,
+            )
+            if clause:
+                citation.update({
+                    "clauseId": clause.get("clauseId"),
+                    "clauseNumber": clause.get("clauseNumber"),
+                    "pageNumber": clause.get("pageNumber"),
+                })
+    return validated
 
 
 def _candidate(validated: dict, key: str, min_confidence: float = 0.5) -> Any:
@@ -450,6 +760,12 @@ def _case_backfill_patch(validated: dict) -> dict[str, Any]:
     return {key: value for key, value in patch.items() if value not in (None, "")}
 
 
+def _preconfirmation_case_updates(validated: dict) -> dict[str, Any]:
+    """Return the only case mutation allowed before a human confirms intake facts."""
+    del validated
+    return {"status": "INTAKE_CONFIRMING"}
+
+
 def _blank(value: Any) -> bool:
     return value is None or str(value).strip() == ""
 
@@ -491,13 +807,12 @@ def _ensure_case_party(cur, case_id: int, role: str, name: str | None) -> None:
 
 
 def _backfill_case_from_validated(cur, intake: dict, validated: dict) -> dict:
+    """Advance file-intake workflow without promoting unconfirmed facts."""
     case_id = intake.get("case_id")
     if not case_id:
         return {}
-    patch = _case_backfill_patch(validated)
     cur.execute(
-        """SELECT id, title, contract_type, our_entity, counterparty, amount,
-                  currency, signed_date, effective_date, expiry_date, department, status
+        """SELECT id, status
            FROM contract_case
            WHERE id=%s AND deleted=0
            FOR UPDATE""",
@@ -508,14 +823,9 @@ def _backfill_case_from_validated(cur, intake: dict, validated: dict) -> dict:
         return {}
 
     updates: dict[str, Any] = {}
-    file_name = str(intake.get("file_name") or "")
-    for column, value in patch.items():
-        if _should_backfill(column, current, file_name):
-            updates[column] = value
-
     status = str(current.get("status") or "").upper()
     if status in {"DRAFT", "INTAKE_PARSING", "INTAKE_CONFIRMING"}:
-        updates["status"] = "INTAKE_CONFIRMING"
+        updates.update(_preconfirmation_case_updates(validated))
 
     if updates:
         assignments = ", ".join(f"{column}=%s" for column in updates)
@@ -523,9 +833,6 @@ def _backfill_case_from_validated(cur, intake: dict, validated: dict) -> dict:
             f"UPDATE contract_case SET {assignments} WHERE id=%s AND deleted=0",
             list(updates.values()) + [case_id],
         )
-
-    _ensure_case_party(cur, int(case_id), "OUR_ENTITY", updates.get("our_entity") or patch.get("our_entity"))
-    _ensure_case_party(cur, int(case_id), "COUNTERPARTY", updates.get("counterparty") or patch.get("counterparty"))
     return updates
 
 
@@ -585,29 +892,6 @@ def extract_intake(intake_id: int) -> dict:
 
         hints = deterministic_hints(text, str(intake.get("file_name") or ""))
 
-        # ── Merge preprocessor-identified parties as high-confidence hints ──
-        if intake.get("case_id"):
-            try:
-                with _conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """SELECT party_name, party_role
-                               FROM contract_party
-                               WHERE case_id=%s""",
-                            (intake["case_id"],),
-                        )
-                        for row in cur.fetchall():
-                            name = str(row.get("party_name") or "").strip()
-                            role = str(row.get("party_role") or "").upper()
-                            if not name:
-                                continue
-                            # Preprocessor parties have higher confidence
-                            if role == "OUR_ENTITY":
-                                hints["partyA"] = _field(name, 0.95, _citation(text, name))
-                            elif role == "COUNTERPARTY":
-                                hints["partyB"] = _field(name, 0.95, _citation(text, name))
-            except Exception:
-                pass  # DB not available, use regex hints only
         raw: dict = {}
         llm_error = None
         try:
@@ -630,6 +914,7 @@ def extract_intake(intake_id: int) -> dict:
 
         with _conn() as conn:
             with conn.cursor() as cur:
+                validated = _enrich_intake_citations(cur, intake.get("case_id"), validated)
                 cur.execute(
                     """UPDATE contract_intake
                        SET status='NEEDS_CONFIRMATION', content_text=%s, content_hash=%s,

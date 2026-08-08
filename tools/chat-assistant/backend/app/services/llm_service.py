@@ -652,9 +652,10 @@ class LLMService:
         return self._structured_completion(template, payload, temperature=temperature)
 
     def analyze_contract_risk_domain(self, case: dict, domain: dict,
-                                     evidence: list[dict],
-                                     rule_findings: list[dict],
-                                     run_id: int = 0) -> dict:
+                                      evidence: list[dict],
+                                      rule_findings: list[dict],
+                                      run_id: int = 0,
+                                      extracted_facts: list[dict] | None = None) -> dict:
         """Generate detailed, auditable findings for one bounded risk domain."""
         template, temperature = self._prompt("contract_risk_domain_analysis", run_id)
         payload = {
@@ -662,6 +663,7 @@ class LLMService:
             "domain": domain,
             "availableEvidence": evidence[:18],
             "deterministicRuleFindings": rule_findings[:10],
+            "extractedFacts": (extracted_facts or [])[:40],
         }
         response = self._call_llm_with_retry(
             lambda: self.analysis_client.chat.completions.create(
@@ -804,6 +806,12 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 
 规则：quote 必须逐字存在于输入合同片段；没有明确事实时 value 为 null、citations 为空；
 金额统一换算为基础货币单位；日期无法确定到具体日时返回 null；不得把甲方默认视为我方。
+合同标题必须是合同或协议的完整名称，不得返回“合同编号”“填写说明”“目录”“附件”等字段标签。
+partyA/partyB 只表示合同原文中的甲方/乙方（或发包人/承包人、委托方/受托方）法律角色；
+不得根据当前用户、我方主体或相对方身份交换甲乙方。
+amount 只允许返回整份合同的总价/总金额。不得把“合同总价的X%”、履约保函、保证金、
+预付款、阶段款、违约金、单价或税率作为合同总金额。若存在多个金额，必须引用明确写明
+“合同总价/合同金额/合同价款”的完整上下文；大小写金额冲突时返回 null 并交由人工确认。
 """.strip()
         system_prompt += "\n如果原文明确写出所属部门、业务部门、需求部门、采购部门或经办部门，请在 fields.department 中返回；没有明确原文时返回 null。"
         payload = {
@@ -846,6 +854,197 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 
         raise ValueError(
             "Contract metadata response was not valid JSON: " + "; ".join(errors[-2:])
+        )
+
+    def extract_contract_elements(
+        self,
+        case: dict,
+        element_pack: dict,
+        evidence: list[dict],
+        run_id: int = 0,
+    ) -> dict:
+        """Extract a bounded group of contract facts from cited clauses.
+
+        This method deliberately receives retrieved clause evidence instead of
+        the whole document. The graph owns retrieval and fan-in; the model only
+        normalizes facts that can be tied back to a continuous source quote.
+        """
+        system_prompt = """
+你是合同事实提取 Agent 的一个领域节点。只从输入的合同条款证据中提取事实，
+不要做风险结论，不要补写原文没有的日期、金额、主体、责任或履约义务。
+每个结果必须引用输入证据中的连续原文；找不到可靠原文时不要输出该结果。
+返回且只返回一个 JSON 对象：
+{
+  "elements": [
+    {
+      "elementKey": "定义中给出的 key",
+      "category": "IDENTITY|PARTIES|FINANCIAL|DATES|OBLIGATIONS|RISK_TERMS",
+      "valueType": "TEXT|ENUM|PARTY|MONEY|DATE|LIST|STRUCTURED",
+      "rawValue": "原文事实或简短原文摘录",
+      "normalizedValue": {},
+      "confidence": 0.0,
+      "applicable": true,
+      "status": "EXTRACTED|NEEDS_REVIEW|NOT_FOUND",
+      "citations": [{"sourceId":"CONTRACT_CLAUSE:123", "quote":"输入中连续存在的原文", "clauseId":123}]
+    }
+  ]
+}
+
+规则：
+1. elementKey 只能使用 elementPack.allowedElementKeys 中的值。
+2. quote 必须逐字出现在对应 evidence 的 clauseText/content/snippet 中；不能改写 quote。
+3. normalizedValue 只做格式化，例如把金额拆成 amount/currency，把日期转成 YYYY-MM-DD；无法确定就保留 null。
+4. 相对期限、条件结束、验收要求和应提交材料必须保留触发条件，不要只返回一个数字。
+5. 同一要素存在多个合理版本时全部返回，并用 occurrenceNo 区分；不要猜选一个。
+6. 没有足够证据时返回空 elements，不要用“通常”“一般应当”补齐。
+7. 所有说明使用简体中文，输出不能包含 Markdown。
+""".strip()
+        compact_evidence = []
+        for item in evidence[:7]:
+            full_clause_text = str(item.get("clauseText") or item.get("content") or "")
+            clause_window = self._contract_evidence_window(
+                full_clause_text,
+                element_pack.get("queries") or [],
+                limit=3200,
+            )
+            compact_evidence.append({
+                "sourceId": item.get("sourceId") or item.get("clauseId"),
+                "clauseId": item.get("clauseId"),
+                "clauseNumber": item.get("clauseNumber"),
+                "title": item.get("title"),
+                "pageNumber": item.get("pageNumber") or item.get("page"),
+                "clauseText": clause_window,
+                "snippet": str(item.get("snippet") or clause_window)[:1200],
+            })
+        payload = {
+            "case": {
+                "caseKey": case.get("caseKey"),
+                "title": case.get("title"),
+                "contractType": case.get("contractType"),
+                "ourSide": case.get("ourSide"),
+            },
+            "elementPack": element_pack,
+            "allowedElementKeys": element_pack.get("elementKeys") or [],
+            "evidence": compact_evidence,
+        }
+        try:
+            template, temperature = self._prompt("contract_element_extraction", run_id)
+        except Exception:
+            # The extraction graph must remain deployable before the optional
+            # DB prompt seed is applied. The grounded schema above is the safe
+            # built-in fallback.
+            template, temperature = system_prompt, 0.0
+        if not template:
+            template, temperature = system_prompt, 0.0
+        return self._structured_completion(
+            template,
+            payload,
+            temperature=0.0 if temperature is None else min(float(temperature), 0.1),
+            timeout_seconds=max(10.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
+            required_key="elements",
+            max_tokens=4800,
+        )
+
+    def extract_contract_profile(
+        self,
+        case: dict,
+        evidence: list[dict],
+        base_elements: list[dict],
+        run_id: int = 0,
+    ) -> dict:
+        """Build a contract-family-aware profile from shared clause evidence.
+
+        The profile is deliberately different from ``contractElements``. The
+        latter is a flat, citable fact list used by downstream agents; this
+        result is the readable business view (for example, engineering scope,
+        design standards and payment milestones). The model may discover
+        groups and fields, but every contract-derived value must still cite a
+        continuous quote from retrieved evidence.
+        """
+        system_prompt = """
+你是企业合同作业系统中的“合同画像整理器”。你的任务是从输入的合同证据中建立一份可供业务人员阅读和后续 Agent 复用的合同画像。
+
+只输出一个 JSON 对象，结构必须是：
+{
+  "profile": {
+    "title": "合同画像",
+    "contractType": "模型判断的合同类型或 OTHER",
+    "typeRationale": "仅基于合同原文的一句话判断依据",
+    "baseFields": [],
+    "groups": [
+      {"groupKey":"稳定的英文业务键", "label":"中文业务分组名称", "reason":"为什么该分组适用于本合同",
+       "fields":[
+         {"key":"稳定的英文字段键", "label":"中文字段名称", "value":"结构化值或 null",
+          "valueType":"TEXT|MONEY|DATE|PARTY|LIST|STRUCTURED", "importance":"CORE|SUPPORTING",
+          "confidence":0.0, "status":"EXTRACTED|NEEDS_REVIEW|NOT_FOUND",
+          "citations":[{"sourceId":"CONTRACT_CLAUSE:123","quote":"逐字连续原文","clauseId":123}]}
+       ]}
+    ]
+  }
+}
+
+规则：
+1. baseFields 必须返回空数组。合同标题、类型、甲乙方、我方角色、总金额和基础日期已经人工确认，
+   由系统直接注入画像；本次不得重新提取、改写或纠正这些基础事实。
+2. groups 和 fields 由合同内容决定，不要套用固定行业模板。
+3. 只有合同中真实出现、对履行或决策有用的专属要素才创建字段。例如工程合同可以有工程地点、规模、设计标准、考核指标，信息技术合同可以有系统范围、环境、SLA，但不要因为“通常有”而创建。
+4. 字段 value 要尽可能完整地表达合同事实；列表和付款阶段用结构化 JSON，不要截断成半句话。
+5. citation.quote 必须逐字连续出现在对应 evidence 的 clauseText/content/snippet 中。不能把模型改写后的内容当引用。
+6. 没有明确事实时 value=null、citations=[]、status=NOT_FOUND；不要编造金额、日期、责任方或标准。
+7. “建议关注但合同没有约定”的内容不能放入合同事实字段，应放入 groups 的 reason，不得冒充合同事实。
+8. 不输出 Markdown、解释文字或额外字段。
+""".strip()
+        compact_evidence = []
+        seen: set[str] = set()
+        for item in evidence:
+            source_id = str(item.get("sourceId") or item.get("clauseId") or "")
+            if not source_id or source_id in seen:
+                continue
+            seen.add(source_id)
+            clause_text = str(item.get("clauseText") or item.get("content") or "")
+            compact_evidence.append({
+                "sourceId": source_id,
+                "clauseId": item.get("clauseId"),
+                "clauseNumber": item.get("clauseNumber"),
+                "title": item.get("title"),
+                "pageNumber": item.get("pageNumber") or item.get("page"),
+                "clauseText": clause_text[:2600],
+                "snippet": str(item.get("snippet") or clause_text)[:900],
+            })
+            if len(compact_evidence) >= 24:
+                break
+        payload = {
+            "case": {
+                "caseKey": case.get("caseKey"),
+                "title": case.get("title"),
+                "contractType": case.get("contractType"),
+                "ourSide": case.get("ourSide"),
+                "ourEntity": case.get("ourEntity"),
+                "counterparty": case.get("counterparty"),
+            },
+            "canonicalBaseFacts": {
+                "title": case.get("title"),
+                "contractType": case.get("contractType"),
+                "ourSide": case.get("ourSide"),
+                "ourEntity": case.get("ourEntity"),
+                "counterparty": case.get("counterparty"),
+            },
+            "existingSpecializedFacts": base_elements[:40],
+            "evidence": compact_evidence,
+        }
+        try:
+            template, temperature = self._prompt("contract_profile_extraction", run_id)
+        except Exception:
+            template, temperature = system_prompt, 0.0
+        if not template:
+            template, temperature = system_prompt, 0.0
+        return self._structured_completion(
+            template,
+            payload,
+            temperature=0.0 if temperature is None else min(float(temperature), 0.1),
+            timeout_seconds=max(15.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
+            required_key="profile",
+            max_tokens=7200,
         )
 
     def enrich_contract_timeline(self, candidates: list[dict]) -> dict:
@@ -962,6 +1161,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
             payload,
             temperature=0.0,
             timeout_seconds=max(1.0, float(settings.contract_timeline_llm_timeout_seconds or 20)),
+            required_key="conditions",
         )
 
     def contract_approval(self, case: dict, findings: list[dict],
@@ -993,27 +1193,63 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
 
     def _structured_completion(self, system_prompt: str, payload: dict,
                                temperature: float = 0.1,
-                               timeout_seconds: float | None = None) -> dict:
+                               timeout_seconds: float | None = None,
+                               required_key: str | None = None,
+                               max_tokens: int = 2400) -> dict:
         client = self.analysis_client
         if timeout_seconds is not None:
             client = client.with_options(timeout=max(1.0, float(timeout_seconds)))
 
-        def _call():
-            response = client.chat.completions.create(
-                model=self.model,
-                messages=[
+        errors: list[str] = []
+        for structured in (True, False):
+            kwargs = {
+                "model": self.model,
+                "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
                 ],
-                temperature=temperature,
-                max_tokens=2400,
-                response_format={"type": "json_object"},
-                stream=False,
-            )
-            return response
-        response = self._call_llm_with_retry(_call, max_retries=3, backoff_base=2.0)
-        content = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(content or "")
+                "temperature": temperature,
+                "max_tokens": max(256, int(max_tokens)),
+                "stream": False,
+            }
+            if structured:
+                kwargs["response_format"] = {"type": "json_object"}
+            if self._uses_deepseek_reasoning_model():
+                # DeepSeek v4 models otherwise spend the completion budget on
+                # reasoning_content before returning the required JSON object.
+                # This path is only used for bounded, schema-validated tasks.
+                kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
+            try:
+                response = self._call_llm_with_retry(
+                    lambda kwargs=kwargs: client.chat.completions.create(**kwargs),
+                    max_retries=3,
+                    backoff_base=2.0,
+                )
+                return self._parse_structured_response(response, required_key)
+            except AuthenticationError:
+                raise
+            except APIConnectionError:
+                raise
+            except APIError as exc:
+                errors.append(str(exc)[:240])
+                if not structured:
+                    raise
+            except ValueError as exc:
+                errors.append(str(exc)[:240])
+                if structured:
+                    logger.warning(
+                        "Structured LLM response was not usable; retrying without response_format: %s",
+                        exc,
+                    )
+
+        raise ValueError(
+            "Structured LLM response was not valid JSON: " + "; ".join(errors[-2:])
+        )
+
+    def _uses_deepseek_reasoning_model(self) -> bool:
+        base_url = str(settings.llm_base_url or "").lower()
+        model = str(self.model or "").lower()
+        return "deepseek.com" in base_url and model.startswith("deepseek-")
 
     @staticmethod
     def _repair_json(text: str) -> str:
@@ -1092,6 +1328,31 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
             return "".join(parts)
         return "" if value is None else str(value)
 
+    @staticmethod
+    def _contract_evidence_window(text: str, queries: list | tuple,
+                                  limit: int = 3200) -> str:
+        """Keep a grounded, query-adjacent clause window within model budget."""
+        source = str(text or "").strip()
+        if len(source) <= limit:
+            return source
+
+        query_text = " ".join(str(value) for value in (queries or []))
+        terms = [
+            value.strip()
+            for value in re.split(r"\s+", query_text)
+            if len(value.strip()) >= 2
+        ]
+        positions = [source.find(term) for term in terms if source.find(term) >= 0]
+        if not positions:
+            return source[:limit]
+
+        focus = min(positions)
+        before = max(240, limit // 5)
+        start = max(0, focus - before)
+        end = min(len(source), start + limit)
+        start = max(0, end - limit)
+        return source[start:end]
+
     def _recover_json_from_reasoning(self, reasoning: str, required_key: str | None = None) -> dict | None:
         """Recover a final JSON object when a reasoning model leaves content empty."""
         if not reasoning.strip():
@@ -1113,7 +1374,10 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
         message = response.choices[0].message
         content = self._message_text(getattr(message, "content", None)).strip()
         if content:
-            return self._parse_json_object(content)
+            parsed = self._parse_json_object(content)
+            if required_key is None or required_key in parsed:
+                return parsed
+            raise ValueError(f"LLM structured response is missing required key: {required_key}")
 
         reasoning = self._message_text(getattr(message, "reasoning_content", None))
         recovered = self._recover_json_from_reasoning(reasoning, required_key)
@@ -1122,4 +1386,6 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
                 "LLM returned empty visible content; recovered structured JSON from reasoning output"
             )
             return recovered
-        raise ValueError("LLM returned empty structured content")
+        finish_reason = getattr(response.choices[0], "finish_reason", None)
+        suffix = f" (finish_reason={finish_reason})" if finish_reason else ""
+        raise ValueError("LLM returned empty structured content" + suffix)

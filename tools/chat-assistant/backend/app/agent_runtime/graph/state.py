@@ -54,6 +54,8 @@ class BaseGraphState(TypedDict, total=False):
     task_input: dict[str, Any]
     graph_name: str
     graph_version: str
+    model: str
+    prompt_version: str
     trigger_type: str               # MANUAL | RESUME | SHADOW | SCHEDULED
 
     # ── State management ──
@@ -66,6 +68,24 @@ class BaseGraphState(TypedDict, total=False):
     document_snapshot: list[dict[str, Any]]
     knowledge_snapshot: list[dict[str, Any]]
     document_quality: dict[str, Any]
+
+    # -- Versioned contract extraction facts --
+    extraction_context: dict[str, Any]
+    element_packs: list[dict[str, Any]]
+    element_evidence: dict[str, list[dict[str, Any]]]
+    extracted_elements: list[dict[str, Any]]
+    extraction_validation: dict[str, Any]
+    contract_profile: dict[str, Any]
+    profile_validation: dict[str, Any]
+    extraction_snapshot: dict[str, Any]
+
+    # Fulfillment verification context and human decision channels
+    fulfillment_context: dict[str, Any]
+    fulfillment_requirements: list[dict[str, Any]]
+    evidence_snapshot: list[dict[str, Any]]
+    manual_result: str
+    note: str
+    operator_id: str
 
     # ── Accumulated data ──
     observations: Annotated[list[dict[str, Any]], _add_observations]
@@ -85,6 +105,7 @@ class BaseGraphState(TypedDict, total=False):
     evidence_validation: dict[str, Any]
     coverage: dict[str, Any]         # Domain coverage matrix
     reflection: dict[str, Any]       # Current quality gate result
+    scoring: dict[str, Any]
 
     # ── Budget & errors ──
     budget: dict[str, Any]

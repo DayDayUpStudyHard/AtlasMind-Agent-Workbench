@@ -53,6 +53,12 @@ public interface ContractCaseService {
 
     Map<String, Object> executeAction(Long runId, Long actionId);
 
+    Map<String, Object> reviewContractElement(Long caseId, Long elementId, Map<String, Object> request, String actor);
+
+    Map<String, Object> reviewContractFact(Long caseId, Map<String, Object> request, String actor);
+
+    Map<String, Object> reviewTimelineNode(Long caseId, Long timelineNodeId, Map<String, Object> request, String actor);
+
     Map<String, Object> startTimelineFulfillmentCheck(Long caseId, Long timelineNodeId);
 
     Map<String, Object> confirmFulfillmentCheck(Long checkId, Map<String, Object> request, String actor);

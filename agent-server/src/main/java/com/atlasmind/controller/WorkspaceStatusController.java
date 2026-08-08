@@ -70,11 +70,15 @@ public class WorkspaceStatusController {
                 "SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId,"
                 + " r.run_type AS runType, r.question, r.status, r.progress,"
                 + " r.current_step AS currentStep, r.error_message AS errorMessage,"
-                + " r.create_time AS createTime,"
-                + " COALESCE(c.title, c.case_key, CONCAT('Run #', r.id)) AS projectName,"
+                + " r.create_time AS createTime, r.update_time AS updateTime,"
+                + " r.runtime_engine AS runtimeEngine, r.graph_name AS graphName,"
+                + " r.graph_version AS graphVersion, r.model AS model,"
+                + " r.prompt_version AS promptVersion,"
+                + " COALESCE(c.title, c.case_key, p.name, p.project_key, CONCAT('Run #', r.id)) AS projectName,"
                 + " c.case_key AS caseKey"
                 + " FROM agent_run r"
                 + " LEFT JOIN contract_case c ON r.subject_type='CONTRACT_CASE' AND c.id=r.subject_id AND c.deleted=0"
+                + " LEFT JOIN agent_project p ON r.subject_type='PROJECT' AND p.id=r.project_id"
                 + " ORDER BY r.id DESC LIMIT 20"));
     }
 

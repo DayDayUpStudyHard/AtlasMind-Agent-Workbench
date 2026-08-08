@@ -156,6 +156,25 @@ public class ContractWorkspaceController {
                 findingId, request == null ? Map.of() : request));
     }
 
+    @PatchMapping("/{caseId}/elements/{elementId}/review")
+    @OperationLog(value = "人工审核合同要素", type = "UPDATE")
+    public Result<Map<String, Object>> reviewContractElement(
+            @PathVariable Long caseId,
+            @PathVariable Long elementId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.reviewContractElement(
+                caseId, elementId, request == null ? Map.of() : request, currentActor()));
+    }
+
+    @PatchMapping("/{caseId}/facts/review")
+    @OperationLog(value = "人工审核合同事实", type = "UPDATE")
+    public Result<Map<String, Object>> reviewContractFact(
+            @PathVariable Long caseId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.reviewContractFact(
+                caseId, request == null ? Map.of() : request, currentActor()));
+    }
+
     @PostMapping("/runs/{runId}/actions/{actionId}/approval")
     public Result<Map<String, Object>> approve(
             @PathVariable Long runId, @PathVariable Long actionId,
@@ -169,6 +188,16 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> startTimelineFulfillmentCheck(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
         return Result.ok(contractCaseService.startTimelineFulfillmentCheck(caseId, timelineNodeId));
+    }
+
+    @PatchMapping("/{caseId}/timeline/{timelineNodeId}/review")
+    @OperationLog(value = "人工审核合同时间节点", type = "UPDATE")
+    public Result<Map<String, Object>> reviewTimelineNode(
+            @PathVariable Long caseId,
+            @PathVariable Long timelineNodeId,
+            @RequestBody(required = false) Map<String, Object> request) {
+        return Result.ok(contractCaseService.reviewTimelineNode(
+                caseId, timelineNodeId, request == null ? Map.of() : request, currentActor()));
     }
 
     @PatchMapping("/fulfillment-checks/{checkId}/confirmation")
