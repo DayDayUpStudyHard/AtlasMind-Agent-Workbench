@@ -182,6 +182,7 @@
                   <span>合同要素</span>
                   <h4>可引用的合同事实</h4>
                 </div>
+                <button v-if="c.pendingIntake" type="button" class="quiet-button small" @click="openIntakeConfirmation">确认首次识别结果</button>
               </header>
               <div v-if="extractionSnapshot.id" class="fact-mode-note" :class="{ legacy: !hasDynamicContractProfile }">
                 <strong>{{ extractionSnapshotModeLabel }}</strong>
@@ -267,6 +268,25 @@
                       <strong>{{ detail[1] }}</strong>
                     </li>
                   </ul>
+                  <div class="fact-review-actions">
+                    <button
+                      type="button"
+                      class="quiet-button tiny"
+                      @click="reviewContractElement(selectedContractElement, 'CONFIRMED')"
+                    >确认可用</button>
+                    <button
+                      type="button"
+                      class="quiet-button tiny"
+                      @click="reviewContractElement(selectedContractElement, 'NEEDS_SUPPLEMENT')"
+                    >待补证</button>
+                    <button
+                      type="button"
+                      class="quiet-button tiny"
+                      @click="reviewContractElement(selectedContractElement, 'NOT_APPLICABLE')"
+                    >不适用</button>
+                    <small v-if="selectedContractElement.reviewedAt">审核于 {{ formatDate(selectedContractElement.reviewedAt) }}</small>
+                    <small v-else>可直接在这里确认当前字段是否可作为合同事实使用</small>
+                  </div>
                   <button type="button" class="text-button evidence-tab-switch" @click="switchWorkbenchTab('evidence')">查看完整证据</button>
                 </section>
                 <p v-else class="fact-empty">请选择左侧一个要素查看原文依据。</p>
@@ -372,6 +392,7 @@
                 <span class="workbench-timeline-copy">
                   <strong>{{ node.label || timelineTypeLabel(node.nodeType) }}</strong>
                   <small>{{ timelineAction(node) || '查看合同原文和履约要求。' }}</small>
+                  <em :class="timelineReviewClass(node)">{{ timelineReviewLabel(node) }}</em>
                   <em v-if="timelineNeedsRecognition(node)">文字或日期待核对</em>
                   <em v-else-if="relativeDateResult(node).baseUncertain">基准日期待确认</em>
                 </span>
@@ -850,6 +871,7 @@
             <span>{{ timelineTypeLabel(selectedTimelineNode.nodeType) }}</span>
             <h3 id="timeline-detail-title">{{ selectedTimelineNode.label || timelineTypeLabel(selectedTimelineNode.nodeType) }}</h3>
             <p>{{ timelineAction(selectedTimelineNode) }}</p>
+            <small :class="`detail-review-note ${timelineReviewClass(selectedTimelineNode)}`">事实审核：{{ timelineReviewLabel(selectedTimelineNode) }}</small>
             <small v-if="timelineQualityNote(selectedTimelineNode)" class="detail-quality-note">{{ timelineQualityNote(selectedTimelineNode) }}</small>
           </div>
           <button class="modal-close" aria-label="关闭时间节点详情" @click="closeTimelineDetail">×</button>
@@ -910,8 +932,20 @@
             <p v-if="timelineCondition(selectedTimelineNode)" class="timeline-condition">合同期限：{{ timelineConditionDisplay(selectedTimelineNode) }}</p>
           </section>
 
+          <section v-if="canReviewTimelineNode(selectedTimelineNode)" class="detail-section">
+            <div class="detail-section-title"><span>03</span><h4>确认这个时间节点是否可用</h4></div>
+            <div class="fact-review-actions detail-actions">
+              <button class="quiet-button" @click="reviewTimelineNodeFact(selectedTimelineNode, 'CONFIRMED')">确认节点可用</button>
+              <button class="quiet-button" @click="reviewTimelineNodeFact(selectedTimelineNode, 'NEEDS_SUPPLEMENT')">标记待补证</button>
+              <button class="quiet-button" @click="reviewTimelineNodeFact(selectedTimelineNode, 'NOT_APPLICABLE')">不作为正式依据</button>
+            </div>
+            <p v-if="selectedTimelineNode.reviewedAt" class="review-note-line">
+              {{ selectedTimelineNode.reviewedBy || '人工' }} 于 {{ formatDate(selectedTimelineNode.reviewedAt) }} 审核：{{ selectedTimelineNode.reviewNote || timelineReviewLabel(selectedTimelineNode) }}
+            </p>
+          </section>
+
           <section v-if="timelineConsequence(selectedTimelineNode).explicit || timelineConsequence(selectedTimelineNode).ai" class="detail-section">
-            <div class="detail-section-title"><span>03</span><h4>未完成可能产生什么后果</h4></div>
+            <div class="detail-section-title"><span>04</span><h4>未完成可能产生什么后果</h4></div>
             <div class="consequence-split">
               <div v-if="timelineConsequence(selectedTimelineNode).explicit">
                 <span>合同明确约定</span><p>{{ timelineConsequence(selectedTimelineNode).explicit }}</p>
@@ -923,7 +957,7 @@
           </section>
 
           <section v-if="canFulfillmentCheck(selectedTimelineNode)" ref="evidenceSection" class="detail-section fulfillment-workspace">
-            <div class="detail-section-title"><span>04</span><h4>上传证明并进行履约核验</h4></div>
+            <div class="detail-section-title"><span>05</span><h4>上传证明并进行履约核验</h4></div>
             <div class="evidence-upload-zone">
               <label>
                 <input type="file" accept=".doc,.docx,.pdf,.txt,.md,.markdown" @change="chooseTimelineEvidenceFile" />
@@ -947,6 +981,7 @@
                 <div class="fulfillment-tags">
                   <span>风险 {{ levelLabel(latestFulfillmentCheck(selectedTimelineNode).riskLevel) }}</span>
                   <span>可信度 {{ levelLabel(latestFulfillmentCheck(selectedTimelineNode).confidenceLevel) }}</span>
+                  <span v-if="latestFulfillmentCheck(selectedTimelineNode).manualResult">{{ manualResultLabel(latestFulfillmentCheck(selectedTimelineNode).manualResult) }}</span>
                   <span v-if="latestFulfillmentCheck(selectedTimelineNode).needsRecheck">新证据待重新核验</span>
                 </div>
               </div>
@@ -1289,6 +1324,41 @@ const selectedElementEvidence = computed(() =>
 const intakeFactDecisions = computed(() => Array.isArray(c.value.intakeFactDecisions)
   ? c.value.intakeFactDecisions
   : [])
+const factReviews = computed(() => Array.isArray(c.value.factReviews) ? c.value.factReviews : [])
+const factReviewByIdentity = computed(() => {
+  const map = new Map()
+  for (const review of factReviews.value) {
+    const identity = String(review?.factIdentity || '').trim()
+    if (identity && !map.has(identity)) map.set(identity, review)
+  }
+  return map
+})
+const factReviewByKey = computed(() => {
+  const map = new Map()
+  for (const review of factReviews.value) {
+    const key = normalizeFactReviewKey(review?.factKey)
+    if (key && !map.has(key)) map.set(key, review)
+  }
+  return map
+})
+const rawElementReviewByKey = computed(() => {
+  const map = new Map()
+  for (const element of contractElements.value) {
+    const key = normalizeFactReviewKey(element?.elementKey)
+    if (!key || map.has(key)) continue
+    map.set(key, element)
+  }
+  return map
+})
+const intakeDecisionByKey = computed(() => {
+  const map = new Map()
+  for (const decision of intakeFactDecisions.value) {
+    const key = normalizeFactReviewKey(factDecisionFieldToElementKey(decision?.fieldKey))
+    if (!key || map.has(key)) continue
+    map.set(key, decision)
+  }
+  return map
+})
 const evidenceLinkCount = computed(() => displayContractElements.value.reduce((count, element) =>
   count + (Array.isArray(element?.evidence) ? element.evidence.length : 0), 0))
 const workbenchTabs = computed(() => [
@@ -1371,6 +1441,59 @@ function normalizeProfileCitation(citation, fieldIdentity) {
   }
 }
 
+function normalizeFactReviewKey(value) {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
+
+function factDecisionFieldToElementKey(fieldKey) {
+  return {
+    contractTitle: 'contract_title',
+    contractType: 'contract_type',
+    partyA: 'party_a',
+    partyB: 'party_b',
+    ourSide: 'our_side',
+    amount: 'contract_amount',
+    currency: 'currency',
+    signedDate: 'signed_date',
+    effectiveDate: 'effective_date',
+    expiryDate: 'expiry_date',
+    department: 'department',
+  }[fieldKey] || fieldKey
+}
+
+function decorateProfileReviewState(field) {
+  if (!field) return field
+  const key = normalizeFactReviewKey(field.elementKey || field.key)
+  const identity = String(field.identityKey || '').trim()
+  const rawElement = rawElementReviewByKey.value.get(key)
+  if (rawElement) {
+    field.id = rawElement.id
+    field.reviewStatus = rawElement.reviewStatus
+    field.reviewNote = rawElement.reviewNote
+    field.reviewedBy = rawElement.reviewedBy
+    field.reviewedAt = rawElement.reviewedAt
+    field.manualOverride = rawElement.manualOverride
+    field.candidates = rawElement.candidates
+    if (!field.evidence?.length && Array.isArray(rawElement.evidence)) field.evidence = rawElement.evidence
+  }
+  const decision = intakeDecisionByKey.value.get(key)
+  if (decision) {
+    field.reviewStatus = 'CONFIRMED'
+    field.reviewDecisionType = decision.decisionType
+    field.reviewedAt = decision.decidedAt
+    field.reviewNote = factDecisionTypeLabel(decision.decisionType)
+  }
+  const review = factReviewByIdentity.value.get(identity) || factReviewByKey.value.get(key)
+  if (review) {
+    field.reviewStatus = review.reviewStatus
+    field.reviewNote = review.reviewNote
+    field.reviewedBy = review.reviewedBy
+    field.reviewedAt = review.reviewedAt
+    field.reviewDecisionType = ''
+  }
+  return field
+}
+
 function normalizeProfileField(field, groupMeta = {}) {
   if (!field || typeof field !== 'object') return null
   const key = String(field.key || field.fieldKey || field.name || '').trim()
@@ -1381,7 +1504,7 @@ function normalizeProfileField(field, groupMeta = {}) {
     .filter(Boolean)
   const rawValue = field.value
   const normalizedValue = rawValue && typeof rawValue === 'object' ? rawValue : null
-  return {
+  return decorateProfileReviewState({
     identityKey: `profile-${groupMeta.groupKey || 'base'}-${key}`,
     id: null,
     elementKey: key,
@@ -1399,7 +1522,7 @@ function normalizeProfileField(field, groupMeta = {}) {
     reason: field.reason || groupMeta.reason || '',
     citations,
     evidence,
-  }
+  })
 }
 
 const profileFactGroups = computed(() => {
@@ -1449,10 +1572,15 @@ const contractElementSections = computed(() => contractElementGroups.value.map(g
 const contractSummaryFields = computed(() => {
   const elementFor = key => contractElements.value.find(element => String(element?.elementKey || '') === key) || null
   const useVerified = element => element && elementStatusLabel(element) === '原文已验证'
+  const decisionFor = key => intakeDecisionByKey.value.get(normalizeFactReviewKey(factDecisionFieldToElementKey(key)))
   const field = (key, label, elementKey, fallback, formatter) => {
     const element = elementKey ? elementFor(elementKey) : null
+    const decision = decisionFor(key)
+    const review = factReviewByKey.value.get(normalizeFactReviewKey(elementKey || factDecisionFieldToElementKey(key) || key))
     const verified = useVerified(element)
-    const value = verified
+    const value = decision
+      ? (factDecisionValue(decision.confirmedValue) || fallback || '待填写')
+      : verified
       ? (formatter ? formatter(element) : compactElementValue(element, 70))
       : (fallback || '待填写')
     return {
@@ -1460,14 +1588,20 @@ const contractSummaryFields = computed(() => {
       label,
       value,
       element,
-      sourceLabel: verified
+      sourceLabel: review
+        ? `${factReviewStatusLabel(review.reviewStatus)} · 人工审核`
+        : decision
+        ? `${factDecisionTypeLabel(decision.decisionType)} · 已确认`
+        : verified
         ? '原文已验证'
         : element
           ? '案件字段 · 待复核'
           : fallback
             ? '案件字段'
             : '待补充',
-      statusClass: verified
+      statusClass: review
+        ? factReviewStatusClass(review.reviewStatus)
+        : decision || verified
         ? 'verified'
         : element || !fallback
           ? 'review'
@@ -1476,7 +1610,10 @@ const contractSummaryFields = computed(() => {
   }
   const ourSide = String(c.value.ourSide || '').toUpperCase()
   const counterpartyElement = ourSide === 'A' ? elementFor('party_b') : ourSide === 'B' ? elementFor('party_a') : null
-  const counterparty = useVerified(counterpartyElement)
+  const counterpartyDecision = decisionFor(ourSide === 'A' ? 'partyB' : ourSide === 'B' ? 'partyA' : 'counterparty')
+  const counterparty = counterpartyDecision
+    ? (factDecisionValue(counterpartyDecision.confirmedValue) || c.value.counterparty || '待填写')
+    : useVerified(counterpartyElement)
     ? compactElementValue(counterpartyElement, 54)
     : c.value.counterparty || '待填写'
   const termination = elementFor('termination_conditions')
@@ -1487,8 +1624,14 @@ const contractSummaryFields = computed(() => {
       label: '相对方',
       value: counterparty,
       element: counterpartyElement,
-      sourceLabel: useVerified(counterpartyElement) ? '原文已验证' : c.value.counterparty ? '案件字段' : '待补充',
-      statusClass: useVerified(counterpartyElement) ? 'verified' : c.value.counterparty ? 'review' : 'missing',
+      sourceLabel: counterpartyDecision
+        ? `${factDecisionTypeLabel(counterpartyDecision.decisionType)} · 已确认`
+        : useVerified(counterpartyElement)
+          ? '原文已验证'
+          : c.value.counterparty
+            ? '案件字段'
+            : '待补充',
+      statusClass: counterpartyDecision || useVerified(counterpartyElement) ? 'verified' : c.value.counterparty ? 'review' : 'missing',
     },
     field('contractType', '合同类型', 'contract_type', typeLabel(c.value.contractType)),
     field('amount', '金额', 'contract_amount', c.value.amount ? `${c.value.amount} ${c.value.currency || 'CNY'}` : '', compactAmountValue),
@@ -2132,6 +2275,94 @@ async function saveEvidenceLinks() {
     evidenceDialog.saving = false
   }
 }
+
+function reviewableElementId(element) {
+  const direct = Number(element?.id || 0)
+  if (direct > 0) return direct
+  const matched = rawElementReviewByKey.value.get(normalizeFactReviewKey(element?.elementKey))
+  return Number(matched?.id || 0)
+}
+
+function canReviewContractElement(element) {
+  return Boolean(element?.elementKey || element?.identityKey || reviewableElementId(element) > 0)
+}
+
+async function reviewContractElement(element, reviewStatus) {
+  const elementId = reviewableElementId(element)
+  const status = String(reviewStatus || 'CONFIRMED').toUpperCase()
+  let note = '人工确认当前合同要素可作为事实依据使用'
+  if (status !== 'CONFIRMED') {
+    note = window.prompt(status === 'NOT_APPLICABLE'
+      ? '请填写不适用原因，方便后续复核。'
+      : '请填写需要补证或复核的原因。') || ''
+    if (!note.trim()) {
+      message.warning('请填写审核说明')
+      return
+    }
+  }
+  try {
+    const payload = { reviewStatus: status, note: note.trim() }
+    const r = elementId
+      ? await api.patch(`/api/workspace/contracts/${route.params.id}/elements/${elementId}/review`, payload)
+      : await api.patch(`/api/workspace/contracts/${route.params.id}/facts/review`, {
+        ...payload,
+        factKey: element?.elementKey || element?.key || elementLabel(element),
+        factIdentity: elementIdentity(element),
+        factLabel: elementLabel(element),
+        value: element?.normalizedValue || element?.rawValue || elementDisplayValue(element),
+      })
+    c.value = r.data.data
+    ensureSelectedContractElement()
+    message.success('合同要素审核状态已更新')
+  } catch (e) {
+    message.error(e.response?.data?.message || '合同要素审核失败')
+  }
+}
+
+function canReviewTimelineNode(node) {
+  return (node?.sourceType || node?.source) === 'PIPELINE_TIMELINE'
+    && Number(node?.sourceId || 0) > 0
+}
+
+function syncSelectedTimelineNode(previous = selectedTimelineNode.value) {
+  if (!previous) return
+  const sourceId = Number(previous?.sourceId || 0)
+  const key = timelineKey(previous)
+  selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
+    (sourceId > 0 && Number(node?.sourceId || 0) === sourceId)
+    || timelineKey(node) === key
+  ) || previous
+}
+
+async function reviewTimelineNodeFact(node, reviewStatus) {
+  if (!canReviewTimelineNode(node)) {
+    message.warning('该节点来自案件字段，不需要单独审核')
+    return
+  }
+  const status = String(reviewStatus || 'CONFIRMED').toUpperCase()
+  let note = '人工确认当前时间节点可作为履约依据使用'
+  if (status !== 'CONFIRMED') {
+    note = window.prompt(status === 'NOT_APPLICABLE'
+      ? '请填写不作为正式依据的原因。'
+      : '请填写待补证或待复核的原因。') || ''
+    if (!note.trim()) {
+      message.warning('请填写审核说明')
+      return
+    }
+  }
+  try {
+    const r = await api.patch(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/review`, {
+      reviewStatus: status,
+      note: note.trim(),
+    })
+    c.value = r.data.data
+    syncSelectedTimelineNode(node)
+    message.success('时间节点审核状态已更新')
+  } catch (e) {
+    message.error(e.response?.data?.message || '时间节点审核失败')
+  }
+}
+
 async function confirmFulfillmentCheck(check, result) {
   if (!check?.id) return
   const note = window.prompt('请填写人工确认说明。AI 只提供建议，最终结果以人工确认为准。')
@@ -2145,8 +2376,10 @@ async function confirmFulfillmentCheck(check, result) {
       manualNote: note.trim()
     })
     c.value = r.data.data
+    syncSelectedTimelineNode()
     message.success('人工确认已记录')
     await refreshCase()
+    syncSelectedTimelineNode()
     setTimeout(refreshCase, 1500)
   } catch (e) {
     message.error(e.response?.data?.message || '人工确认失败')
@@ -2494,7 +2727,29 @@ function confidenceLabel(value) {
   const confidence = Number(value)
   return Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : '待确认'
 }
+function timelineReviewLabel(node) {
+  const reviewStatus = String(node?.reviewStatus || '').toUpperCase()
+  if (reviewStatus === 'CONFIRMED') return '已人工确认'
+  if (reviewStatus === 'NEEDS_SUPPLEMENT') return '待补证'
+  if (reviewStatus === 'NOT_APPLICABLE') return '不作为正式依据'
+  if (reviewStatus === 'NEEDS_REVIEW') return '待复核'
+  const status = String(node?.status || '').toUpperCase()
+  if (status === 'CONFIRMED') return '已确认'
+  if (status === 'NOT_APPLICABLE') return '不作为正式依据'
+  return '待人工确认'
+}
+function timelineReviewClass(node) {
+  const label = timelineReviewLabel(node)
+  if (['已确认', '已人工确认'].includes(label)) return 'verified'
+  if (label === '不作为正式依据') return 'missing'
+  if (label === '待补证') return 'warn'
+  return 'review'
+}
 function timelineStatusClass(node) {
+  const reviewStatus = String(node?.reviewStatus || '').toUpperCase()
+  if (reviewStatus === 'CONFIRMED') return 'done'
+  if (reviewStatus === 'NEEDS_SUPPLEMENT') return 'warn'
+  if (reviewStatus === 'NOT_APPLICABLE') return 'pending'
   const status = node.status || ''
   if (status === 'OVERDUE') return 'danger'
   if (status === 'DUE_SOON') return 'warn'
@@ -2604,14 +2859,23 @@ function elementConfidenceLabel(value) {
   return Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : '待确认'
 }
 function elementStatusLabel(element) {
-  if (String(element?.status || '').toUpperCase() === 'CONFIRMED') return '已人工确认'
-  if (String(element?.status || '').toUpperCase() === 'EXTRACTED' && Number(element?.confidence || 0) >= 0.75 && element?.evidence?.length) return '原文已验证'
-  if (String(element?.status || '').toUpperCase() === 'NOT_FOUND') return '未识别'
+  const reviewStatus = String(element?.reviewStatus || '').toUpperCase()
+  if (reviewStatus === 'CONFIRMED') return element?.reviewDecisionType ? factDecisionTypeLabel(element.reviewDecisionType) : '已人工确认'
+  if (reviewStatus === 'NEEDS_SUPPLEMENT') return '待补证'
+  if (reviewStatus === 'NOT_APPLICABLE') return '不适用'
+  if (reviewStatus === 'NEEDS_REVIEW') return '待复核'
+  const status = String(element?.status || '').toUpperCase()
+  if (status === 'CONFIRMED') return '已人工确认'
+  if (status === 'EXTRACTED' && Number(element?.confidence || 0) >= 0.75 && element?.evidence?.length) return '原文已验证'
+  if (status === 'NOT_FOUND') return '未识别'
   return '待人工确认'
 }
 function elementStatusClass(element) {
   const label = elementStatusLabel(element)
-  return ['原文已验证', '已人工确认'].includes(label) ? 'verified' : label === '未识别' ? 'missing' : 'review'
+  if (['原文已验证', '已人工确认', '已确认', '接受识别结果', '人工修改', '人工补充', '确认留空'].includes(label)) return 'verified'
+  if (['未识别', '不适用'].includes(label)) return 'missing'
+  if (label === '待补证') return 'warn'
+  return 'review'
 }
 function elementSourceLabel(element) {
   const source = String(element?.source || '').toUpperCase()
@@ -2632,6 +2896,21 @@ function factDecisionTypeLabel(value) {
   return {
     ACCEPTED: '接受识别结果', EDITED: '人工修改', USER_SUPPLIED: '人工补充', CLEARED: '确认留空',
   }[String(value || '').toUpperCase()] || '人工确认'
+}
+function factReviewStatusLabel(value) {
+  return {
+    CONFIRMED: '已人工确认',
+    NEEDS_REVIEW: '待复核',
+    NEEDS_SUPPLEMENT: '待补证',
+    NOT_APPLICABLE: '不适用',
+  }[String(value || '').toUpperCase()] || '待人工确认'
+}
+function factReviewStatusClass(value) {
+  const status = String(value || '').toUpperCase()
+  if (status === 'CONFIRMED') return 'verified'
+  if (status === 'NEEDS_SUPPLEMENT') return 'warn'
+  if (status === 'NOT_APPLICABLE') return 'missing'
+  return 'review'
 }
 function factDecisionValue(wrapper) {
   const value = wrapper && typeof wrapper === 'object' && 'value' in wrapper ? wrapper.value : wrapper
@@ -2871,15 +3150,23 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fact-card small,.fact-payment-meta{display:block;margin-top:4px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
 .fact-payment-condition,.fact-payment-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .fact-row:focus-visible,.fact-card:focus-visible,.fact-payment-row:focus-visible,.workbench-timeline-main:focus-visible,.workbench-node-action:focus-visible,.workbench-risk-main:focus-visible,.workbench-risk-actions button:focus-visible,.workbench-all-risks:focus-visible,.text-button:focus-visible{outline:2px solid var(--atlas-primary);outline-offset:2px}
-.fact-card>em,.fact-payment-row>em,.element-evidence-preview>header>em{padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900;white-space:nowrap;justify-self:end}
-.fact-card>em.verified,.fact-payment-row>em.verified,.element-evidence-preview>header>em.verified{color:#246744;background:#eaf6ef}
-.fact-card>em.review,.fact-payment-row>em.review,.element-evidence-preview>header>em.review{color:#8a5b14;background:#fff4db}
-.fact-card>em.missing,.fact-payment-row>em.missing,.element-evidence-preview>header>em.missing{color:#7b8794;background:#edf1f4}
+.fact-card-head>em,.fact-payment-row>em,.element-evidence-preview>header>em{padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900;white-space:nowrap;justify-self:end}
+.fact-card-head>em.verified,.fact-payment-row>em.verified,.element-evidence-preview>header>em.verified{color:#246744;background:#eaf6ef}
+.fact-card-head>em.review,.fact-payment-row>em.review,.element-evidence-preview>header>em.review{color:#8a5b14;background:#fff4db}
+.fact-card-head>em.missing,.fact-payment-row>em.missing,.element-evidence-preview>header>em.missing{color:#7b8794;background:#edf1f4}
+.fact-card-head>em.warn,.fact-payment-row>em.warn,.element-evidence-preview>header>em.warn{color:#8a5b14;background:#fff0cf}
+.fact-review-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:10px;padding-top:10px;border-top:1px dashed var(--atlas-border)}
+.fact-review-actions .quiet-button.tiny{margin-left:0}
+.fact-review-actions small{color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.detail-review-note{display:inline-flex!important;width:fit-content;margin-top:6px;padding:3px 6px;border-radius:3px;font-size:10px;font-weight:900}
+.detail-review-note.verified{color:#246744;background:#eaf6ef}.detail-review-note.review{color:#8a5b14;background:#fff4db}.detail-review-note.warn{color:#8a5b14;background:#fff0cf}.detail-review-note.missing{color:#7b8794;background:#edf1f4}
+.review-note-line{margin:8px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .fact-empty,.insight-empty{padding:14px 0;color:var(--atlas-muted);font-size:12px;line-height:1.65}.fact-empty{border-top:1px dashed var(--atlas-border)}.element-evidence-preview{margin-top:16px;padding-top:14px;border-top:2px solid #d8e6dd}.element-evidence-preview>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.element-evidence-preview>header>div{min-width:0}.element-evidence-preview>header span{display:block;margin-bottom:3px;color:#347254;font-size:10px;font-weight:900}.element-evidence-preview>header h4{margin:0;color:var(--atlas-text);font-size:15px}.element-evidence-preview>header p{margin:4px 0 0;color:var(--atlas-subtle);font-size:10px;line-height:1.55}.selected-element-value{margin:10px 0 0;color:var(--atlas-text);font-size:13px;font-weight:800;line-height:1.65;white-space:pre-wrap}.element-detail-list{display:grid;gap:6px;margin:10px 0 0;padding:0;list-style:none}.element-detail-list li{display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;align-items:start;padding:8px 10px;background:#f8faf8;border:1px solid var(--atlas-border);border-radius:4px}.element-detail-list span{color:var(--atlas-subtle);font-size:10px;font-weight:800}.element-detail-list strong{color:var(--atlas-text);font-size:12px;line-height:1.55;word-break:break-word}
 .element-evidence-list{display:grid;gap:8px;margin-top:11px}.element-evidence-list article{padding:10px 11px;background:#f7fafc;border-left:3px solid var(--atlas-primary)}.element-evidence-meta{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-bottom:6px}.element-evidence-meta strong{min-width:0;color:var(--atlas-text);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.element-evidence-meta span{flex:0 0 auto;color:var(--atlas-subtle);font-size:9px;font-weight:800}.element-evidence-list blockquote{margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.65;white-space:pre-wrap}.evidence-source-detail{margin-top:8px;padding-top:8px;border-top:1px dashed var(--atlas-border)}.evidence-source-detail summary,.element-candidates summary{color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}.evidence-full-text{margin:8px 0 0;color:#354452;font-size:11px;line-height:1.78;white-space:pre-wrap;word-break:break-word}.evidence-full-text mark{padding:1px 2px;background:#fff0ae;color:inherit}.evidence-pdf-link{display:inline-flex;margin-top:9px;color:var(--atlas-primary);font-size:10px;font-weight:900;text-decoration:none}.evidence-pdf-link:hover{text-decoration:underline}.element-no-evidence{margin:10px 0 0;color:#a67834;font-size:11px;line-height:1.6}.element-candidates{margin-top:10px}.element-candidates ul{margin:6px 0 0;padding-left:17px;color:var(--atlas-muted);font-size:11px;font-weight:500;line-height:1.6}
 .workbench-insight-section{padding:0 16px 14px;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.insight-section-head{padding-bottom:11px}.insight-section-head strong{padding:3px 6px;color:var(--atlas-subtle);background:var(--atlas-surface);border:1px solid var(--atlas-border);font-size:10px}
 .payment-summary-list{display:grid;gap:7px;margin:0 0 12px}.payment-summary-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:9px 10px;color:var(--atlas-text);background:#fffdf7;border:1px solid #eadfbd;border-left:3px solid #b88930;cursor:pointer}.payment-summary-card:hover{background:#fff8e6}.payment-summary-card>div{min-width:0}.payment-summary-card span{display:block;margin-bottom:3px;color:#8a5b14;font-size:9px;font-weight:900}.payment-summary-card strong{display:-webkit-box;overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.payment-summary-card em{flex:0 0 auto;padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900}.payment-summary-card em.verified{color:#246744;background:#eaf6ef}.payment-summary-card em.review{color:#8a5b14;background:#fff0cf}.payment-summary-card em.missing{color:#7b8794;background:#edf1f4}
 .workbench-timeline-list{border-top:1px solid var(--atlas-border)}.workbench-timeline-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-bottom:1px solid var(--atlas-border)}.workbench-timeline-main{display:grid;grid-template-columns:80px minmax(0,1fr);gap:9px;min-width:0;padding:10px 0;color:var(--atlas-text);background:transparent;border:0;text-align:left;cursor:pointer}.workbench-timeline-main:hover .workbench-timeline-copy strong{text-decoration:underline}.workbench-date{align-self:start;color:var(--atlas-primary);font-size:11px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1.45}.workbench-timeline-copy{min-width:0}.workbench-timeline-copy strong{display:block;overflow:hidden;color:var(--atlas-text);font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.workbench-timeline-copy small{display:-webkit-box;overflow:hidden;margin-top:3px;color:var(--atlas-muted);font-size:10px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.workbench-timeline-copy em{display:inline-flex;margin-top:5px;padding:2px 5px;color:#8a5b14;background:#fff4db;border-radius:2px;font-size:9px;font-style:normal;font-weight:900}.workbench-timeline-row.danger .workbench-date{color:#a84640}.workbench-timeline-row.done .workbench-date{color:#347254}.workbench-timeline-row.condition .workbench-date{color:#7b8794}.workbench-node-action{min-height:30px;padding:0 7px;color:#347254;background:#edf7f0;border:1px solid #bdd7c6;border-radius:3px;font-size:10px;font-weight:900;cursor:pointer}.workbench-node-action:hover{background:#dff0e5}
+.workbench-timeline-copy em.verified{color:#246744;background:#eaf6ef}.workbench-timeline-copy em.warn{color:#8a5b14;background:#fff0cf}.workbench-timeline-copy em.missing{color:#7b8794;background:#edf1f4}.workbench-timeline-copy em.review{color:#8a5b14;background:#fff4db}
 .risk-focus-section{padding-bottom:16px}.workbench-risk-list{border-top:1px solid var(--atlas-border)}.workbench-risk-row{padding:10px 0;border-bottom:1px solid var(--atlas-border)}.workbench-risk-row.closed{opacity:.62}.workbench-risk-main{display:grid;grid-template-columns:48px minmax(0,1fr);gap:8px;width:100%;padding:0;color:var(--atlas-text);background:transparent;border:0;text-align:left;cursor:pointer}.workbench-risk-main .finding-sev{min-width:44px;height:20px;padding:0;font-size:9px}.workbench-risk-main span:last-child{min-width:0}.workbench-risk-main strong{display:block;color:var(--atlas-text);font-size:12px;line-height:1.45}.workbench-risk-main small{display:-webkit-box;overflow:hidden;margin-top:4px;color:var(--atlas-muted);font-size:10px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.workbench-risk-main:hover strong{text-decoration:underline}.workbench-risk-actions{display:flex;gap:6px;margin:8px 0 0 56px}.workbench-risk-actions button{min-height:28px;padding:0 7px;color:var(--atlas-primary);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:3px;font-size:9px;font-weight:900;cursor:pointer}.workbench-risk-actions button:hover{border-color:var(--atlas-primary);background:#f2f7fb}.workbench-risk-state{display:block;margin:7px 0 0 56px;color:var(--atlas-subtle);font-size:9px;font-weight:800}.risk-empty p{margin:0 0 9px}.workbench-all-risks{width:100%;min-height:34px;margin-top:11px;color:var(--atlas-primary);background:transparent;border:1px dashed var(--atlas-border);font-size:10px;font-weight:900;cursor:pointer}.workbench-all-risks:hover{border-color:var(--atlas-primary);background:#f2f7fb}
 .workbench-runtime{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 22px;background:#f7faf8;border-top:1px solid var(--atlas-border)}.workbench-runtime span{color:#347254;font-size:10px;font-weight:900}.workbench-runtime small{color:var(--atlas-subtle);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-button{margin-left:auto;padding:0;color:var(--atlas-primary);background:transparent;border:0;font-size:10px;font-weight:900;cursor:pointer}.text-button:hover{text-decoration:underline}
 .document-progress-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 18px;align-items:center;margin:-8px 0 24px;padding:16px 18px;border:1px solid #b7cde0;border-left:4px solid var(--atlas-primary);background:#f5f9fc}
