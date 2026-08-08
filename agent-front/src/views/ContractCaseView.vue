@@ -1,5 +1,5 @@
 <template>
-  <div class="case-page" v-if="!loading">
+  <div class="case-page">
     <router-link to="/contracts" class="back-link">返回合同工作台</router-link>
 
     <header class="case-header">
@@ -10,20 +10,34 @@
         <p>{{ c.description || '没有补充说明' }}</p>
       </div>
       <div class="case-actions">
-        <button class="primary-button" @click="handlePrimaryAction" :disabled="running || primaryAction.disabled">{{ running ? '运行中' : primaryAction.label }}</button>
-        <button class="quiet-button revision-upload-button" type="button" @click="openRevisionUpload">
-          上传修改后合同
-        </button>
         <details class="task-menu">
-          <summary class="quiet-button">更多 Agent 任务</summary>
+          <summary class="primary-button">{{ running || hasActiveRun ? 'Agent 运行中' : '运行 Agent' }}</summary>
           <div class="task-menu-panel" role="menu">
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !canRunContractReview"
+              @click="startAdditionalTask('CONTRACT_REVIEW')"
+            >
+              <strong>{{ contractReviewTaskLabel }}</strong>
+              <small>{{ canRunContractReview ? '复用已解析证据、合同要素和知识库规则生成风险发现' : '请先上传并完成合同解析' }}</small>
+            </button>
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !canExtractContractElements"
+              @click="startAdditionalTask('CONTRACT_ELEMENT_EXTRACTION')"
+            >
+              <strong>{{ contractElementTaskLabel }}</strong>
+              <small>{{ extractionSnapshot.id ? '重新从当前合同版本生成可引用的事实快照' : '整理主体、金额、期限、义务和关键风险条款' }}</small>
+            </button>
             <button
               type="button"
               class="task-menu-item"
               :disabled="running || hasActiveRun || !canVersionReview"
               @click="startAdditionalTask('VERSION_REVIEW')"
             >
-              <strong>版本差异复核</strong>
+              <strong>{{ versionReviewTaskLabel }}</strong>
               <small>{{ canVersionReview ? '对比当前合同与其他已解析版本' : '至少需要两个已解析的主合同版本' }}</small>
             </button>
             <button
@@ -32,7 +46,7 @@
               :disabled="running || hasActiveRun || !canApprovalDecision"
               @click="startAdditionalTask('APPROVAL_DECISION')"
             >
-              <strong>生成审批意见</strong>
+              <strong>{{ approvalDecisionTaskLabel }}</strong>
               <small>{{ canApprovalDecision ? '根据审查结果整理审批建议' : '完成风险审查或进入待审批状态后可用' }}</small>
             </button>
             <button
@@ -41,36 +55,60 @@
               :disabled="running || hasActiveRun || !canObligationExtraction"
               @click="startAdditionalTask('OBLIGATION_EXTRACTION')"
             >
-              <strong>提取履约义务</strong>
+              <strong>{{ obligationExtractionTaskLabel }}</strong>
               <small>{{ canObligationExtraction ? '整理付款、交付、验收和通知义务' : '合同签署或进入履约阶段后可用' }}</small>
             </button>
           </div>
         </details>
+        <button class="quiet-button revision-upload-button" type="button" @click="openRevisionUpload">
+          上传修改后合同
+        </button>
       </div>
     </header>
 
-    <!-- Meta grid -->
     <section class="meta-grid">
-      <div><span>相对方</span><strong>{{ c.counterparty || '待填写' }}</strong></div>
-      <div><span>合同类型</span><strong>{{ typeLabel(c.contractType) }}</strong></div>
-      <div><span>金额</span><strong>{{ c.amount ? c.amount + ' ' + (c.currency||'CNY') : '待填写' }}</strong></div>
-      <div><span>部门</span><strong>{{ c.department || '待填写' }}</strong></div>
-      <div><span>签订日期</span><strong>{{ c.signedDate || '待填写' }}</strong></div>
-      <div><span>生效日期</span><strong>{{ c.effectiveDate || '待填写' }}</strong></div>
-      <div><span>结束方式</span><strong>{{ c.expiryDate || (primaryLifecycleCondition ? '满足约定条件后结束' : '待填写') }}</strong></div>
+      <button
+        v-for="field in contractSummaryFields"
+        :key="field.key"
+        type="button"
+        class="meta-item"
+        :class="{ 'meta-item-wide': field.key === 'endCondition' }"
+        :disabled="!field.element"
+        @click="selectSummaryField(field)"
+      >
+        <span>{{ field.label }}</span>
+        <strong>{{ field.value }}</strong>
+        <em :class="field.statusClass">{{ field.sourceLabel }}</em>
+      </button>
     </section>
 
-    <section v-if="analysisWorkflow.id" class="analysis-workflow-panel">
+    <section v-if="analysisWorkflow.id" class="analysis-workflow-panel" :class="{ compact: workflowIsComplete }">
       <div class="analysis-workflow-head">
         <div>
           <span class="section-kicker">合同分析流程</span>
-          <h3>解析、确认与风险审查</h3>
-          <p>风险审查会复用已经解析并确认的合同证据，不会重复 OCR 或重新切分全文。</p>
+          <h3>{{ workflowIsComplete ? '合同证据与审查结果已就绪' : '解析、确认、要素整理与风险审查' }}</h3>
+          <p v-if="!workflowIsComplete">后续 Agent 会复用已解析的合同证据和当前版本的事实快照，不会重复 OCR 或重新切分全文。</p>
         </div>
         <strong :class="'workflow-status ' + workflowStatusClass(analysisWorkflow.status)">
           {{ workflowStatusLabel(analysisWorkflow.status) }}
         </strong>
       </div>
+      <div v-if="workflowIsComplete" class="workflow-complete-strip">
+        <div class="workflow-complete-stages" aria-label="已完成的合同分析步骤">
+          <span v-for="stage in analysisStages" :key="stage.key">
+            <i>✓</i>{{ stage.label }}
+          </span>
+        </div>
+        <div class="workflow-complete-meta">
+          <small v-if="analysisWorkflow.evidenceSnapshotHash">
+            证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
+          </small>
+          <small v-if="analysisWorkflow.extractionStatus">
+            要素快照：{{ extractionWorkflowStatusLabel(analysisWorkflow.extractionStatus) }}
+          </small>
+        </div>
+      </div>
+      <template v-else>
       <div class="analysis-workflow-stages">
         <div v-for="stage in analysisStages" :key="stage.key" class="analysis-workflow-stage" :class="stage.state">
           <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
@@ -81,137 +119,715 @@
         </div>
       </div>
       <div class="analysis-workflow-foot">
-        <small v-if="analysisWorkflow.evidenceSnapshotHash">
-          证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
-        </small>
-        <button v-if="analysisWorkflow.status === 'WAITING_CONFIRMATION'" class="quiet-button small" @click="openIntakeConfirmation">
-          打开识别确认
+        <div class="workflow-evidence-summary">
+          <small v-if="analysisWorkflow.evidenceSnapshotHash">
+            证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
+          </small>
+          <small v-if="analysisWorkflow.extractionStatus" :class="`extraction-status ${String(analysisWorkflow.extractionStatus).toLowerCase()}`">
+            要素快照：{{ extractionWorkflowStatusLabel(analysisWorkflow.extractionStatus) }}
+          </small>
+        </div>
+      </div>
+      </template>
+    </section>
+
+    <section class="contract-workbench" data-section="workbench">
+      <header class="contract-workbench-head">
+        <div>
+          <span class="section-kicker">合同工作台</span>
+          <h3>要素、履约日程、风险研判与运行记录</h3>
+          <p>顶部只保留主体、金额和关键日期；下方通过 Tab 切换查看要素、节点、风险、证据和 Agent 运行。重点信息默认收拢，展开后再看完整细节。</p>
+        </div>
+        <div class="workbench-snapshot">
+          <strong v-if="extractionSnapshot.id">事实快照 #{{ extractionSnapshot.id }}</strong>
+          <strong v-else>尚未生成事实快照</strong>
+          <small v-if="extractionSnapshot.id">文档 v{{ extractionSnapshot.documentVersion || '-' }} · {{ extractionWorkflowStatusLabel(extractionSnapshot.status) }}</small>
+          <small v-else>先完成要素提取，后续审查与核验会复用结果</small>
+        </div>
+      </header>
+
+      <div v-if="loadError" class="workbench-status-strip error">
+        <div>
+          <strong>合同信息读取失败</strong>
+          <small>{{ loadError }}</small>
+        </div>
+        <button class="quiet-button small" @click="loadCase">重试</button>
+      </div>
+      <div v-else-if="loading" class="workbench-status-strip">
+        <strong>合同信息正在读取</strong>
+        <span>页面其余内容已可浏览，任务会继续加载。</span>
+      </div>
+
+      <nav class="workbench-tabs" role="tablist" aria-label="合同工作台视图">
+        <button
+          v-for="tab in workbenchTabs"
+          :key="tab.key"
+          type="button"
+          class="workbench-tab"
+          :class="{ active: activeWorkbenchTab === tab.key }"
+          :aria-selected="activeWorkbenchTab === tab.key"
+          @click="switchWorkbenchTab(tab.key)"
+        >
+          <span>{{ tab.label }}</span>
+          <strong>{{ tab.count }}</strong>
         </button>
-        <span v-else-if="analysisWorkflow.status === 'READY_FOR_REVIEW'" class="workflow-next-step">
-          请使用页面顶部的主按钮发起风险审查
-        </span>
+      </nav>
+
+      <div class="workbench-panel">
+        <section v-if="activeWorkbenchTab === 'elements'" class="workbench-tab-panel" data-section="elements">
+          <div class="contract-workbench-body contract-workbench-body-elements">
+            <section class="fact-lane" aria-label="合同要素与原文依据">
+              <header class="fact-lane-head">
+                <div>
+                  <span>合同要素</span>
+                  <h4>可引用的合同事实</h4>
+                </div>
+              </header>
+              <div v-if="extractionSnapshot.id" class="fact-mode-note" :class="{ legacy: !hasDynamicContractProfile }">
+                <strong>{{ extractionSnapshotModeLabel }}</strong>
+                <span v-if="!hasDynamicContractProfile">当前快照还没有写入合同画像，只能继续展示旧版平铺要素。需要更新时请使用顶部“运行 Agent”下拉。</span>
+                <span v-else>当前要素已按合同画像分组展示。</span>
+              </div>
+
+              <div v-if="contractElementSections.length" class="fact-groups">
+                <section v-for="group in contractElementSections" :key="group.key" class="fact-group">
+                  <div class="fact-group-head">
+                    <strong>{{ group.label }}</strong>
+                    <span>{{ group.items.length }} 项</span>
+                  </div>
+                  <div v-if="group.paymentRows.length" class="fact-payment-table">
+                    <button
+                      v-for="element in group.paymentRows"
+                      :key="elementIdentity(element)"
+                      type="button"
+                      class="fact-payment-row"
+                      :class="{ selected: isSelectedElement(element) }"
+                      :aria-pressed="isSelectedElement(element)"
+                      @mouseenter="selectContractElement(element)"
+                      @focus="selectContractElement(element)"
+                      @click="selectContractElement(element)"
+                    >
+                      <strong class="fact-payment-stage">{{ elementHeadline(element) }}</strong>
+                      <span class="fact-payment-condition">{{ elementSummary(element) }}</span>
+                      <span class="fact-payment-meta">{{ elementChips(element).join(' · ') }}</span>
+                      <em :class="elementStatusClass(element)">{{ elementStatusLabel(element) }}</em>
+                    </button>
+                  </div>
+                  <div v-else class="fact-card-grid">
+                    <button
+                      v-for="element in group.items"
+                      :key="elementIdentity(element)"
+                      type="button"
+                      class="fact-card"
+                      :class="{ selected: isSelectedElement(element) }"
+                      :aria-pressed="isSelectedElement(element)"
+                      @mouseenter="selectContractElement(element)"
+                      @focus="selectContractElement(element)"
+                      @click="selectContractElement(element)"
+                    >
+                      <div class="fact-card-head">
+                        <strong>{{ elementHeadline(element) }}</strong>
+                        <em :class="elementStatusClass(element)">{{ elementStatusLabel(element) }}</em>
+                      </div>
+                      <p>{{ elementSummary(element) }}</p>
+                      <small>{{ elementChips(element).join(' · ') || elementSourceLabel(element) }}</small>
+                    </button>
+                  </div>
+                </section>
+              </div>
+              <div v-else class="fact-empty">
+                {{ extractionRunActive ? 'Agent 正在整理合同要素，完成后会自动显示在这里。' : '尚未生成合同要素快照。' }}
+              </div>
+            </section>
+
+            <aside class="workbench-elements-lane" aria-label="原文证据与知识">
+              <section class="workbench-insight-section">
+                <header class="insight-section-head">
+                  <div>
+                    <span>原文证据</span>
+                    <h4>当前字段与复核线索</h4>
+                  </div>
+                  <strong>{{ selectedElementEvidence.length }} 条</strong>
+                </header>
+
+                <section v-if="selectedContractElement" class="element-evidence-preview">
+                  <header>
+                    <div>
+                      <span>当前字段</span>
+                      <h4>{{ elementLabel(selectedContractElement) }}</h4>
+                      <p>{{ elementSourceLabel(selectedContractElement) }} · 可信度 {{ elementConfidenceLabel(selectedContractElement.confidence) }}</p>
+                    </div>
+                    <em :class="elementStatusClass(selectedContractElement)">{{ elementStatusLabel(selectedContractElement) }}</em>
+                  </header>
+
+                  <p class="selected-element-value">{{ elementDisplayValue(selectedContractElement) }}</p>
+                  <ul v-if="elementDetails(selectedContractElement).length" class="element-detail-list">
+                    <li v-for="detail in elementDetails(selectedContractElement)" :key="detail[0]">
+                      <span>{{ detail[0] }}</span>
+                      <strong>{{ detail[1] }}</strong>
+                    </li>
+                  </ul>
+                  <button type="button" class="text-button evidence-tab-switch" @click="switchWorkbenchTab('evidence')">查看完整证据</button>
+                </section>
+                <p v-else class="fact-empty">请选择左侧一个要素查看原文依据。</p>
+              </section>
+
+              <section v-if="primaryLifecycleCondition" class="workbench-insight-section">
+                <header class="insight-section-head">
+                  <div>
+                    <span>结束条件</span>
+                    <h4>合同终止与失效依据</h4>
+                  </div>
+                  <strong>{{ lifecycleEvents(primaryLifecycleCondition).length }} 条</strong>
+                </header>
+                <div class="contract-end-condition contract-end-condition-inline compact">
+                  <div class="diagnostic-mark">结束条件</div>
+                  <div>
+                    <strong>{{ primaryLifecycleCondition.summary }}</strong>
+                    <ol v-if="lifecycleEvents(primaryLifecycleCondition).length">
+                      <li v-for="event in lifecycleEvents(primaryLifecycleCondition)" :key="event.sequence || event.event">
+                        <span>{{ primaryLifecycleCondition.logicOperator === 'ALL' ? '必须满足' : '条件' }}</span>
+                        {{ event.event }}
+                      </li>
+                    </ol>
+                    <small>来源：{{ lifecycleSourceLabel(primaryLifecycleCondition) }} · 最终结束状态需人工确认</small>
+                  </div>
+                </div>
+              </section>
+
+              <section v-if="availableKnowledge.length" class="workbench-insight-section">
+                <header class="insight-section-head">
+                  <div>
+                    <span>本合同可用知识</span>
+                    <h4>标准条款与上传知识库</h4>
+                  </div>
+                  <strong>{{ availableKnowledge.length }} 份</strong>
+                </header>
+                <div v-for="doc in availableKnowledge" :key="doc.id" class="knowledge-row">
+                  <span :class="'knowledge-scope ' + scopeClass(doc.contractUsageScope)">{{ knowledgeScopeLabel(doc.contractUsageScope) }}</span>
+                  <strong>{{ doc.title }}</strong>
+                  <small>{{ knowledgeChangeSummary(doc) }}</small>
+                </div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section v-else-if="activeWorkbenchTab === 'timeline'" class="workbench-tab-panel" data-section="timeline">
+          <header class="tab-panel-head">
+            <div>
+              <span class="section-kicker">履约日程</span>
+              <h3>关键时间与待办</h3>
+              <p>点击任意节点打开详情，查看原文依据、相对期限计算、后果说明以及履约核验入口。</p>
+            </div>
+            <strong>{{ caseTimelineNodes.length }} 个节点</strong>
+          </header>
+
+          <section v-if="primaryLifecycleCondition" class="contract-end-condition contract-end-condition-inline">
+            <div class="diagnostic-mark">结束条件</div>
+            <div>
+              <strong>{{ primaryLifecycleCondition.summary }}</strong>
+              <ol v-if="lifecycleEvents(primaryLifecycleCondition).length">
+                <li v-for="event in lifecycleEvents(primaryLifecycleCondition)" :key="event.sequence || event.event">
+                  <span>{{ primaryLifecycleCondition.logicOperator === 'ALL' ? '必须满足' : '条件' }}</span>
+                  {{ event.event }}
+                </li>
+              </ol>
+              <small>来源：{{ lifecycleSourceLabel(primaryLifecycleCondition) }} · 最终结束状态需人工确认</small>
+            </div>
+          </section>
+
+          <div v-if="paymentScheduleElements.length" class="payment-summary-list">
+          <article
+              v-for="element in paymentScheduleElements"
+              :key="elementIdentity(element)"
+              class="payment-summary-card"
+              role="button"
+              tabindex="0"
+              @click="jumpToTimelineNodeForElement(element)"
+              @keydown.enter.prevent="jumpToTimelineNodeForElement(element)"
+              @keydown.space.prevent="jumpToTimelineNodeForElement(element)"
+            >
+              <div>
+                <span>付款 / 开票条件</span>
+                <strong>{{ compactElementValue(element, 88) }}</strong>
+              </div>
+              <em :class="elementStatusClass(element)">{{ elementStatusLabel(element) }}</em>
+            </article>
+          </div>
+          <div v-if="caseTimelineNodes.length" class="workbench-timeline-list">
+              <article
+              v-for="node in caseTimelineNodes"
+              :key="timelineKey(node)"
+              class="workbench-timeline-row"
+              :class="timelineStatusClass(node)"
+              :data-timeline-key="timelineKey(node)"
+            >
+              <button
+                type="button"
+                class="workbench-timeline-main"
+                @click="openTimelineDetail(node)"
+              >
+                <span class="workbench-date">{{ timelineDateLabel(node) }}</span>
+                <span class="workbench-timeline-copy">
+                  <strong>{{ node.label || timelineTypeLabel(node.nodeType) }}</strong>
+                  <small>{{ timelineAction(node) || '查看合同原文和履约要求。' }}</small>
+                  <em v-if="timelineNeedsRecognition(node)">文字或日期待核对</em>
+                  <em v-else-if="relativeDateResult(node).baseUncertain">基准日期待确认</em>
+                </span>
+              </button>
+              <button
+                v-if="canFulfillmentCheck(node)"
+                type="button"
+                class="workbench-node-action"
+                @click="openTimelineDetail(node, true)"
+              >上传证明</button>
+            </article>
+          </div>
+          <p v-else class="insight-empty">{{ timelineEmptyText() }}</p>
+        </section>
+
+        <section v-else-if="activeWorkbenchTab === 'risks'" class="workbench-tab-panel" data-section="risks-panel">
+          <header class="risk-workbench-head">
+            <div>
+              <span class="section-kicker">风险研判</span>
+              <h3>审查发现</h3>
+              <p>先处理高风险和关键动作，展开后查看完整论证、双重依据与谈判建议。</p>
+            </div>
+            <div class="risk-counts" aria-label="风险数量汇总">
+              <span class="high"><strong>{{ findingCountBySeverity('HIGH') }}</strong> 高风险</span>
+              <span class="medium"><strong>{{ findingCountBySeverity('MEDIUM') }}</strong> 中风险</span>
+              <span class="low"><strong>{{ findingCountBySeverity('LOW') }}</strong> 低风险</span>
+            </div>
+          </header>
+
+          <section v-if="reviewSummaryView.id" class="review-panel review-panel-prominent review-panel-inline review-panel-flat">
+            <div class="review-main review-main-flat">
+              <div class="review-prominent-head">
+                <div>
+                  <span class="section-kicker">审查结果已生成</span>
+                  <h3>{{ reviewSummaryView.title || '合同审查报告' }}</h3>
+                </div>
+                <span class="review-run-badge" v-if="reviewSummaryView.runId">运行 #{{ reviewSummaryView.runId }}</span>
+              </div>
+              <p>{{ reviewSummaryView.summary || '审查已完成，请查看下方风险研判与逐项审查发现。' }}</p>
+              <div class="review-highlight-grid">
+                <div><strong>{{ c.findings?.length || 0 }}</strong><span>风险发现</span></div>
+                <div><strong>{{ formatDate(reviewSummaryView.createTime) }}</strong><span>生成时间</span></div>
+                <div><strong>{{ riskStatusLabel(reviewSummaryView.riskStatus) }}</strong><span>当前结论</span></div>
+              </div>
+            </div>
+          </section>
+
+          <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
+            <div class="risk-domain-head">
+              <div>
+                <span>{{ group.items.length }} 项发现</span>
+                <h4>{{ group.name }}</h4>
+              </div>
+              <small v-if="group.highCount">{{ group.highCount }} 项需优先处理</small>
+            </div>
+
+            <article
+              v-for="f in group.items"
+              :key="f.id"
+              class="finding-card"
+              :class="['finding-' + (f.severity || 'MEDIUM').toLowerCase(), { 'finding-closed': findingClosed(f) }]"
+              :data-finding-id="f.id"
+            >
+              <div class="finding-summary-row">
+                <div class="finding-rank">
+                  <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
+                  <small>{{ findingStatusLabel(f.status) }}</small>
+                </div>
+                <div class="finding-summary-main">
+                  <div class="finding-title-line">
+                    <h5>{{ findingHeadline(f) }}</h5>
+                    <span class="clause-pill">{{ findingDomainName(f) }}</span>
+                  </div>
+                  <p class="finding-one-line">{{ findingOneLine(f) }}</p>
+                  <div class="finding-key-action">
+                    <span>首要处理</span>
+                    <strong>{{ findingKeyPoint(f) }}</strong>
+                  </div>
+                  <div class="finding-source-strip">
+                    <span :class="{ active: findingHasContractBasis(f) }">合同原文{{ findingHasContractBasis(f) ? '已引用' : '待补充' }}</span>
+                    <span :class="{ active: findingHasPolicyBasis(f) }">知识依据{{ findingHasPolicyBasis(f) ? '已引用' : '待补充' }}</span>
+                    <span>可信度 {{ levelLabel(findingDetail(f).confidenceLevel) }}</span>
+                    <span v-if="f.suggestedAction">{{ suggestedActionLabel(f.suggestedAction) }}</span>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  class="finding-expand"
+                  :aria-expanded="isFindingExpanded(f)"
+                  :aria-controls="`finding-detail-${f.id}`"
+                  @click="toggleFinding(f)"
+                >{{ isFindingExpanded(f) ? '收起详情' : '查看详情' }}</button>
+              </div>
+
+              <div v-if="isFindingExpanded(f)" :id="`finding-detail-${f.id}`" class="finding-detail">
+                <section v-if="findingExplanation(f)">
+                  <span>风险解释</span>
+                  <p>{{ findingExplanation(f) }}</p>
+                </section>
+                <section v-if="findingBusinessImpact(f)">
+                  <span>可能影响</span>
+                  <p>{{ findingBusinessImpact(f) }}</p>
+                </section>
+
+                <div class="finding-evidence-grid">
+                  <section>
+                    <span>合同依据</span>
+                    <p>{{ findingContractBasis(f) }}</p>
+                    <blockquote v-if="f.contractCitation?.snippet">{{ f.contractCitation.snippet }}</blockquote>
+                  </section>
+                  <section>
+                    <span>知识库 / 标准条款依据</span>
+                    <p>{{ findingKnowledgeBasis(f) }}</p>
+                    <blockquote v-if="f.policyCitation?.snippet">{{ f.policyCitation.snippet }}</blockquote>
+                  </section>
+                </div>
+
+                <div v-if="findingDetail(f).explicitConsequence || findingDetail(f).inferredConsequence" class="finding-consequence-grid">
+                  <section v-if="findingDetail(f).explicitConsequence">
+                    <span>合同明确后果</span>
+                    <p>{{ findingDetail(f).explicitConsequence }}</p>
+                  </section>
+                  <section v-if="findingDetail(f).inferredConsequence" class="ai-inference">
+                    <span>AI 推断，仅供参考，不代表合同约定</span>
+                    <p>{{ findingDetail(f).inferredConsequence }}</p>
+                  </section>
+                </div>
+
+                <div class="advice-grid" v-if="findingRevisionAdvice(f) || f.negotiationAdvice">
+                  <section v-if="findingRevisionAdvice(f)">
+                    <span>条款修改建议</span>
+                    <p>{{ findingRevisionAdvice(f) }}</p>
+                  </section>
+                  <section v-if="f.negotiationAdvice">
+                    <span>谈判口径</span>
+                    <p>{{ f.negotiationAdvice }}</p>
+                  </section>
+                </div>
+
+                <section v-if="findingReviewQuestions(f).length" class="verification-list">
+                  <span>人工复核问题</span>
+                  <ul><li v-for="point in findingReviewQuestions(f)" :key="point">{{ point }}</li></ul>
+                </section>
+                <div class="finding-buttons" v-if="f.status === 'OPEN'">
+                  <button class="quiet-button tiny" @click="updateFinding(f.id, 'REMEDIATED')">标记已修改</button>
+                  <button class="quiet-button tiny" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
+                  <button class="quiet-button tiny" @click="updateFinding(f.id, 'DISMISSED')">驳回</button>
+                </div>
+              </div>
+            </article>
+          </section>
+        </section>
+
+        <section v-else-if="activeWorkbenchTab === 'evidence'" class="workbench-tab-panel" data-section="evidence">
+          <header class="tab-panel-head">
+            <div>
+              <span class="section-kicker">原文证据</span>
+              <h3>字段引用、页面定位与全文摘录</h3>
+              <p>在这里查看当前字段的完整引用、原始 PDF 页面对照和文档版本信息。切回“合同要素”可继续换字段。</p>
+            </div>
+            <strong>{{ selectedElementEvidence.length }} 条引用</strong>
+          </header>
+
+          <div class="evidence-workbench-body">
+            <section class="evidence-browser">
+              <header class="evidence-browser-head">
+                <div v-if="selectedContractElement">
+                  <span>当前字段</span>
+                  <h4>{{ elementLabel(selectedContractElement) }}</h4>
+                  <p>{{ elementSourceLabel(selectedContractElement) }} · 可信度 {{ elementConfidenceLabel(selectedContractElement.confidence) }} · {{ elementStatusLabel(selectedContractElement) }}</p>
+                </div>
+                <div v-else>
+                  <span>当前字段</span>
+                  <h4>请选择左侧要素</h4>
+                  <p>切换到“合同要素”后点击任意字段，再回到这里查看完整原文证据。</p>
+                </div>
+              </header>
+
+              <p v-if="selectedContractElement" class="selected-element-value evidence-summary">{{ elementDisplayValue(selectedContractElement) }}</p>
+              <div v-if="selectedElementEvidence.length" class="element-evidence-list evidence-list-wide">
+                <article v-for="link in selectedElementEvidence" :key="link.id || `${link.clauseId}-${link.quote}`">
+                  <div class="element-evidence-meta">
+                    <strong>{{ evidenceClauseLabel(link) }}</strong>
+                    <span>{{ evidenceLocationLabel(link) }}</span>
+                  </div>
+                  <blockquote>{{ link.quote || '当前引用未保留连续原文片段。' }}</blockquote>
+                  <details class="evidence-source-detail" open>
+                    <summary>展开完整原文与文件依据</summary>
+                    <p class="evidence-full-text">
+                      <template v-for="(segment, index) in evidenceHighlightSegments(link)" :key="`${index}-${segment.marked}`">
+                        <mark v-if="segment.marked">{{ segment.text }}</mark>
+                        <template v-else>{{ segment.text }}</template>
+                      </template>
+                    </p>
+                    <a
+                      v-if="isPdfEvidence(link)"
+                      class="evidence-pdf-link"
+                      :href="evidencePreviewUrl(link)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >打开原始 PDF 页面对照</a>
+                  </details>
+                </article>
+              </div>
+              <p v-else class="element-no-evidence">这个值目前没有可验证的连续原文引用，不能直接作为自动判断依据。</p>
+              <details v-if="selectedContractElement && selectedContractElement.candidates?.length > 1" class="element-candidates">
+                <summary>查看 {{ selectedContractElement.candidates.length }} 个候选值</summary>
+                <ul>
+                  <li v-for="candidate in selectedContractElement.candidates" :key="candidate.id || candidate.rawValue">
+                    {{ candidate.rawValue || '空值' }} · {{ elementConfidenceLabel(candidate.confidence) }}
+                  </li>
+                </ul>
+              </details>
+            </section>
+
+            <section class="evidence-browser">
+              <header class="evidence-browser-head">
+                <div>
+                  <span>文档索引</span>
+                  <h4>正文、附件与履约证据</h4>
+                  <p>从这里打开正文预览，核对提取结果和原始文档版本。</p>
+                </div>
+                <strong>{{ Array.isArray(c.documents) ? c.documents.length : 0 }} 份</strong>
+              </header>
+
+              <div v-if="Array.isArray(c.documents) && c.documents.length" class="evidence-doc-list">
+                <article v-for="doc in c.documents" :key="doc.id" class="evidence-doc-card">
+                  <div>
+                    <span>{{ docTypeLabel(doc.documentType) }}</span>
+                    <strong>{{ doc.fileName }}</strong>
+                    <small>v{{ doc.version }} · {{ parseStatusLabel(doc) }} · {{ formatDate(doc.createTime) }}</small>
+                  </div>
+                  <button
+                    v-if="String(doc.documentType || '').toUpperCase() === 'MAIN'"
+                    type="button"
+                    class="quiet-button small"
+                    @click="openTextPreview(doc)"
+                  >查看正文</button>
+                </article>
+              </div>
+              <div v-else class="fact-empty">暂无已上传的合同文档。</div>
+            </section>
+
+            <section class="evidence-browser fact-decision-browser">
+              <header class="evidence-browser-head">
+                <div>
+                  <span>事实确认记录</span>
+                  <h4>首次识别候选与人工决定</h4>
+                  <p>基础字段只在合同发起时识别一次；后续画像、风险和履约分析复用这里确认的结果。</p>
+                </div>
+                <strong>{{ intakeFactDecisions.length }} 项</strong>
+              </header>
+
+              <div v-if="intakeFactDecisions.length" class="evidence-doc-list fact-decision-list">
+                <article v-for="decision in intakeFactDecisions" :key="decision.id" class="evidence-doc-card fact-decision-card">
+                  <div>
+                    <span>{{ factDecisionFieldLabel(decision.fieldKey) }} · {{ factDecisionTypeLabel(decision.decisionType) }}</span>
+                    <strong>{{ factDecisionValue(decision.confirmedValue) || '未填写' }}</strong>
+                    <small>
+                      候选：{{ factDecisionValue(decision.proposedValue) || '未识别' }}
+                      · {{ decision.candidateSource || '人工补充' }}
+                      · {{ formatDate(decision.decidedAt) }}
+                    </small>
+                  </div>
+                  <details v-if="Array.isArray(decision.citations) && decision.citations.length" class="fact-decision-evidence">
+                    <summary>查看识别依据</summary>
+                    <blockquote v-for="(citation, index) in decision.citations" :key="`${decision.id}-${index}`">
+                      {{ citation.quote }}
+                    </blockquote>
+                    <small>{{ decision.parserVersion || '解析器待记录' }} · {{ decision.llmModel || '规则识别' }} · {{ decision.promptVersion || '提示词版本待记录' }}</small>
+                  </details>
+                </article>
+              </div>
+              <div v-else class="fact-empty">当前合同尚无首次字段确认记录；旧合同会继续使用案件已录入字段。</div>
+            </section>
+          </div>
+        </section>
+
+        <section v-else-if="activeWorkbenchTab === 'runs'" class="workbench-tab-panel" data-section="runs">
+          <header class="tab-panel-head">
+            <div>
+              <span class="section-kicker">Agent 运行</span>
+              <h3>任务、步骤与运行轨迹</h3>
+              <p>这里展示合同分析、提取和审查的运行状态。点击“查看审查发现”可以切回风险研判。</p>
+            </div>
+            <strong>{{ Array.isArray(c.runs) ? c.runs.length : 0 }} 次运行</strong>
+          </header>
+
+          <div class="analysis-workflow-stages run-workflow-stages">
+            <div v-for="stage in analysisStages" :key="stage.key" class="analysis-workflow-stage" :class="stage.state">
+              <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
+              <div>
+                <strong>{{ stage.label }}</strong>
+                <small>{{ stage.description }}</small>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="extractionRun" class="workbench-runtime run-workbench-runtime">
+            <span>本页事实由 Agent 运行 #{{ extractionRun.id }} 生成</span>
+            <small>{{ runtimeLabel(extractionRun) || '运行信息待补充' }}</small>
+            <button type="button" class="text-button" @click="scrollToSection('risks')">查看审查发现</button>
+          </div>
+
+          <div v-if="Array.isArray(c.runs) && c.runs.length" class="run-list-panel">
+            <div v-for="r in c.runs" :key="r.id" class="run-row" :class="{ 'run-row-failed': r.status === 'FAILED' }">
+              <span :class="runStatusClass(r.status)">{{ runStatusLabel(r.status) }}</span>
+              <strong>{{ runTypeLabel(r.runType) }}</strong>
+              <p v-if="r.currentStep" class="run-current-step">{{ r.currentStep }}</p>
+              <p v-if="r.status === 'FAILED' && r.errorMessage" class="run-error-message">{{ r.errorMessage }}</p>
+              <small class="run-meta">
+                {{ r.progress || 0 }}% · {{ formatDate(r.createTime) }}
+                <template v-if="r.runtimeEngine"> · {{ runtimeLabel(r) }}</template>
+              </small>
+            </div>
+          </div>
+          <div v-else class="fact-empty">暂无 Agent 运行记录。</div>
+        </section>
       </div>
     </section>
 
-    <section v-if="reviewSummaryView.id" class="review-panel review-panel-prominent">
-      <div class="review-score">
-        <span>{{ riskStatusLabel(reviewSummaryView.riskStatus) }}</span>
-        <strong>{{ reviewSummaryView.riskScore ?? 0 }}</strong>
-        <small>规则引擎评分 · Agent 生成解释</small>
-      </div>
-      <div class="review-main">
-        <div class="review-prominent-head">
-          <div>
-            <span class="section-kicker">审查结果已生成</span>
-            <h3>{{ reviewSummaryView.title || '合同审查报告' }}</h3>
+    <section v-if="c.findings?.length" class="risk-workbench" data-section="risks">
+      <header class="risk-workbench-head">
+        <div>
+          <span class="section-kicker">风险研判</span>
+          <h3>审查发现</h3>
+          <p>先处理高风险和关键动作，展开后查看完整论证、双重依据与谈判建议。</p>
+        </div>
+        <div class="risk-counts" aria-label="风险数量汇总">
+          <span class="high"><strong>{{ findingCountBySeverity('HIGH') }}</strong> 高风险</span>
+          <span class="medium"><strong>{{ findingCountBySeverity('MEDIUM') }}</strong> 中风险</span>
+          <span class="low"><strong>{{ findingCountBySeverity('LOW') }}</strong> 低风险</span>
+        </div>
+      </header>
+
+      <section v-if="reviewSummaryView.id" class="review-panel review-panel-prominent review-panel-inline review-panel-flat">
+        <div class="review-main review-main-flat">
+          <div class="review-prominent-head">
+            <div>
+              <span class="section-kicker">审查结果已生成</span>
+              <h3>{{ reviewSummaryView.title || '合同审查报告' }}</h3>
+            </div>
+            <span class="review-run-badge" v-if="reviewSummaryView.runId">运行 #{{ reviewSummaryView.runId }}</span>
           </div>
-          <span class="review-run-badge" v-if="reviewSummaryView.runId">运行 #{{ reviewSummaryView.runId }}</span>
+          <p>{{ reviewSummaryView.summary || '审查已完成，请查看下方风险研判与逐项审查发现。' }}</p>
+          <div class="review-highlight-grid">
+            <div><strong>{{ c.findings?.length || 0 }}</strong><span>风险发现</span></div>
+            <div><strong>{{ formatDate(reviewSummaryView.createTime) }}</strong><span>生成时间</span></div>
+            <div><strong>{{ riskStatusLabel(reviewSummaryView.riskStatus) }}</strong><span>当前结论</span></div>
+          </div>
         </div>
-        <p>{{ reviewSummaryView.summary || '审查已完成，请展开查看风险和处理计划。' }}</p>
-        <div class="review-highlight-grid">
-          <div><strong>{{ reviewReportRisks.length }}</strong><span>风险发现</span></div>
-          <div><strong>{{ reviewReportPlan.length }}</strong><span>处理建议</span></div>
-          <div><strong>{{ formatDate(reviewSummaryView.createTime) }}</strong><span>生成时间</span></div>
+      </section>
+
+      <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
+        <div class="risk-domain-head">
+          <div>
+            <span>{{ group.items.length }} 项发现</span>
+            <h4>{{ group.name }}</h4>
+          </div>
+          <small v-if="group.highCount">{{ group.highCount }} 项需优先处理</small>
         </div>
-        <div class="review-result-footer">
-          <span>合同审查报告{{ reviewSummaryView.createTime ? ` · ${formatDate(reviewSummaryView.createTime)}` : '' }}</span>
-          <button type="button" class="primary-button small" @click="showReviewReport = !showReviewReport">
-            {{ showReviewReport ? '收起完整结果' : '展开完整结果' }}
-          </button>
-        </div>
-        <div v-if="showReviewReport" class="review-result-detail">
-          <section v-if="reviewCoverageChecklist.length" class="review-coverage-block">
-            <strong>审查覆盖清单 · {{ reviewCoverageChecklist.length }} 项</strong>
-            <div class="review-coverage-grid">
-              <article v-for="item in reviewCoverageChecklist" :key="item.domainKey" class="review-coverage-item" :class="String(item.coverageState || '').toLowerCase()">
-                <div class="review-coverage-head">
-                  <span>{{ item.coverageState || 'UNKNOWN' }}</span>
-                  <b>{{ item.domainName }}</b>
-                </div>
-                <p>{{ item.reason }}</p>
-                <small>证据 {{ item.evidenceCount || 0 }} · 发现 {{ item.findingCount || 0 }} · {{ (item.requiredClauseTypes || []).join('、') || '未指定' }}</small>
-                <details v-if="item.highlights && item.highlights.length">
-                  <summary>查看重点</summary>
-                  <ul>
-                    <li v-for="hit in item.highlights" :key="hit">{{ hit }}</li>
-                  </ul>
-                </details>
-              </article>
+
+        <article
+          v-for="f in group.items"
+          :key="f.id"
+          class="finding-card"
+          :class="['finding-' + (f.severity || 'MEDIUM').toLowerCase(), { 'finding-closed': findingClosed(f) }]"
+          :data-finding-id="f.id"
+        >
+          <div class="finding-summary-row">
+            <div class="finding-rank">
+              <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
+              <small>{{ findingStatusLabel(f.status) }}</small>
             </div>
-            <p v-if="reviewCoverageSummary.totalDomains" class="review-coverage-summary">
-              共 {{ reviewCoverageSummary.totalDomains }} 个领域，已覆盖 {{ reviewCoverageSummary.coveredDomains || 0 }} 个，
-              待补证 {{ (reviewCoverageSummary.partialDomains || 0) + (reviewCoverageSummary.missingDomains || 0) + (reviewCoverageSummary.ambiguousDomains || 0) }} 个。
-            </p>
-          </section>
-          <section v-if="reviewReportRisks.length">
-            <strong>重点风险 · {{ reviewReportRisks.length }} 项</strong>
-            <article v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-risk-card">
-              <div class="review-risk-headline">
-                <span>{{ severityLabel(risk.severity) }}</span>
-                <div>
-                  <b>{{ findingHeadline(risk) || risk.title || risk.name || `风险 ${index + 1}` }}</b>
-                  <p>{{ findingOneLine(risk) || risk.description || risk.summary || risk.detail || '请展开查看证据与处理建议。' }}</p>
-                </div>
+            <div class="finding-summary-main">
+              <div class="finding-title-line">
+                <h5>{{ findingHeadline(f) }}</h5>
+                <span class="clause-pill">{{ findingDomainName(f) }}</span>
               </div>
-              <div class="review-risk-meta">
-                <small>{{ findingDomainName(risk) }}</small>
-                <small v-if="findingHasContractBasis(risk)">合同依据已命中</small>
-                <small v-if="findingHasPolicyBasis(risk)">知识库依据已命中</small>
-                <small v-if="findingReviewQuestions(risk).length">{{ findingReviewQuestions(risk).length }} 个复核问题</small>
+              <p class="finding-one-line">{{ findingOneLine(f) }}</p>
+              <div class="finding-key-action">
+                <span>首要处理</span>
+                <strong>{{ findingKeyPoint(f) }}</strong>
               </div>
-              <details>
-                <summary>查看详细说明</summary>
-                <div class="review-risk-detail-grid">
-                  <div>
-                    <span>风险解释</span>
-                    <p>{{ findingExplanation(risk) || '暂无详细解释' }}</p>
-                  </div>
-                  <div>
-                    <span>业务影响</span>
-                    <p>{{ findingBusinessImpact(risk) || '暂无业务影响说明' }}</p>
-                  </div>
-                  <div>
-                    <span>处理建议</span>
-                    <p>{{ findingRevisionAdvice(risk) || '暂无处理建议' }}</p>
-                  </div>
-                  <div>
-                    <span>合同依据</span>
-                    <p>{{ findingContractBasis(risk) }}</p>
-                  </div>
-                  <div>
-                    <span>知识库依据</span>
-                    <p>{{ findingKnowledgeBasis(risk) }}</p>
-                  </div>
-                  <div>
-                    <span>证据状态</span>
-                    <p>{{ findingEvidenceStatus(risk) || '暂无' }}</p>
-                  </div>
-                  <div>
-                    <span>校验理由</span>
-                    <p>{{ findingValidationReasons(risk).join('；') || '暂无' }}</p>
-                  </div>
-                  <div>
-                    <span>人工复核问题</span>
-                    <p>{{ findingReviewQuestions(risk).join('；') || '暂无' }}</p>
-                  </div>
-                </div>
-              </details>
-            </article>
-          </section>
-          <section v-if="reviewReportPlan.length">
-            <strong>处理计划 · {{ reviewReportPlan.length }} 项</strong>
-            <div v-for="(item, index) in reviewReportPlan" :key="item.id || index" class="review-result-item">
-              <span>{{ item.id || index + 1 }}</span>
-              <div>
-                <b>{{ item.title || item.action || item.name || '待处理事项' }}</b>
-                <p>{{ item.acceptance || item.description || item.ownerRole || '请结合审查发现确认处理人和完成标准。' }}</p>
+              <div class="finding-source-strip">
+                <span :class="{ active: findingHasContractBasis(f) }">合同原文{{ findingHasContractBasis(f) ? '已引用' : '待补充' }}</span>
+                <span :class="{ active: findingHasPolicyBasis(f) }">知识依据{{ findingHasPolicyBasis(f) ? '已引用' : '待补充' }}</span>
+                <span :class="{ active: findingClosed(f) }">状态{{ findingStatusLabel(f.status) }}</span>
               </div>
             </div>
-          </section>
-          <pre v-if="reviewSummaryView.reportMarkdown" class="review-report-markdown">{{ reviewSummaryView.reportMarkdown }}</pre>
-          <pre v-else-if="reviewSummaryView.contentJson" class="review-report-json">{{ prettyReportContent(reviewSummaryView.contentJson) }}</pre>
-        </div>
-      </div>
+            <button
+              type="button"
+              class="finding-expand"
+              :aria-expanded="isFindingExpanded(f)"
+              :aria-controls="`finding-detail-${f.id}`"
+              @click="toggleFinding(f)"
+            >{{ isFindingExpanded(f) ? '收起详情' : '查看详情' }}</button>
+          </div>
+
+          <div v-if="isFindingExpanded(f)" :id="`finding-detail-${f.id}`" class="finding-detail">
+            <section v-if="findingExplanation(f)">
+              <span>风险解释</span>
+              <p>{{ findingExplanation(f) }}</p>
+            </section>
+            <section v-if="findingBusinessImpact(f)">
+              <span>可能影响</span>
+              <p>{{ findingBusinessImpact(f) }}</p>
+            </section>
+
+            <div class="finding-evidence-grid">
+              <section>
+                <span>合同依据</span>
+                <p>{{ findingContractBasis(f) }}</p>
+                <blockquote v-if="f.contractCitation?.snippet">{{ f.contractCitation.snippet }}</blockquote>
+              </section>
+              <section>
+                <span>知识库 / 标准条款依据</span>
+                <p>{{ findingKnowledgeBasis(f) }}</p>
+                <blockquote v-if="f.policyCitation?.snippet">{{ f.policyCitation.snippet }}</blockquote>
+              </section>
+            </div>
+
+            <div v-if="findingDetail(f).explicitConsequence || findingDetail(f).inferredConsequence" class="finding-consequence-grid">
+              <section v-if="findingDetail(f).explicitConsequence">
+                <span>合同明确后果</span>
+                <p>{{ findingDetail(f).explicitConsequence }}</p>
+              </section>
+              <section v-if="findingDetail(f).inferredConsequence" class="ai-inference">
+                <span>AI 推断，仅供参考，不代表合同约定</span>
+                <p>{{ findingDetail(f).inferredConsequence }}</p>
+              </section>
+            </div>
+
+            <div class="advice-grid" v-if="findingRevisionAdvice(f) || f.negotiationAdvice">
+              <section v-if="findingRevisionAdvice(f)">
+                <span>条款修改建议</span>
+                <p>{{ findingRevisionAdvice(f) }}</p>
+              </section>
+              <section v-if="f.negotiationAdvice">
+                <span>谈判口径</span>
+                <p>{{ f.negotiationAdvice }}</p>
+              </section>
+            </div>
+
+            <section v-if="findingReviewQuestions(f).length" class="verification-list">
+              <span>人工复核问题</span>
+              <ul><li v-for="point in findingReviewQuestions(f)" :key="point">{{ point }}</li></ul>
+            </section>
+            <div class="finding-buttons" v-if="f.status === 'OPEN'">
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'REMEDIATED')">标记已修改</button>
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
+              <button class="quiet-button tiny" @click="updateFinding(f.id, 'DISMISSED')">驳回</button>
+            </div>
+          </div>
+        </article>
+      </section>
     </section>
 
     <section v-if="documentPipelineActive" class="document-progress-panel">
@@ -225,68 +841,6 @@
         <span>当前进度</span>
       </div>
       <div class="document-progress-track"><i :style="{ width: `${documentPipelineProgress}%` }"></i></div>
-    </section>
-
-    <section v-if="primaryLifecycleCondition" class="contract-diagnostics">
-      <div v-if="primaryLifecycleCondition" class="contract-end-condition">
-        <div class="diagnostic-mark">结束条件</div>
-        <div>
-          <strong>{{ primaryLifecycleCondition.summary }}</strong>
-          <ol v-if="lifecycleEvents(primaryLifecycleCondition).length">
-            <li v-for="event in lifecycleEvents(primaryLifecycleCondition)" :key="event.sequence || event.event">
-              <span>{{ primaryLifecycleCondition.logicOperator === 'ALL' ? '必须满足' : '条件' }}</span>
-              {{ event.event }}
-            </li>
-          </ol>
-          <small>来源：{{ lifecycleSourceLabel(primaryLifecycleCondition) }} · 最终结束状态需人工确认</small>
-        </div>
-      </div>
-    </section>
-
-    <section class="timeline-panel">
-      <div class="timeline-panel-head">
-        <div>
-          <span>履约日程</span>
-          <h3>关键时间与待办</h3>
-        </div>
-        <strong>{{ caseTimelineNodes.length }} 个节点</strong>
-      </div>
-      <div v-if="caseTimelineNodes.length" class="detail-timeline">
-        <article
-          v-for="node in caseTimelineNodes"
-          :key="timelineKey(node)"
-          class="detail-timeline-node"
-          :class="timelineStatusClass(node)"
-          role="button"
-          tabindex="0"
-          @click="openTimelineDetail(node)"
-          @keydown.enter="openTimelineDetail(node)"
-        >
-          <div class="timeline-date-column">
-            <strong>{{ timelineDateLabel(node) }}</strong>
-            <span v-if="timelineNeedsRecognition(node)" class="recognition-warning">日期/文字可能有误</span>
-            <span v-else-if="relativeDateResult(node).baseUncertain" class="basis-warning">基准日期待确认</span>
-            <small v-else>{{ timelineDateKind(node) }}</small>
-          </div>
-          <div class="timeline-node-main">
-            <span v-if="timelineTypeLabel(node.nodeType) !== (node.label || timelineTypeLabel(node.nodeType))" class="timeline-type">{{ timelineTypeLabel(node.nodeType) }}</span>
-            <h4>{{ node.label || timelineTypeLabel(node.nodeType) }}</h4>
-            <p class="timeline-action">{{ timelineAction(node) }}</p>
-            <p v-if="timelineQualityNote(node)" class="timeline-quality-note">{{ timelineQualityNote(node) }}</p>
-            <div class="timeline-node-meta">
-              <small>{{ timelineSourceLabel(node) }}</small>
-              <small>{{ timelinePartyLabel(node.responsibleParty) }}</small>
-              <small v-if="node.confidence != null">可信度 {{ confidenceLabel(node.confidence) }}</small>
-              <small v-if="timelineNeedsRecognition(node)">需要人工核对</small>
-            </div>
-          </div>
-          <div class="timeline-row-actions" @click.stop>
-            <button v-if="canFulfillmentCheck(node)" class="evidence-button" @click="openTimelineDetail(node, true)">上传证明</button>
-            <button class="detail-button" @click="openTimelineDetail(node)">查看详情 <span aria-hidden="true">→</span></button>
-          </div>
-        </article>
-      </div>
-      <div v-else class="timeline-empty">{{ timelineEmptyText() }}</div>
     </section>
 
     <div v-if="selectedTimelineNode" class="modal-overlay" @click.self="closeTimelineDetail">
@@ -449,169 +1003,6 @@
         </div>
       </section>
     </div>
-
-    <section class="side-section" v-if="availableKnowledge.length">
-      <h3>本合同可用知识 · {{ availableKnowledge.length }} 份</h3>
-      <div v-for="doc in availableKnowledge" :key="doc.id" class="knowledge-row">
-        <span :class="'knowledge-scope ' + scopeClass(doc.contractUsageScope)">{{ knowledgeScopeLabel(doc.contractUsageScope) }}</span>
-        <strong>{{ doc.title }}</strong>
-        <small>{{ knowledgeChangeSummary(doc) }}</small>
-      </div>
-    </section>
-
-    <section
-      v-if="!reviewSummaryView.id && analysisWorkflow.status === 'READY_FOR_REVIEW'"
-      class="review-panel review-panel-prominent review-empty-state"
-    >
-      <div class="review-score review-empty-score">
-        <span>待发起</span>
-        <strong>—</strong>
-        <small>当前还没有合同审查报告</small>
-      </div>
-      <div class="review-main">
-        <span class="section-kicker">合同审查尚未开始</span>
-        <h3>解析已完成，等待发起风险审查</h3>
-        <p>合同文本和时间节点已经准备好。点击下方按钮后，Agent 才会检索证据、分析风险并生成审查报告。</p>
-        <div class="review-result-footer">
-          <span>当前状态：待发起合同审查</span>
-          <span class="workflow-next-step">请使用页面顶部的“开始风险审查”按钮</span>
-        </div>
-      </div>
-    </section>
-
-    <!-- Review overview -->
-    <section class="review-panel" v-if="c.reviewSummary?.id">
-      <div class="review-score">
-        <span>{{ riskStatusLabel(c.reviewSummary.riskStatus) }}</span>
-        <strong>{{ c.reviewSummary.riskScore ?? 0 }}</strong>
-        <small>规则引擎评分 · Agent 生成解释</small>
-      </div>
-      <div class="review-main">
-        <h3>{{ c.reviewSummary.title || '合同审查报告' }}</h3>
-        <p>{{ c.reviewSummary.summary || '暂无摘要' }}</p>
-        <div class="dimension-strip" v-if="Array.isArray(c.reviewSummary.dimensionsJson)">
-          <div v-for="d in c.reviewSummary.dimensionsJson" :key="d.name">
-            <span>{{ d.name }}</span>
-            <strong>{{ d.score }}</strong>
-          </div>
-        </div>
-        <div class="review-result-footer">
-          <span>
-            {{ c.reviewSummary.reportType === 'CONTRACT_REVIEW' ? '合同审查结果' : '合同审查报告' }}
-            <template v-if="c.reviewSummary.createTime"> · {{ formatDate(c.reviewSummary.createTime) }}</template>
-          </span>
-          <button type="button" class="quiet-button tiny" @click="showReviewReport = !showReviewReport">
-            {{ showReviewReport ? '收起完整结果' : '展开完整结果' }}
-          </button>
-        </div>
-        <div v-if="showReviewReport" class="review-result-detail">
-          <section v-if="reviewReportRisks.length">
-            <strong>风险结果 · {{ reviewReportRisks.length }} 项</strong>
-            <div v-for="(risk, index) in reviewReportRisks" :key="risk.id || index" class="review-result-item">
-              <span>{{ severityLabel(risk.severity) }}</span>
-              <div>
-                <b>{{ risk.title || risk.name || `风险 ${index + 1}` }}</b>
-                <p>{{ risk.description || risk.summary || risk.detail || '请展开下方审查发现查看证据与处理建议。' }}</p>
-              </div>
-            </div>
-          </section>
-          <section v-if="reviewReportPlan.length">
-            <strong>处理计划 · {{ reviewReportPlan.length }} 项</strong>
-            <div v-for="(item, index) in reviewReportPlan" :key="item.id || index" class="review-result-item">
-              <span>{{ item.id || index + 1 }}</span>
-              <div>
-                <b>{{ item.title || item.action || item.name || '待处理事项' }}</b>
-                <p>{{ item.acceptance || item.description || item.ownerRole || '请结合审查发现确认处理人和完成标准。' }}</p>
-              </div>
-            </div>
-          </section>
-          <pre v-if="c.reviewSummary.reportMarkdown" class="review-report-markdown">{{ c.reviewSummary.reportMarkdown }}</pre>
-          <pre v-else-if="c.reviewSummary.contentJson" class="review-report-json">{{ prettyReportContent(c.reviewSummary.contentJson) }}</pre>
-        </div>
-      </div>
-    </section>
-
-    <!-- Parties -->
-    <section class="side-section" v-if="c.parties?.length">
-      <h3>合同主体</h3>
-      <div v-for="p in c.parties" :key="p.id" class="party-row">
-        <span>{{ partyRoleLabel(p.partyRole) }}</span><strong>{{ p.partyName }}</strong>
-        <small v-if="p.riskScore != null">风险分 {{ p.riskScore }}</small>
-      </div>
-    </section>
-
-    <!-- Documents -->
-    <section class="side-section" data-section="documents">
-      <div class="section-header">
-        <h3>合同文件 · {{ c.documents?.length || 0 }} 份</h3>
-        <button class="quiet-button small" @click="showUpload = !showUpload">{{ showUpload ? '取消' : '+ 上传文件' }}</button>
-      </div>
-      <div class="revision-upload-callout">
-        <div>
-          <strong>需要上传修改后的合同？</strong>
-          <small>系统会按新的主合同版本解析，后续可发起版本差异复核或重新审查。</small>
-        </div>
-        <button type="button" class="primary-button small" @click="openRevisionUpload">上传修改版</button>
-      </div>
-
-      <!-- Upload form -->
-      <div v-if="showUpload" class="upload-form">
-        <!-- Mode toggle -->
-        <div class="upload-tabs">
-          <button type="button" :class="['tab-btn', { active: upload.mode === 'file' }]" :disabled="uploading" @click="upload.mode = 'file'">文件登记</button>
-          <button type="button" :class="['tab-btn', { active: upload.mode === 'text' }]" :disabled="uploading" @click="upload.mode = 'text'">纯文字</button>
-        </div>
-
-        <!-- File upload mode -->
-        <div v-if="upload.mode === 'file'" class="upload-file-mode">
-          <div class="upload-row">
-            <select v-model="upload.docType"><option value="MAIN">主合同</option><option value="ATTACHMENT">附件</option><option value="PRICING">报价单</option><option value="CERTIFICATE">资质证明</option></select>
-            <input v-model.trim="upload.fileName" placeholder="文件名（默认使用所选文件名）" />
-            <label class="file-picker">
-              <input type="file" accept=".doc,.docx,.pdf,.txt,.md,.markdown" @change="chooseContractFile" />
-              <span>{{ upload.file ? '已选择文件' : '选择 DOC / DOCX / PDF / TXT / MD' }}</span>
-            </label>
-            <button class="quiet-button small" @click="doUpload" :disabled="uploading || (!upload.file && !upload.filePath.trim())">{{ uploading ? '提交中' : '上传并解析' }}</button>
-          </div>
-          <div class="upload-row path-row">
-            <input v-model.trim="upload.filePath" placeholder="可选：已有本地路径或 /upload/... 路径" />
-          </div>
-          <small class="upload-hint">
-            {{ upload.file ? upload.file.name + ' · ' + formatBytes(upload.file.size) : '选择文件后会先上传到后端，再进入合同文档解析流水线。' }}
-          </small>
-        </div>
-
-        <!-- Text paste mode -->
-        <div v-else class="upload-text-mode">
-          <div class="upload-row">
-            <select v-model="upload.docType"><option value="MAIN">主合同</option><option value="ATTACHMENT">附件</option></select>
-            <input v-model.trim="upload.fileName" placeholder="合同标题（如：XX公司服务采购合同）" />
-          </div>
-          <textarea
-            v-model="upload.contentText"
-            placeholder="在此粘贴或输入合同全文内容……&#10;&#10;支持纯文本格式。粘贴后可直接用于 Agent 审查、条款抽取和风险分析。"
-            rows="16"
-            class="upload-textarea"
-          ></textarea>
-          <div class="upload-text-actions">
-            <small>{{ upload.contentText ? '已输入 ' + upload.contentText.length + ' 字符' : '尚未输入内容' }}</small>
-            <button class="primary-button small" @click="doUpload" :disabled="uploading || !upload.fileName || !upload.contentText.trim()">{{ uploading ? '提交并解析中' : '提交文字合同' }}</button>
-          </div>
-        </div>
-      </div>
-
-      <div v-if="c.documents?.length">
-        <div v-for="d in c.documents" :key="d.id" class="doc-row">
-          <span>{{ docTypeLabel(d.documentType) }}</span>
-          <strong>{{ d.fileName }}</strong>
-          <small>v{{ d.version }} · {{ d.hasInlineText ? parseStatusLabel(d) + ' · ' + (d.textLength || 0) + ' 字' : parseStatusLabel(d) }}</small>
-          <small v-if="documentPipelineStatusActive(d)" class="doc-pipeline-action">{{ documentPipelineAction(d) }} · {{ d.pipelineProgress || 0 }}%</small>
-          <div v-if="documentPipelineStatusActive(d)" class="doc-pipeline-track"><i :style="{ width: `${d.pipelineProgress || 0}%` }"></i></div>
-          <button v-if="d.hasInlineText" class="quiet-button tiny" @click="openTextPreview(d)">预览</button>
-        </div>
-      </div>
-      <div v-else-if="!showUpload" class="blank-state">尚未上传合同文件。支持文件登记或直接粘贴合同全文。</div>
-    </section>
 
     <!-- Text preview modal -->
     <div v-if="viewTextDoc" class="modal-overlay" @click.self="viewTextDoc = null">
@@ -806,198 +1197,7 @@
       </div>
     </div>
 
-    <!-- Runs -->
-    <section class="side-section" data-section="runs" v-if="c.runs?.length">
-      <h3>Agent 运行记录</h3>
-      <div v-for="r in c.runs" :key="r.id" class="run-row" :class="{ 'run-row-failed': r.status === 'FAILED' }">
-        <span :class="runStatusClass(r.status)">{{ runStatusLabel(r.status) }}</span>
-        <strong>{{ runTypeLabel(r.runType) }}</strong>
-        <p v-if="r.status === 'FAILED' && r.errorMessage" class="run-error-message">{{ r.errorMessage }}</p>
-        <small>{{ r.progress || 0 }}% · {{ formatDate(r.createTime) }}</small>
-      </div>
-    </section>
-
-    <!-- Findings -->
-    <section class="risk-workbench" data-section="findings" v-if="c.findings?.length">
-      <header class="risk-workbench-head">
-        <div>
-          <span class="section-kicker">风险研判</span>
-          <h3>审查发现</h3>
-          <p>先处理高风险和关键动作，展开后查看完整论证、双重依据与谈判建议。</p>
-        </div>
-        <div class="risk-counts" aria-label="风险数量汇总">
-          <span class="high"><strong>{{ findingCountBySeverity('HIGH') }}</strong> 高风险</span>
-          <span class="medium"><strong>{{ findingCountBySeverity('MEDIUM') }}</strong> 中风险</span>
-          <span class="low"><strong>{{ findingCountBySeverity('LOW') }}</strong> 低风险</span>
-        </div>
-      </header>
-
-      <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
-        <div class="risk-domain-head">
-          <div>
-            <span>{{ group.items.length }} 项发现</span>
-            <h4>{{ group.name }}</h4>
-          </div>
-          <small v-if="group.highCount">{{ group.highCount }} 项需优先处理</small>
-        </div>
-
-        <article
-          v-for="f in group.items"
-          :key="f.id"
-          class="finding-card"
-          :class="['finding-' + (f.severity || 'MEDIUM').toLowerCase(), { 'finding-closed': findingClosed(f) }]"
-          :data-finding-id="f.id"
-        >
-          <div class="finding-summary-row">
-            <div class="finding-rank">
-              <span class="finding-sev" :class="'sev-'+ (f.severity||'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
-              <small>{{ findingStatusLabel(f.status) }}</small>
-            </div>
-            <div class="finding-summary-main">
-              <div class="finding-title-line">
-                <h5>{{ findingHeadline(f) }}</h5>
-                <span class="clause-pill">{{ findingDomainName(f) }}</span>
-              </div>
-              <p class="finding-one-line">{{ findingOneLine(f) }}</p>
-              <div class="finding-key-action">
-                <span>首要处理</span>
-                <strong>{{ findingKeyPoint(f) }}</strong>
-              </div>
-              <div class="finding-source-strip">
-                <span :class="{ active: findingHasContractBasis(f) }">合同原文{{ findingHasContractBasis(f) ? '已引用' : '待补充' }}</span>
-                <span :class="{ active: findingHasPolicyBasis(f) }">知识依据{{ findingHasPolicyBasis(f) ? '已引用' : '待补充' }}</span>
-                <span>可信度 {{ levelLabel(findingDetail(f).confidenceLevel) }}</span>
-                <span v-if="f.suggestedAction">{{ suggestedActionLabel(f.suggestedAction) }}</span>
-              </div>
-            </div>
-            <button
-              type="button"
-              class="finding-expand"
-              :aria-expanded="isFindingExpanded(f)"
-              :aria-controls="`finding-detail-${f.id}`"
-              @click="toggleFinding(f)"
-            >{{ isFindingExpanded(f) ? '收起详情' : '查看详情' }}</button>
-          </div>
-
-          <div v-if="isFindingExpanded(f)" :id="`finding-detail-${f.id}`" class="finding-detail">
-            <section v-if="findingExplanation(f)">
-              <span>风险解释</span>
-              <p>{{ findingExplanation(f) }}</p>
-            </section>
-            <section v-if="findingBusinessImpact(f)">
-              <span>可能影响</span>
-              <p>{{ findingBusinessImpact(f) }}</p>
-            </section>
-
-            <div class="finding-evidence-grid">
-              <section>
-                <span>合同依据</span>
-                <p>{{ findingContractBasis(f) }}</p>
-                <blockquote v-if="f.contractCitation?.snippet">{{ f.contractCitation.snippet }}</blockquote>
-              </section>
-              <section>
-                <span>知识库 / 标准条款依据</span>
-                <p>{{ findingKnowledgeBasis(f) }}</p>
-                <blockquote v-if="f.policyCitation?.snippet">{{ f.policyCitation.snippet }}</blockquote>
-              </section>
-            </div>
-
-            <div v-if="findingDetail(f).explicitConsequence || findingDetail(f).inferredConsequence" class="finding-consequence-grid">
-              <section v-if="findingDetail(f).explicitConsequence">
-                <span>合同明确后果</span>
-                <p>{{ findingDetail(f).explicitConsequence }}</p>
-              </section>
-              <section v-if="findingDetail(f).inferredConsequence" class="ai-inference">
-                <span>AI 推断，仅供参考，不代表合同约定</span>
-                <p>{{ findingDetail(f).inferredConsequence }}</p>
-              </section>
-            </div>
-
-            <div class="advice-grid" v-if="findingRevisionAdvice(f) || f.negotiationAdvice">
-              <section v-if="findingRevisionAdvice(f)">
-                <span>条款修改建议</span>
-                <p>{{ findingRevisionAdvice(f) }}</p>
-              </section>
-              <section v-if="f.negotiationAdvice">
-                <span>谈判口径</span>
-                <p>{{ f.negotiationAdvice }}</p>
-              </section>
-            </div>
-
-            <section v-if="findingReviewQuestions(f).length" class="verification-list">
-              <span>人工复核问题</span>
-              <ul><li v-for="point in findingReviewQuestions(f)" :key="point">{{ point }}</li></ul>
-            </section>
-            <div class="finding-buttons" v-if="f.status === 'OPEN'">
-              <button class="quiet-button tiny" @click="updateFinding(f.id, 'REMEDIATED')">标记已修改</button>
-              <button class="quiet-button tiny" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
-              <button class="quiet-button tiny" @click="updateFinding(f.id, 'DISMISSED')">驳回</button>
-            </div>
-          </div>
-        </article>
-      </section>
-    </section>
-
-    <button
-      v-if="riskFloatItems.length"
-      type="button"
-      class="risk-float-toggle"
-      :class="{ active: riskFloatVisible }"
-      @click="riskFloatVisible = !riskFloatVisible"
-    >
-      <span>风险</span>
-      <strong>{{ openFindingCount || riskFloatItems.length }}</strong>
-    </button>
-
-    <aside v-if="riskFloatItems.length && riskFloatVisible" class="risk-float-panel" aria-label="合同风险处理浮窗">
-      <div class="risk-float-head">
-        <div>
-          <span>风险处理</span>
-          <strong>{{ openFindingCount }} / {{ riskFloatItems.length }}</strong>
-        </div>
-        <small>{{ openFindingCount ? '待处理' : '已处理完' }}</small>
-      </div>
-      <div class="risk-float-list">
-        <article
-          v-for="f in riskFloatItems"
-          :key="f.id || f.findingKey || f.title"
-          class="risk-float-item"
-          :class="{ done: findingClosed(f), high: f.severity === 'HIGH' }"
-        >
-          <button type="button" class="risk-float-title" @click="scrollToFinding(f)">
-            <span :class="'sev-'+ (f.severity || 'MEDIUM').toLowerCase()">{{ severityLabel(f.severity) }}</span>
-            <strong>{{ findingHeadline(f) }}</strong>
-          </button>
-          <p>{{ findingKeyPoint(f) }}</p>
-          <div class="risk-float-status">
-            <small>{{ findingStatusLabel(f.status) }}</small>
-            <small>{{ findingDomainName(f) }}</small>
-          </div>
-          <div v-if="f.id && f.status === 'OPEN'" class="risk-float-actions">
-            <button type="button" @click="updateFinding(f.id, 'REMEDIATED')">标记已完成</button>
-            <button type="button" @click="updateFinding(f.id, 'ACCEPTED_EXCEPTION')">接受例外</button>
-          </div>
-          <div v-else-if="!f.id" class="risk-float-done report-only">
-            报告风险，详情区生成后可处理
-          </div>
-          <div v-else class="risk-float-done">
-            {{ f.status === 'ACCEPTED_EXCEPTION' ? '已接受例外' : findingStatusLabel(f.status) }}
-          </div>
-        </article>
-      </div>
-    </aside>
-
-    <!-- Obligations -->
-    <section class="side-section" v-if="c.obligations?.length">
-      <h3>履约义务 · {{ c.obligations.length }} 条</h3>
-      <div v-for="o in c.obligations" :key="o.id" class="obligation-row">
-        <span :class="'obl-'+ (o.status||'PLANNED').toLowerCase()">{{ obligationStatusLabel(o.status) }}</span>
-        <strong>{{ o.title }}</strong>
-        <small>{{ o.dueDate || '条件触发' }}</small>
-      </div>
-    </section>
   </div>
-  <div v-else class="loading-block"><span class="loader"></span> 读取合同信息</div>
 </template>
 
 <script setup>
@@ -1010,12 +1210,18 @@ import {
   resolveTimelineDate,
   sanitizeTimelineMeaning,
 } from '../utils/contractTimeline.js'
+import {
+  compactAmountValue as formatCompactAmountValue,
+  compactElementValue as formatCompactElementValue,
+  elementDisplayValue as formatElementDisplayValue,
+  elementPresentation as buildElementPresentation,
+  structuredValueSummary as summarizeStructuredValue,
+} from '../utils/contractElementDisplay.js'
 
 const route = useRoute(); const router = useRouter(); const message = useMessage()
-const c = ref({}); const loading = ref(true); const running = ref(false)
+const c = ref({}); const loading = ref(true); const loadError = ref(''); const running = ref(false)
 const expandedFindings = reactive(new Set())
-const showReviewReport = ref(false)
-const riskFloatVisible = ref(true)
+const selectedElementKey = ref('')
 const showUpload = ref(false)
 const uploading = ref(false)
 const upload = ref({ mode: 'file', docType: 'MAIN', fileName: '', filePath: '', contentText: '', file: null })
@@ -1040,13 +1246,275 @@ let caseRefreshTimer = null
 let caseRefreshInFlight = false
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
+const activeWorkbenchTab = ref('elements')
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
+const extractionSnapshot = computed(() => c.value.extractionSnapshot || {})
+const contractProfile = computed(() => (c.value.contractProfile && typeof c.value.contractProfile === 'object')
+  ? c.value.contractProfile
+  : {})
+const hasDynamicContractProfile = computed(() => {
+  const profile = contractProfile.value || {}
+  return Boolean(
+    (Array.isArray(profile.baseFields) && profile.baseFields.length)
+    || (Array.isArray(profile.groups) && profile.groups.length)
+  )
+})
+const contractElements = computed(() => (Array.isArray(c.value.contractElements) ? c.value.contractElements : [])
+  .filter(element => element && element.applicable !== false))
+const SUMMARY_ELEMENT_KEYS = new Set([
+  'contract_title', 'contract_type', 'party_a', 'party_b', 'our_side',
+  'contract_amount', 'effective_date', 'expiry_date', 'termination_conditions',
+])
+const PAYMENT_SCHEDULE_ELEMENT_KEYS = new Set(['payment_terms'])
+const visibleContractElements = computed(() => contractElements.value.filter(element => {
+  const key = String(element?.elementKey || '')
+  return !SUMMARY_ELEMENT_KEYS.has(key) && !PAYMENT_SCHEDULE_ELEMENT_KEYS.has(key)
+}))
+const paymentScheduleElements = computed(() => contractElements.value.filter(element =>
+  PAYMENT_SCHEDULE_ELEMENT_KEYS.has(String(element?.elementKey || ''))))
+const selectedContractElement = computed(() =>
+  displayContractElements.value.find(element => elementIdentity(element) === selectedElementKey.value)
+  || displayContractElements.value[0]
+  || null
+)
+const selectedElementEvidence = computed(() =>
+  Array.isArray(selectedContractElement.value?.evidence)
+    ? selectedContractElement.value.evidence
+    : Array.isArray(selectedContractElement.value?.citations)
+      ? selectedContractElement.value.citations
+        .map(citation => normalizeProfileCitation(citation, selectedContractElement.value?.identityKey || selectedElementKey.value))
+        .filter(Boolean)
+      : []
+)
+const intakeFactDecisions = computed(() => Array.isArray(c.value.intakeFactDecisions)
+  ? c.value.intakeFactDecisions
+  : [])
+const evidenceLinkCount = computed(() => displayContractElements.value.reduce((count, element) =>
+  count + (Array.isArray(element?.evidence) ? element.evidence.length : 0), 0))
+const workbenchTabs = computed(() => [
+  { key: 'elements', label: '合同要素', count: displayContractElements.value.length },
+  { key: 'timeline', label: '履约日程', count: caseTimelineNodes.value.length },
+  { key: 'evidence', label: '原文证据', count: evidenceLinkCount.value || selectedElementEvidence.value.length },
+  { key: 'runs', label: 'Agent 运行', count: Array.isArray(c.value.runs) ? c.value.runs.length : 0 },
+])
+const latestMainDocument = computed(() => (Array.isArray(c.value.documents) ? c.value.documents : [])
+  .filter(document => String(document?.documentType || '').toUpperCase() === 'MAIN'
+    && String(document?.parseStatus || '').toUpperCase() === 'READY')
+  .sort((left, right) => Number(right?.version || 0) - Number(left?.version || 0))[0] || null)
+const hasParsedContractDocument = computed(() => Boolean(latestMainDocument.value))
 const ACTIVE_RUN_STATUSES = new Set([
   'CREATED', 'CONTEXT_BUILDING', 'PLANNING', 'ANALYZING',
   'VERIFYING', 'WAITING_HUMAN', 'WAITING_APPROVAL',
 ])
 const hasActiveRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .some(run => ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
+const extractionRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
+  .find(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_ELEMENT_EXTRACTION') || null)
+const extractionRunActive = computed(() => ACTIVE_RUN_STATUSES.has(String(extractionRun.value?.status || '').toUpperCase()))
+const extractionRunFailed = computed(() =>
+  String(extractionRun.value?.status || '').toUpperCase() === 'FAILED'
+  || String(analysisWorkflow.value?.extractionStatus || '').toUpperCase() === 'FAILED'
+)
+const extractionSnapshotModeLabel = computed(() => {
+  if (hasDynamicContractProfile.value) return '动态合同画像'
+  if (extractionSnapshot.value?.id) return '旧版结构化结果'
+  return '尚未生成要素快照'
+})
+const workflowIsComplete = computed(() =>
+  String(analysisWorkflow.value?.status || '').toUpperCase() === 'COMPLETED'
+)
+const riskReviewRunActive = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
+  .some(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW'
+    && ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
+const canExtractContractElements = computed(() => hasParsedContractDocument.value && !extractionRunActive.value)
+const workbenchSectionTabMap = {
+  elements: 'elements',
+  timeline: 'timeline',
+  findings: 'risks',
+  risks: 'risks',
+  evidence: 'evidence',
+  documents: 'evidence',
+  runs: 'runs',
+  knowledge: 'elements',
+}
+
+function workbenchTabForSection(section) {
+  const key = String(section || '')
+  return workbenchSectionTabMap[key] || key
+}
+
+function switchWorkbenchTab(tabKey) {
+  const nextTab = workbenchTabs.value.some(tab => tab.key === tabKey) ? tabKey : activeWorkbenchTab.value
+  activeWorkbenchTab.value = nextTab
+}
+
+function normalizeProfileCitation(citation, fieldIdentity) {
+  if (!citation || typeof citation !== 'object') return null
+  const quote = String(citation.quote || citation.text || citation.clauseText || '').trim()
+  if (!quote) return null
+  return {
+    id: citation.sourceId || `${fieldIdentity}-${citation.clauseId || citation.pageNumber || quote.slice(0, 12)}`,
+    clauseId: citation.clauseId,
+    clauseNumber: citation.clauseNumber,
+    clauseTitle: citation.clauseTitle || citation.title,
+    clauseContent: citation.clauseContent || citation.clauseText || quote,
+    documentFileName: citation.documentFileName || citation.fileName,
+    documentPreviewUrl: citation.documentPreviewUrl || citation.previewUrl || '',
+    pageNumber: citation.pageNumber,
+    paragraphIndex: citation.paragraphIndex,
+    quote,
+    startOffset: citation.startOffset,
+    endOffset: citation.endOffset,
+    bbox: citation.bbox,
+    retrievalMethod: citation.retrievalMethod || 'PROFILE',
+    score: citation.score ?? citation.confidence ?? null,
+  }
+}
+
+function normalizeProfileField(field, groupMeta = {}) {
+  if (!field || typeof field !== 'object') return null
+  const key = String(field.key || field.fieldKey || field.name || '').trim()
+  if (!key) return null
+  const citations = Array.isArray(field.citations) ? field.citations : []
+  const evidence = citations
+    .map(citation => normalizeProfileCitation(citation, `profile-${groupMeta.groupKey || 'base'}-${key}`))
+    .filter(Boolean)
+  const rawValue = field.value
+  const normalizedValue = rawValue && typeof rawValue === 'object' ? rawValue : null
+  return {
+    identityKey: `profile-${groupMeta.groupKey || 'base'}-${key}`,
+    id: null,
+    elementKey: key,
+    displayLabel: field.label || elementName(key),
+    title: field.label || elementName(key),
+    rawValue,
+    normalizedValue,
+    status: field.status || (evidence.length ? 'EXTRACTED' : 'NEEDS_REVIEW'),
+    confidence: field.confidence,
+    source: field.source || 'PROFILE',
+    applicable: field.status !== 'NOT_FOUND',
+    importance: field.importance || 'CORE',
+    groupKey: groupMeta.groupKey || 'base',
+    groupLabel: groupMeta.groupLabel || '基础合同事实',
+    reason: field.reason || groupMeta.reason || '',
+    citations,
+    evidence,
+  }
+}
+
+const profileFactGroups = computed(() => {
+  const profile = contractProfile.value || {}
+  const groups = []
+  const baseFields = Array.isArray(profile.baseFields) ? profile.baseFields : []
+  const normalizedBaseFields = baseFields
+    .map((field, index) => normalizeProfileField(field, {
+      groupKey: 'base',
+      groupLabel: '基础合同事实',
+      reason: '合同基础字段',
+      index,
+    }))
+    .filter(Boolean)
+  if (normalizedBaseFields.length) {
+    groups.push({ key: 'PROFILE_BASE', label: '基础合同事实', items: normalizedBaseFields })
+  }
+  const profileGroups = Array.isArray(profile.groups) ? profile.groups : []
+  for (const [index, group] of profileGroups.entries()) {
+    const groupKey = String(group?.groupKey || `group_${index + 1}`)
+    const groupLabel = String(group?.label || '合同专属要素').trim() || '合同专属要素'
+    const groupReason = String(group?.reason || '').trim()
+    const items = Array.isArray(group?.fields)
+      ? group.fields
+        .map((field, fieldIndex) => normalizeProfileField(field, {
+          groupKey,
+          groupLabel,
+          reason: groupReason,
+          index: fieldIndex,
+        }))
+        .filter(Boolean)
+      : []
+    if (items.length) groups.push({ key: groupKey, label: groupLabel, items })
+  }
+  return groups
+})
+
+const displayContractElements = computed(() => contractElementGroups.value.flatMap(group => group.items || []))
+const contractElementSections = computed(() => contractElementGroups.value.map(group => ({
+  ...group,
+  paymentRows: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'PAYMENT'),
+  processItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'PROCESS'),
+  liabilityItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'LIABILITY'),
+  terminationItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'TERMINATION'),
+  factItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'FACT'),
+})))
+const contractSummaryFields = computed(() => {
+  const elementFor = key => contractElements.value.find(element => String(element?.elementKey || '') === key) || null
+  const useVerified = element => element && elementStatusLabel(element) === '原文已验证'
+  const field = (key, label, elementKey, fallback, formatter) => {
+    const element = elementKey ? elementFor(elementKey) : null
+    const verified = useVerified(element)
+    const value = verified
+      ? (formatter ? formatter(element) : compactElementValue(element, 70))
+      : (fallback || '待填写')
+    return {
+      key,
+      label,
+      value,
+      element,
+      sourceLabel: verified
+        ? '原文已验证'
+        : element
+          ? '案件字段 · 待复核'
+          : fallback
+            ? '案件字段'
+            : '待补充',
+      statusClass: verified
+        ? 'verified'
+        : element || !fallback
+          ? 'review'
+          : 'missing',
+    }
+  }
+  const ourSide = String(c.value.ourSide || '').toUpperCase()
+  const counterpartyElement = ourSide === 'A' ? elementFor('party_b') : ourSide === 'B' ? elementFor('party_a') : null
+  const counterparty = useVerified(counterpartyElement)
+    ? compactElementValue(counterpartyElement, 54)
+    : c.value.counterparty || '待填写'
+  const termination = elementFor('termination_conditions')
+  const endFallback = c.value.expiryDate || (primaryLifecycleCondition.value ? '满足约定条件后结束' : '待填写')
+  return [
+    {
+      key: 'counterparty',
+      label: '相对方',
+      value: counterparty,
+      element: counterpartyElement,
+      sourceLabel: useVerified(counterpartyElement) ? '原文已验证' : c.value.counterparty ? '案件字段' : '待补充',
+      statusClass: useVerified(counterpartyElement) ? 'verified' : c.value.counterparty ? 'review' : 'missing',
+    },
+    field('contractType', '合同类型', 'contract_type', typeLabel(c.value.contractType)),
+    field('amount', '金额', 'contract_amount', c.value.amount ? `${c.value.amount} ${c.value.currency || 'CNY'}` : '', compactAmountValue),
+    field('department', '部门', '', c.value.department),
+    field('signedDate', '签订日期', '', c.value.signedDate),
+    field('effectiveDate', '生效日期', 'effective_date', c.value.effectiveDate),
+    field('endCondition', '结束方式', termination ? 'termination_conditions' : 'expiry_date', endFallback, compactElementValue),
+  ]
+})
+const contractElementGroups = computed(() => {
+  if (profileFactGroups.value.length) return profileFactGroups.value
+  const groups = new Map([
+    ['IDENTITY', { key: 'IDENTITY', label: '基础身份与签署信息', items: [] }],
+    ['FINANCIAL', { key: 'FINANCIAL', label: '金额、付款与税务', items: [] }],
+    ['DATES', { key: 'DATES', label: '时间节点与结束条件', items: [] }],
+    ['OBLIGATIONS', { key: 'OBLIGATIONS', label: '交付、验收与应提交材料', items: [] }],
+    ['RISK_TERMS', { key: 'RISK_TERMS', label: '责任、知识产权与合规', items: [] }],
+    ['OTHER', { key: 'OTHER', label: '其他合同要素', items: [] }],
+  ])
+  for (const element of visibleContractElements.value) {
+    const category = elementCategory(element)
+    if (!groups.has(category)) groups.set(category, { key: category, label: elementCategoryLabel(category), items: [] })
+    groups.get(category).items.push(element)
+  }
+  return Array.from(groups.values()).filter(group => group.items.length)
+})
 const reviewSummaryView = computed(() => {
   const direct = c.value.reviewSummary
   if (direct?.id) return direct
@@ -1054,19 +1522,16 @@ const reviewSummaryView = computed(() => {
     ['CONTRACT_REVIEW_REPORT', 'CONTRACT_REVIEW'].includes(String(report?.reportType || '').toUpperCase())
   ) || {}
 })
-const reviewContentView = computed(() => {
-  const raw = reviewSummaryView.value?.contentJson
-  if (raw && typeof raw === 'object') return raw
-  if (typeof raw === 'string') {
-    try {
-      const parsed = JSON.parse(raw)
-      return parsed && typeof parsed === 'object' ? parsed : {}
-    } catch {
-      return {}
-    }
-  }
-  return {}
-})
+const hasContractReviewResult = computed(() =>
+  Boolean(reviewSummaryView.value?.id)
+  || (Array.isArray(c.value.findings) && c.value.findings.length > 0)
+)
+const hasVersionReviewResult = computed(() => hasReportOfTypes(['VERSION_REVIEW_REPORT', 'VERSION_REVIEW']))
+const hasApprovalDecisionResult = computed(() => hasReportOfTypes(['APPROVAL_DECISION_REPORT', 'APPROVAL_DECISION']))
+const hasObligationExtractionResult = computed(() =>
+  hasCompletedRun('OBLIGATION_EXTRACTION')
+  || (Array.isArray(c.value.obligations) && c.value.obligations.length > 0)
+)
 const canVersionReview = computed(() => {
   const versions = (Array.isArray(c.value.documents) ? c.value.documents : [])
     .filter(document => String(document?.documentType || '').toUpperCase() === 'MAIN')
@@ -1074,34 +1539,40 @@ const canVersionReview = computed(() => {
     .filter(Number.isFinite)
   return new Set(versions).size >= 2
 })
+const canRunContractReview = computed(() => hasParsedContractDocument.value)
 const canApprovalDecision = computed(() =>
-  Boolean(reviewSummaryView.value?.id)
-  || ['PENDING_APPROVAL', 'APPROVED', 'READY_TO_SIGN'].includes(String(c.value.status || '').toUpperCase())
+  hasContractReviewResult.value
+  || ['PENDING_APPROVAL', 'SIGNED', 'IN_FULFILLMENT'].includes(String(c.value.status || '').toUpperCase())
 )
-const canObligationExtraction = computed(() =>
-  ['SIGNED', 'IN_FULFILLMENT'].includes(String(c.value.status || '').toUpperCase())
-)
-const reviewReportRisks = computed(() => arrayField(reviewSummaryView.value?.risksJson).filter(item => item && typeof item === 'object'))
-const reviewReportPlan = computed(() => arrayField(reviewSummaryView.value?.planJson).filter(item => item && typeof item === 'object'))
-const reviewCoverageChecklist = computed(() => arrayField(reviewContentView.value?.coverage?.checklist).filter(item => item && typeof item === 'object'))
-const reviewCoverageSummary = computed(() => reviewContentView.value?.coverage?.summary || {})
+const canObligationExtraction = computed(() => hasParsedContractDocument.value)
+const contractReviewTaskLabel = computed(() => hasContractReviewResult.value ? '重新风险审查' : '风险审查')
+const contractElementTaskLabel = computed(() => extractionSnapshot.value?.id ? '重新提取合同要素' : '提取合同要素')
+const versionReviewTaskLabel = computed(() => hasVersionReviewResult.value ? '重新版本差异复核' : '版本差异复核')
+const approvalDecisionTaskLabel = computed(() => hasApprovalDecisionResult.value ? '重新生成审批意见' : '生成审批意见')
+const obligationExtractionTaskLabel = computed(() => hasObligationExtractionResult.value ? '重新提取履约义务' : '提取履约义务')
 const analysisStages = computed(() => {
-  const workflow = analysisWorkflow.value
+  const workflow = analysisWorkflow.value || {}
   const status = String(workflow.status || '').toUpperCase()
   const current = String(workflow.currentStage || '').toUpperCase()
   const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
     || ['HUMAN_CONFIRMATION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
   const confirmDone = ['READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
     || ['RISK_REVIEW', 'REPORT_READY'].includes(current)
+  const extractionDone = Boolean(extractionSnapshot.value?.id)
+  const extractionActive = extractionRunActive.value
+  const extractionFailed = extractionRunFailed.value
   const reviewDone = status === 'COMPLETED' || current === 'REPORT_READY'
+  const reviewActive = riskReviewRunActive.value || status === 'REVIEWING'
   const failedStage = status === 'FAILED' ? current : ''
   return [
     { index: '01', key: 'DOCUMENT_PARSE', label: '文档解析', description: '读取正文并建立条款证据', state: failedStage === 'DOCUMENT_PARSE' ? 'error' : parseDone ? 'done' : status === 'PARSING' ? 'active' : 'pending' },
     { index: '02', key: 'HUMAN_CONFIRMATION', label: '人工确认', description: '核对主体、日期和关键字段', state: failedStage === 'HUMAN_CONFIRMATION' ? 'error' : confirmDone ? 'done' : status === 'WAITING_CONFIRMATION' ? 'active' : 'pending' },
-    { index: '03', key: 'RISK_REVIEW', label: '风险审查', description: '检索证据并分析适用风险', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : status === 'READY_FOR_REVIEW' || status === 'REVIEWING' ? 'active' : 'pending' },
-    { index: '04', key: 'REPORT_READY', label: '报告生成', description: '保存报告、发现和处理建议', state: reviewDone ? 'done' : 'pending' },
+    { index: '03', key: 'FACT_EXTRACTION', label: '要素提取', description: '生成可引用事实快照', state: extractionDone ? 'done' : extractionActive ? 'active' : extractionFailed ? 'error' : 'pending' },
+    { index: '04', key: 'RISK_REVIEW', label: '风险审查', description: '检索证据并分析适用风险', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : reviewActive ? 'active' : 'pending' },
+    { index: '05', key: 'REPORT_READY', label: '报告生成', description: '保存报告、发现和处理建议', state: reviewDone ? 'done' : 'pending' },
   ]
 })
+
 const primaryLifecycleCondition = computed(() => {
   const values = Array.isArray(c.value.lifecycleConditions) ? c.value.lifecycleConditions : []
   return values.find(item => item.manualOverride) || values[0] || null
@@ -1135,26 +1606,17 @@ const findingGroups = computed(() => {
     }))
     .sort((a, b) => b.highCount - a.highCount || a.name.localeCompare(b.name, 'zh-CN'))
 })
-const floatingFindings = computed(() => {
+const priorityFindings = computed(() => {
   const severityOrder = { HIGH: 0, MEDIUM: 1, LOW: 2 }
   const statusOrder = { OPEN: 0, REMEDIATED: 1, ACCEPTED_EXCEPTION: 2, DISMISSED: 3 }
   return [...(Array.isArray(c.value.findings) ? c.value.findings : [])].sort((a, b) =>
     (statusOrder[a.status] ?? 9) - (statusOrder[b.status] ?? 9)
     || (severityOrder[a.severity] ?? 9) - (severityOrder[b.severity] ?? 9)
     || String(a.title || '').localeCompare(String(b.title || ''), 'zh-CN')
-  )
+  ).slice(0, 5)
 })
-const riskFloatItems = computed(() => {
-  if (floatingFindings.value.length) return floatingFindings.value
-  return reviewReportRisks.value.map((risk, index) => ({
-    ...risk,
-    id: risk.id || null,
-    findingKey: risk.findingKey || `report-risk-${index}`,
-    status: risk.status || 'REPORT_ONLY',
-    _reportOnly: true,
-  }))
-})
-const openFindingCount = computed(() => riskFloatItems.value.filter(finding => finding.status === 'OPEN').length)
+const openFindingCount = computed(() => (Array.isArray(c.value.findings) ? c.value.findings : [])
+  .filter(finding => String(finding?.status || '').toUpperCase() === 'OPEN').length)
 const intakeAttentionCount = computed(() => {
   const keys = ['contractTitle', 'contractType', 'amount', 'currency', 'signedDate', 'effectiveDate', 'expiryDate']
   return keys.filter(key => intakeFieldTone(key) !== 'ok').length + (intakeFields.value?.ourSide ? 0 : 1)
@@ -1163,23 +1625,6 @@ const intakeOurSideLabel = computed(() => {
   if (intakeFields.value?.ourSide === 'partyA') return '甲方'
   if (intakeFields.value?.ourSide === 'partyB') return '乙方'
   return '待确认'
-})
-
-const primaryAction = computed(() => {
-  const status = c.value.status
-  const hasRunning = hasActiveRun.value
-  if (analysisWorkflow.value.status === 'WAITING_CONFIRMATION' || status === 'INTAKE_CONFIRMING') {
-    return { label: '确认识别结果', taskType: null, disabled: false, openIntake: true }
-  }
-  if (analysisWorkflow.value.status === 'PARSING' || status === 'INTAKE_PARSING') {
-    return { label: '等待文档处理', taskType: null, disabled: true }
-  }
-  if (hasRunning || status === 'REVIEWING') return { label: '查看审查进度', taskType: null, disabled: false, scrollTo: 'runs' }
-  if (c.value.findings?.some(f => f.status === 'OPEN')) return { label: '处理审查发现', taskType: null, disabled: false, scrollTo: 'findings' }
-  if (status === 'PENDING_APPROVAL') return { label: '生成审批意见', taskType: 'APPROVAL_DECISION', disabled: false }
-  if (['SIGNED', 'IN_FULFILLMENT'].includes(status)) return { label: '提取履约义务', taskType: 'OBLIGATION_EXTRACTION', disabled: false }
-  if (!c.value.documents?.length) return { label: '先上传合同', taskType: null, disabled: true }
-  return { label: '开始风险审查', taskType: 'CONTRACT_REVIEW', disabled: false }
 })
 
 onMounted(() => {
@@ -1194,11 +1639,16 @@ onBeforeUnmount(() => {
 
 async function loadCase() {
   loading.value = true
+  loadError.value = ''
   try {
     const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
     c.value = r.data.data
+    ensureSelectedContractElement()
     checkPendingIntake()
-  } catch (e) { message.error('加载合同失败') }
+  } catch (e) {
+    loadError.value = uploadErrorMessage(e, '加载合同失败')
+    message.error(loadError.value)
+  }
   finally { loading.value = false }
 }
 
@@ -1270,6 +1720,7 @@ async function refreshCase() {
   try {
     const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
     c.value = r.data.data
+    ensureSelectedContractElement()
     if (selectedTimelineNode.value) {
       selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
         String(node.sourceId || node.id) === String(selectedTimelineNode.value.sourceId || selectedTimelineNode.value.id)
@@ -1305,7 +1756,7 @@ function checkPendingIntake() {
     fieldMeta: fields,
     title: (fields.contractTitle || {}).value || c.value?.title || '',
     contractType: (fields.contractType || {}).value || c.value?.contractType || 'OTHER',
-    amount: c.value?.amount || (fields.amount || {}).value || null,
+    amount: (fields.amount || {}).value ?? c.value?.amount ?? null,
     currency: (fields.currency || {}).value || c.value?.currency || 'CNY',
     signedDate: ((fields.signedDate || {}).value || c.value?.signedDate || '').toString().slice(0, 10),
     effectiveDate: ((fields.effectiveDate || {}).value || c.value?.effectiveDate || '').toString().slice(0, 10),
@@ -1434,6 +1885,7 @@ async function startRun(taskType) {
       taskType,
       triggerType: 'MANUAL',
       question: taskQuestion(taskType),
+      inputJson: taskInputFor(taskType),
     })
     if (response.data.data?.deduplicated) {
       message.info('当前合同已有同类 Agent 任务，已沿用现有运行记录')
@@ -1445,17 +1897,34 @@ async function startRun(taskType) {
   finally { running.value = false }
 }
 
-function handlePrimaryAction() {
-  const action = primaryAction.value
-  if (action.openIntake) {
-    openIntakeConfirmation()
-    return
+function taskInputFor(taskType) {
+  if (taskType === 'CONTRACT_ELEMENT_EXTRACTION' && latestMainDocument.value?.id) {
+    return { documentId: latestMainDocument.value.id }
   }
-  if (action.scrollTo) {
-    document.querySelector(`[data-section="${action.scrollTo}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-    return
+  return {}
+}
+
+function hasReportOfTypes(types) {
+  const expected = new Set(types.map(type => String(type).toUpperCase()))
+  return (Array.isArray(c.value.reports) ? c.value.reports : [])
+    .some(report => expected.has(String(report?.reportType || '').toUpperCase()))
+}
+
+function hasCompletedRun(runType) {
+  const targetType = String(runType || '').toUpperCase()
+  return (Array.isArray(c.value.runs) ? c.value.runs : [])
+    .some(run => String(run?.runType || '').toUpperCase() === targetType
+      && String(run?.status || '').toUpperCase() === 'COMPLETED')
+}
+async function scrollToSection(section) {
+  const targetSection = workbenchTabForSection(section)
+  if (workbenchTabs.value.some(tab => tab.key === targetSection)) {
+    switchWorkbenchTab(targetSection)
   }
-  if (action.taskType) startRun(action.taskType)
+  await nextTick()
+  const target = document.querySelector(`[data-section="${targetSection}"]`)
+    || document.querySelector(`[data-section="${section}"]`)
+  target?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 }
 
 function openRevisionUpload() {
@@ -1468,8 +1937,9 @@ function openRevisionUpload() {
     file: null,
   }
   showUpload.value = true
+  switchWorkbenchTab('evidence')
   nextTick(() => {
-    document.querySelector('[data-section="documents"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    document.querySelector('[data-section="evidence"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   })
 }
 
@@ -1483,6 +1953,7 @@ async function updateFinding(findingId, status) {
   try {
     const r = await api.patch(`/api/workspace/contracts/findings/${findingId}`, { status })
     c.value = r.data.data
+    ensureSelectedContractElement()
     message.success('审查发现已更新')
   } catch (e) {
     message.error('更新审查发现失败')
@@ -1491,12 +1962,9 @@ async function updateFinding(findingId, status) {
 function findingClosed(finding) {
   return finding?.status && finding.status !== 'OPEN'
 }
-function scrollToFinding(finding) {
+async function scrollToFinding(finding) {
   if (!finding?.id) {
-    showReviewReport.value = true
-    nextTick(() => {
-      document.querySelector('.review-result-detail')?.scrollIntoView({ behavior: 'smooth', block: 'center' })
-    })
+    await scrollToSection('findings')
     return
   }
   const key = findingExpansionKey(finding)
@@ -1504,7 +1972,7 @@ function scrollToFinding(finding) {
   nextTick(() => {
     const target = document.getElementById(`finding-detail-${finding.id}`)
       || document.querySelector(`[data-finding-id="${finding.id}"]`)
-      || document.querySelector('[data-section="findings"]')
+      || document.querySelector('[data-section="risks"]')
     target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   })
 }
@@ -1540,9 +2008,8 @@ async function startTimelineFulfillmentCheck(node) {
   running.value = true
   try {
     await api.post(`/api/workspace/contracts/${route.params.id}/timeline/${node.sourceId}/fulfillment-checks`)
-    message.success('履约核验已发起，Agent 会检查合同要求、证据和缺口')
+    message.success('履约核验已启动')
     await refreshCase()
-    setTimeout(refreshCase, 2500)
   } catch (e) {
     message.error(e.response?.data?.message || '履约核验启动失败')
   } finally {
@@ -1550,12 +2017,31 @@ async function startTimelineFulfillmentCheck(node) {
   }
 }
 async function openTimelineDetail(node, focusEvidence = false) {
+  switchWorkbenchTab('timeline')
   selectedTimelineNode.value = node
   if (focusEvidence) {
     await nextTick()
     evidenceSection.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }
 }
+
+async function jumpToTimelineNodeForElement(element) {
+  const targetNode = bestTimelineNodeForElement(element)
+  if (!targetNode) {
+    await scrollToSection('timeline')
+    return
+  }
+  selectedTimelineNode.value = null
+  switchWorkbenchTab('timeline')
+  await nextTick()
+  const anchor = document.querySelector(`[data-timeline-key="${timelineKey(targetNode)}"]`)
+  if (anchor) {
+    anchor.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  } else {
+    document.querySelector('[data-section="timeline"]')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+}
+
 function closeTimelineDetail() {
   selectedTimelineNode.value = null
   timelineEvidenceUpload.file = null
@@ -1660,6 +2146,8 @@ async function confirmFulfillmentCheck(check, result) {
     })
     c.value = r.data.data
     message.success('人工确认已记录')
+    await refreshCase()
+    setTimeout(refreshCase, 1500)
   } catch (e) {
     message.error(e.response?.data?.message || '人工确认失败')
   }
@@ -1830,6 +2318,85 @@ function timelineConsequence(node) {
     ai: check.aiRisk || enrichment.aiRisk || '',
   }
 }
+
+function normalizeTimelineMatchText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[，。；;：:、,．.！？!?（）()\[\]【】{}“”"'`‘’<>《》·|\\/]/g, '')
+}
+
+function extractPercentSignals(value) {
+  return [...String(value || '').matchAll(/\d+(?:\.\d+)?%/g)].map(match => match[0])
+}
+
+function timelineSearchText(node) {
+  return [
+    node?.label,
+    timelineTypeLabel(node?.nodeType),
+    timelineAction(node),
+    timelineMeaning(node),
+    timelineConditionDisplay(node),
+    timelineQuote(node),
+    timelineFullQuote(node),
+    timelineConsequence(node).explicit,
+    timelineConsequence(node).ai,
+  ].filter(Boolean).join(' ')
+}
+
+function bestTimelineNodeForElement(element) {
+  const nodes = Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : []
+  if (!nodes.length) return null
+
+  const elementText = normalizeTimelineMatchText([
+    element?.displayLabel,
+    element?.label,
+    element?.title,
+    elementDisplayValue(element),
+    element?.normalizedValue?.summary,
+    element?.normalizedValue?.displayValue,
+    element?.normalizedValue?.value,
+    typeof element?.rawValue === 'object' ? structuredValueSummary(element.rawValue) : element?.rawValue,
+  ].filter(Boolean).join(' '))
+  if (!elementText) return null
+
+  const elementPercents = extractPercentSignals(elementText)
+  const elementKeywords = [
+    '付款', '开票', '发票', '支付', '交付', '验收', '尾款', '预付款', '保函', '质保', '结算',
+    '工图', '施工图', '电子版', '电子文件', '正式发票', '合同总价', '收票', '付款条件', '开票条件'
+  ].filter(keyword => elementText.includes(keyword))
+
+  let bestNode = null
+  let bestScore = 0
+  for (const node of nodes) {
+    const nodeText = normalizeTimelineMatchText(timelineSearchText(node))
+    if (!nodeText) continue
+
+    let score = 0
+    if (nodeText.includes(elementText) || elementText.includes(nodeText)) score += 120
+
+    const nodePercents = extractPercentSignals(nodeText)
+    for (const percent of elementPercents) {
+      if (nodePercents.includes(percent)) score += 28
+    }
+
+    for (const keyword of elementKeywords) {
+      if (nodeText.includes(keyword)) score += 10
+    }
+
+    if (elementPercents.length && /付款|开票|发票/.test(nodeText)) score += 18
+    if (element?.elementKey === 'payment_terms' && /付款|开票|发票/.test(nodeText)) score += 12
+    if (element?.elementKey === 'payment_terms' && /交付|验收|尾款|预付款|保函|质保/.test(nodeText)) score += 6
+
+    if (score > bestScore) {
+      bestScore = score
+      bestNode = node
+    }
+  }
+
+  return bestScore > 0 ? bestNode : nodes[0] || null
+}
+
 function relativeDateResult(node) {
   return resolveTimelineDate({
     condition: timelineCondition(node),
@@ -1953,12 +2520,174 @@ function partyRoleLabel(r) { return { OUR_ENTITY:'我方', COUNTERPARTY:'对方'
 function docTypeLabel(t) { return { MAIN:'主合同', ATTACHMENT:'附件', PRICING:'报价', CERTIFICATE:'资质', FULFILLMENT_EVIDENCE:'履约证据' }[t] || t }
 function runStatusClass(s) { return { COMPLETED:'ok', FAILED:'error' }[s] || '' }
 function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', PLANNING:'规划中', ANALYZING:'审查中', VERIFYING:'验证中', WAITING_HUMAN:'等待人工确认', COMPLETED:'完成', FAILED:'失败', CANCELLED:'已取消' }[s] || s }
-function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批决策', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验' }[t] || t }
-function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据' }[t] || '执行合同任务' }
+function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批决策', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验', CONTRACT_ELEMENT_EXTRACTION:'合同要素提取' }[t] || t }
+function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据', CONTRACT_ELEMENT_EXTRACTION:'提取当前合同版本的可引用要素事实' }[t] || '执行合同任务' }
+function elementCategory(element) {
+  const key = String(element?.elementKey || '')
+  const sectionKey = String(element?.sectionKey || element?.groupKey || element?.category || '').toUpperCase()
+  if (['IDENTITY', 'FINANCIAL', 'DATES', 'OBLIGATIONS', 'RISK_TERMS'].includes(sectionKey)) return sectionKey
+  if (['contract_title', 'contract_type', 'party_a', 'party_b', 'our_side'].includes(key)) return 'IDENTITY'
+  if (['contract_amount', 'payment_terms'].includes(key)) return 'FINANCIAL'
+  if (['effective_date', 'expiry_date', 'termination_conditions'].includes(key)) return 'DATES'
+  if (['delivery_obligations', 'acceptance_criteria', 'required_materials'].includes(key)) return 'OBLIGATIONS'
+  return 'RISK_TERMS'
+}
+function elementCategoryLabel(category) {
+  return {
+    IDENTITY: '基础身份与签署信息',
+    FINANCIAL: '金额、付款与税务',
+    DATES: '时间节点与结束条件',
+    OBLIGATIONS: '交付、验收与履约义务',
+    RISK_TERMS: '责任、知识产权与合规',
+    OTHER: '其他合同要素',
+  }[String(category || '').toUpperCase()] || '其他合同要素'
+}
+function elementName(key) {
+  return {
+    contract_title: '合同标题', contract_type: '合同类型', party_a: '甲方主体', party_b: '乙方主体', our_side: '我方角色',
+    contract_amount: '合同金额', payment_terms: '付款与开票条件', effective_date: '生效日期', expiry_date: '固定到期日期',
+    termination_conditions: '终止与结束条件', delivery_obligations: '交付与服务义务', acceptance_criteria: '验收标准', required_materials: '应提交材料',
+    liability_terms: '违约与责任', ip_ownership: '知识产权归属与许可', confidentiality_terms: '保密义务',
+    data_protection_terms: '数据与个人信息处理', compliance_terms: '合规与监管要求', dispute_resolution: '争议解决', notice_terms: '通知与送达',
+  }[key] || key || '合同要素'
+}
+function elementLabel(element) {
+  return element?.displayLabel || element?.label || element?.title || elementName(element?.elementKey)
+}
+function elementSummary(element) {
+  return buildElementPresentation(element).summary
+}
+function elementDetails(element) {
+  return buildElementPresentation(element).details
+}
+function elementChips(element) {
+  return buildElementPresentation(element).chips
+}
+function elementHeadline(element) {
+  return buildElementPresentation(element).headline
+}
+function elementIdentity(element) {
+  if (element?.identityKey) return String(element.identityKey)
+  if (element?.id != null) return `element-${element.id}`
+  return `${element?.elementKey || 'element'}-${element?.occurrenceNo || 1}`
+}
+function ensureSelectedContractElement() {
+  const selected = displayContractElements.value.find(element => elementIdentity(element) === selectedElementKey.value)
+  if (!selected) {
+    const fallback = displayContractElements.value[0] || visibleContractElements.value[0] || contractElements.value[0]
+    selectedElementKey.value = fallback ? elementIdentity(fallback) : ''
+  }
+}
+function selectContractElement(element) {
+  selectedElementKey.value = elementIdentity(element)
+}
+function selectSummaryField(field) {
+  if (field?.element) {
+    switchWorkbenchTab('elements')
+    selectContractElement(field.element)
+  }
+}
+function structuredValueSummary(value) {
+  return summarizeStructuredValue(value)
+}
+function elementDisplayValue(element) {
+  return formatElementDisplayValue(element)
+}
+function compactElementValue(element, limit = 100) {
+  return formatCompactElementValue(element, limit)
+}
+function compactAmountValue(element) {
+  return formatCompactAmountValue(element)
+}
+function elementConfidenceLabel(value) {
+  const confidence = Number(value)
+  return Number.isFinite(confidence) ? `${Math.round(confidence * 100)}%` : '待确认'
+}
+function elementStatusLabel(element) {
+  if (String(element?.status || '').toUpperCase() === 'CONFIRMED') return '已人工确认'
+  if (String(element?.status || '').toUpperCase() === 'EXTRACTED' && Number(element?.confidence || 0) >= 0.75 && element?.evidence?.length) return '原文已验证'
+  if (String(element?.status || '').toUpperCase() === 'NOT_FOUND') return '未识别'
+  return '待人工确认'
+}
+function elementStatusClass(element) {
+  const label = elementStatusLabel(element)
+  return ['原文已验证', '已人工确认'].includes(label) ? 'verified' : label === '未识别' ? 'missing' : 'review'
+}
+function elementSourceLabel(element) {
+  const source = String(element?.source || '').toUpperCase()
+  if (source === 'PROFILE') return '合同画像整理'
+  if (source === 'LLM') return '模型基于合同原文整理'
+  if (source === 'CONFIRMED_INTAKE') return '合同发起时已确认'
+  if (source === 'CONFIRMED_CASE' || source === 'CASE_PROJECTION') return '案件已录入信息'
+  return '合同文档'
+}
+function factDecisionFieldLabel(key) {
+  return {
+    contractTitle: '合同标题', contractType: '合同类型', partyA: '甲方主体', partyB: '乙方主体',
+    ourSide: '我方角色', amount: '合同金额', currency: '币种', signedDate: '签订日期',
+    effectiveDate: '生效日期', expiryDate: '到期日期', department: '部门',
+  }[key] || key || '合同字段'
+}
+function factDecisionTypeLabel(value) {
+  return {
+    ACCEPTED: '接受识别结果', EDITED: '人工修改', USER_SUPPLIED: '人工补充', CLEARED: '确认留空',
+  }[String(value || '').toUpperCase()] || '人工确认'
+}
+function factDecisionValue(wrapper) {
+  const value = wrapper && typeof wrapper === 'object' && 'value' in wrapper ? wrapper.value : wrapper
+  if (value == null || value === '') return ''
+  if (typeof value === 'object') return structuredValueSummary(value) || '结构化信息'
+  return String(value)
+}
+function isSelectedElement(element) {
+  return elementIdentity(element) === selectedElementKey.value
+}
+function evidenceClauseLabel(link) {
+  const parts = [link?.clauseNumber, link?.clauseTitle].filter(Boolean)
+  return parts.join(' ') || link?.documentFileName || '合同正文'
+}
+function evidenceLocationLabel(link) {
+  const parts = []
+  if (link?.pageNumber != null) parts.push(`第 ${link.pageNumber} 页`)
+  if (link?.paragraphIndex != null) parts.push(`段落 ${Number(link.paragraphIndex) + 1}`)
+  if (link?.retrievalMethod) parts.push(`检索：${String(link.retrievalMethod).replace(/,/g, ' + ')}`)
+  return parts.join(' · ') || '原文引用'
+}
+function evidenceHighlightSegments(link) {
+  const fullText = String(link?.clauseContent || link?.quote || '').trim()
+  const quote = String(link?.quote || '').trim()
+  if (!fullText) return [{ text: '未保留完整原文条款。', marked: false }]
+  if (!quote) return [{ text: fullText, marked: false }]
+  const index = fullText.indexOf(quote)
+  if (index < 0) return [{ text: fullText, marked: false }]
+  return [
+    { text: fullText.slice(0, index), marked: false },
+    { text: quote, marked: true },
+    { text: fullText.slice(index + quote.length), marked: false },
+  ].filter(segment => segment.text)
+}
+function evidencePreviewUrl(link) {
+  const value = String(link?.documentPreviewUrl || '')
+  if (!value.startsWith('/upload/')) return ''
+  const page = Number(link?.pageNumber)
+  return Number.isInteger(page) && page > 0 ? `${value}#page=${page}` : value
+}
+function isPdfEvidence(link) {
+  return Boolean(evidencePreviewUrl(link))
+    && /\.pdf(?:$|[?#])/i.test(String(link?.documentPreviewUrl || link?.documentFileName || ''))
+}
+function extractionWorkflowStatusLabel(s) { return { RUNNING:'正在整理', READY_FOR_CONFIRMATION:'已生成，待确认', CONFIRMED:'已确认', FAILED:'提取失败' }[String(s || '').toUpperCase()] || '未生成' }
+function runtimeLabel(run) {
+  const engine = String(run?.runtimeEngine || '').toLowerCase()
+  const parts = [engine === 'langgraph' ? 'LangGraph' : (engine || '运行时未知')]
+  if (run?.graphName) parts.push(run.graphName)
+  if (run?.graphVersion) parts.push(run.graphVersion)
+  if (run?.model) parts.push(run.model)
+  return parts.join(' · ')
+}
 function workflowStatusLabel(s) { return { PARSING:'文档处理中', WAITING_CONFIRMATION:'待人工确认', READY_FOR_REVIEW:'待风险审查', REVIEWING:'风险审查中', COMPLETED:'分析完成', FAILED:'需要处理' }[s] || '分析流程' }
 function workflowStatusClass(s) { return { PARSING:'active', WAITING_CONFIRMATION:'attention', READY_FOR_REVIEW:'ready', REVIEWING:'active', COMPLETED:'done', FAILED:'error' }[s] || '' }
 function findingStatusLabel(s) { return { OPEN:'未处理', REMEDIATED:'已修改', ACCEPTED_EXCEPTION:'已接受例外', DISMISSED:'已驳回' }[s] || s }
-function obligationStatusLabel(s) { return { PLANNED:'计划中', DUE_SOON:'即将到期', COMPLETED:'已完成', OVERDUE:'已逾期', ESCALATED:'已升级', WAIVED:'已豁免' }[s] || s }
 function severityLabel(s) { return { HIGH:'高危', MEDIUM:'中危', LOW:'低危' }[s] || s || '中危' }
 function riskStatusLabel(s) { return { LOW_RISK:'低风险', MEDIUM_RISK:'中风险', HIGH_RISK:'高风险' }[s] || s || '未评分' }
 function clauseTypeLabel(t) { return { LIABILITY:'责任违约', PAYMENT:'商务付款', CONFIDENTIALITY:'保密合规', ACCEPTANCE:'验收交付', TERMINATION:'终止续签', IP:'知识产权', DATA_PROTECTION:'数据保护', OTHER:'其他' }[t] || t || '其他' }
@@ -2059,9 +2788,9 @@ function formatBytes(size) {
 </script>
 
 <style scoped>
-.case-page{max-width:1100px;margin:0 auto;padding:30px 24px 60px}
+.case-page{width:100%;max-width:1200px;margin:0 auto;padding:22px clamp(24px,3vw,34px) 52px;box-sizing:border-box}
 .back-link{color:var(--atlas-primary);font-size:12px;font-weight:800;text-decoration:none}
-.case-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin:16px 0 20px}
+.case-header{display:flex;justify-content:space-between;align-items:end;gap:20px;margin:12px 0 16px}
 .case-key{color:var(--atlas-primary);font-size:12px;font-weight:800;letter-spacing:.06em}
 .case-status{padding:2px 7px;border-radius:2px;font-size:10px;font-weight:800;margin-left:8px}
 .case-status.draft{color:var(--atlas-subtle);background:var(--atlas-bg)}
@@ -2070,7 +2799,7 @@ function formatBytes(size) {
 .case-status.ok{color:#3f7f5d;background:rgba(63,127,93,.08)}
 .case-status.active{color:var(--atlas-primary);background:rgba(66,111,166,.08)}
 .case-status.warn{color:var(--atlas-subtle);background:var(--atlas-bg)}
-.case-header h1{margin:8px 0 6px;font-family:var(--atlas-font-display);font-size:36px;color:var(--atlas-text)}
+.case-header h1{margin:6px 0 5px;font-family:var(--atlas-font-display);font-size:34px;color:var(--atlas-text)}
 .case-header p{color:var(--atlas-muted);font-size:14px;max-width:600px}
 .case-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .revision-upload-button{border-color:rgba(63,127,93,.32);color:#347254;background:#f3faf6}
@@ -2097,24 +2826,62 @@ function formatBytes(size) {
 .primary-button:hover:not(:disabled){background:var(--atlas-primary-dark)}
 button:disabled{cursor:not-allowed;opacity:.55}
 
-.meta-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:0;border-top:1px solid var(--atlas-border);border-bottom:1px solid var(--atlas-border);margin-bottom:24px}
-.meta-grid div{padding:12px 14px;border-right:1px solid var(--atlas-border)}
-.meta-grid div:nth-child(3n){border-right:0}
-.meta-grid span{display:block;font-size:10px;font-weight:800;color:var(--atlas-subtle);text-transform:uppercase}
-.meta-grid strong{display:block;margin-top:4px;font-size:13px;color:var(--atlas-text)}
-.analysis-workflow-panel{margin:-8px 0 24px;padding:17px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px}
+.meta-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border-top:1px solid var(--atlas-border);border-bottom:1px solid var(--atlas-border);margin-bottom:16px}
+.meta-item{display:block;min-width:0;padding:12px 14px;color:var(--atlas-text);background:transparent;border:0;border-right:1px solid var(--atlas-border);font:inherit;text-align:left}
+.meta-item:nth-child(4n){border-right:0}
+.meta-item-wide{grid-column:span 2;border-right:0}
+.meta-item:not(:disabled){cursor:pointer}.meta-item:not(:disabled):hover{background:#f5f9f7}
+.meta-item:disabled{cursor:default}
+.meta-item span{display:block;font-size:10px;font-weight:800;color:var(--atlas-subtle);text-transform:uppercase}
+.meta-item strong{display:block;overflow:hidden;margin-top:4px;color:var(--atlas-text);font-size:13px;text-overflow:ellipsis;white-space:nowrap}
+.meta-item em{display:inline-flex;margin-top:5px;padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900}
+.meta-item em.verified{color:#246744;background:#eaf6ef}.meta-item em.review{color:#8a5b14;background:#fff4db}.meta-item em.missing{color:#7b8794;background:#edf1f4}
+.analysis-workflow-panel{margin:0 0 18px;padding:15px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px}
 .analysis-workflow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
 .analysis-workflow-head .section-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
 .analysis-workflow-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:17px}
 .analysis-workflow-head p{margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .workflow-status{flex:0 0 auto;padding:5px 8px;border-radius:3px;font-size:10px;font-weight:900}
 .workflow-status.active{color:#315d8b;background:#edf4fa}.workflow-status.attention{color:#8a5b14;background:#fff4db}.workflow-status.ready{color:#246744;background:#eaf6ef}.workflow-status.done{color:#246744;background:#dceee3}.workflow-status.error{color:#a33f39;background:#fff0ee}
-.analysis-workflow-stages{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin-top:15px}
+.analysis-workflow-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:15px}
 .analysis-workflow-stage{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:10px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:3px}
 .workflow-stage-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:3px;background:#e9edf0;color:var(--atlas-subtle);font-size:10px;font-weight:900}
 .analysis-workflow-stage strong{display:block;color:var(--atlas-text);font-size:11px;line-height:1.4}.analysis-workflow-stage small{display:block;margin-top:3px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
 .analysis-workflow-stage.done{border-color:#b9d8c5;background:#f4faf6}.analysis-workflow-stage.done .workflow-stage-mark{color:#fff;background:#347254}.analysis-workflow-stage.active{border-color:#b7cde0;background:#f5f9fc}.analysis-workflow-stage.active .workflow-stage-mark{color:#fff;background:var(--atlas-primary)}.analysis-workflow-stage.error{border-color:#e4b2ad;background:#fff7f6}.analysis-workflow-stage.error .workflow-stage-mark{color:#fff;background:#b35c56}
-.analysis-workflow-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.analysis-workflow-foot small{color:var(--atlas-subtle);font-size:10px;word-break:break-all}.analysis-workflow-foot .small{min-height:32px;padding:0 10px;font-size:11px}
+.analysis-workflow-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.analysis-workflow-foot small{color:var(--atlas-subtle);font-size:10px;word-break:break-all}.analysis-workflow-foot .small{min-height:32px;padding:0 10px;font-size:11px}.workflow-evidence-summary{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-evidence-summary .extraction-status{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px}.workflow-evidence-summary .extraction-status.running{color:var(--atlas-primary);background:#f4f8fc}.workflow-evidence-summary .extraction-status.ready_for_confirmation{color:#8a5b14;background:#fff8e6}.workflow-evidence-summary .extraction-status.confirmed{color:#347254;background:#edf7f0}.workflow-evidence-summary .extraction-status.failed{color:#b35c56;background:#fff5f4}
+.analysis-workflow-panel.compact{padding:12px 16px}.analysis-workflow-panel.compact .analysis-workflow-head{align-items:center}.analysis-workflow-panel.compact .section-kicker{margin-bottom:2px}.analysis-workflow-panel.compact .analysis-workflow-head h3{font-size:16px}
+.workflow-complete-strip{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;padding-top:10px;border-top:1px solid var(--atlas-border)}.workflow-complete-stages{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-complete-stages span{display:inline-flex;align-items:center;gap:5px;color:var(--atlas-muted);font-size:10px;font-weight:800;white-space:nowrap}.workflow-complete-stages i{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;color:#fff;background:#347254;border-radius:2px;font-size:9px;font-style:normal}.workflow-complete-meta{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}.workflow-complete-meta small{color:var(--atlas-subtle);font-size:9px;white-space:nowrap}
+.contract-workbench{margin:0 0 22px;border-top:3px solid #347254;border-bottom:1px solid var(--atlas-border);background:var(--atlas-surface)}
+.contract-workbench-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:15px 20px;border-bottom:1px solid var(--atlas-border);background:#f7faf8}
+.contract-workbench-head>div{min-width:0}.contract-workbench-head h3{margin:3px 0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:20px;line-height:1.25}.contract-workbench-head p{max-width:760px;margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.workbench-snapshot{display:flex;flex:0 0 auto;flex-direction:column;gap:4px;min-width:184px;padding:8px 0 8px 16px;border-left:1px solid var(--atlas-border)}.workbench-snapshot strong{color:#347254;font-size:12px}.workbench-snapshot small{color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.contract-workbench-body{display:grid;grid-template-columns:minmax(0,1.22fr) minmax(350px,.92fr)}
+.fact-lane{min-width:0;padding:0 16px 16px;border-right:1px solid var(--atlas-border);background:var(--atlas-surface)}
+.fact-lane-head,.insight-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 0 12px}.fact-lane-head>div,.insight-section-head>div{min-width:0}.fact-lane-head span,.insight-section-head span{display:block;margin-bottom:3px;color:var(--atlas-primary);font-size:10px;font-weight:900;letter-spacing:.04em;text-transform:uppercase}.fact-lane-head h4,.insight-section-head h4{margin:0;color:var(--atlas-text);font-size:15px;line-height:1.35}.fact-lane-head .small{min-height:32px;padding:0 10px;font-size:11px}
+.fact-mode-note{display:flex;align-items:flex-start;gap:10px;margin:0 0 12px;padding:9px 10px;border:1px solid #cfe4d7;border-radius:6px;background:#f4fbf6;color:#2f6847;font-size:11px;line-height:1.55}.fact-mode-note strong{flex:0 0 auto;color:#24593a}.fact-mode-note span{min-width:0}.fact-mode-note.legacy{border-color:#ead2a4;background:#fff9ed;color:#816126}.fact-mode-note.legacy strong{color:#6c4c14}
+.fact-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fact-group{min-width:0;border-top:1px solid var(--atlas-border)}.fact-group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0 8px}.fact-group-head strong{color:var(--atlas-text);font-size:11px}.fact-group-head span{color:var(--atlas-subtle);font-size:10px;font-weight:800}.fact-payment-table,.fact-card-grid{display:grid;gap:8px;border-top:1px solid var(--atlas-border)}
+.fact-payment-row{display:grid;grid-template-columns:minmax(84px,.8fr) minmax(0,1.3fr) minmax(96px,.72fr) auto;gap:8px;align-items:center;width:100%;min-height:56px;padding:9px 0;color:var(--atlas-text);background:transparent;border:0;border-bottom:1px solid var(--atlas-border);font:inherit;text-align:left;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease}
+.fact-card{padding:10px 10px 11px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;color:var(--atlas-text);text-align:left;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease,border-color .18s ease}
+.fact-card:hover,.fact-payment-row:hover{background:#f5f9f7}
+.fact-card.selected,.fact-payment-row.selected{background:#edf7f0;box-shadow:inset 3px 0 0 #347254}
+.fact-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px}
+.fact-card-head strong,.fact-payment-stage{min-width:0;color:var(--atlas-text);font-size:12px;line-height:1.45;font-weight:900}
+.fact-card-head strong{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.fact-card p,.fact-payment-condition{margin:4px 0 0;color:var(--atlas-text);font-size:12px;line-height:1.55}
+.fact-card small,.fact-payment-meta{display:block;margin-top:4px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.fact-payment-condition,.fact-payment-meta{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.fact-row:focus-visible,.fact-card:focus-visible,.fact-payment-row:focus-visible,.workbench-timeline-main:focus-visible,.workbench-node-action:focus-visible,.workbench-risk-main:focus-visible,.workbench-risk-actions button:focus-visible,.workbench-all-risks:focus-visible,.text-button:focus-visible{outline:2px solid var(--atlas-primary);outline-offset:2px}
+.fact-card>em,.fact-payment-row>em,.element-evidence-preview>header>em{padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900;white-space:nowrap;justify-self:end}
+.fact-card>em.verified,.fact-payment-row>em.verified,.element-evidence-preview>header>em.verified{color:#246744;background:#eaf6ef}
+.fact-card>em.review,.fact-payment-row>em.review,.element-evidence-preview>header>em.review{color:#8a5b14;background:#fff4db}
+.fact-card>em.missing,.fact-payment-row>em.missing,.element-evidence-preview>header>em.missing{color:#7b8794;background:#edf1f4}
+.fact-empty,.insight-empty{padding:14px 0;color:var(--atlas-muted);font-size:12px;line-height:1.65}.fact-empty{border-top:1px dashed var(--atlas-border)}.element-evidence-preview{margin-top:16px;padding-top:14px;border-top:2px solid #d8e6dd}.element-evidence-preview>header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}.element-evidence-preview>header>div{min-width:0}.element-evidence-preview>header span{display:block;margin-bottom:3px;color:#347254;font-size:10px;font-weight:900}.element-evidence-preview>header h4{margin:0;color:var(--atlas-text);font-size:15px}.element-evidence-preview>header p{margin:4px 0 0;color:var(--atlas-subtle);font-size:10px;line-height:1.55}.selected-element-value{margin:10px 0 0;color:var(--atlas-text);font-size:13px;font-weight:800;line-height:1.65;white-space:pre-wrap}.element-detail-list{display:grid;gap:6px;margin:10px 0 0;padding:0;list-style:none}.element-detail-list li{display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;align-items:start;padding:8px 10px;background:#f8faf8;border:1px solid var(--atlas-border);border-radius:4px}.element-detail-list span{color:var(--atlas-subtle);font-size:10px;font-weight:800}.element-detail-list strong{color:var(--atlas-text);font-size:12px;line-height:1.55;word-break:break-word}
+.element-evidence-list{display:grid;gap:8px;margin-top:11px}.element-evidence-list article{padding:10px 11px;background:#f7fafc;border-left:3px solid var(--atlas-primary)}.element-evidence-meta{display:flex;align-items:center;justify-content:space-between;gap:9px;margin-bottom:6px}.element-evidence-meta strong{min-width:0;color:var(--atlas-text);font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.element-evidence-meta span{flex:0 0 auto;color:var(--atlas-subtle);font-size:9px;font-weight:800}.element-evidence-list blockquote{margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.65;white-space:pre-wrap}.evidence-source-detail{margin-top:8px;padding-top:8px;border-top:1px dashed var(--atlas-border)}.evidence-source-detail summary,.element-candidates summary{color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}.evidence-full-text{margin:8px 0 0;color:#354452;font-size:11px;line-height:1.78;white-space:pre-wrap;word-break:break-word}.evidence-full-text mark{padding:1px 2px;background:#fff0ae;color:inherit}.evidence-pdf-link{display:inline-flex;margin-top:9px;color:var(--atlas-primary);font-size:10px;font-weight:900;text-decoration:none}.evidence-pdf-link:hover{text-decoration:underline}.element-no-evidence{margin:10px 0 0;color:#a67834;font-size:11px;line-height:1.6}.element-candidates{margin-top:10px}.element-candidates ul{margin:6px 0 0;padding-left:17px;color:var(--atlas-muted);font-size:11px;font-weight:500;line-height:1.6}
+.workbench-insight-section{padding:0 16px 14px;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.insight-section-head{padding-bottom:11px}.insight-section-head strong{padding:3px 6px;color:var(--atlas-subtle);background:var(--atlas-surface);border:1px solid var(--atlas-border);font-size:10px}
+.payment-summary-list{display:grid;gap:7px;margin:0 0 12px}.payment-summary-card{display:flex;align-items:flex-start;justify-content:space-between;gap:9px;padding:9px 10px;color:var(--atlas-text);background:#fffdf7;border:1px solid #eadfbd;border-left:3px solid #b88930;cursor:pointer}.payment-summary-card:hover{background:#fff8e6}.payment-summary-card>div{min-width:0}.payment-summary-card span{display:block;margin-bottom:3px;color:#8a5b14;font-size:9px;font-weight:900}.payment-summary-card strong{display:-webkit-box;overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.payment-summary-card em{flex:0 0 auto;padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900}.payment-summary-card em.verified{color:#246744;background:#eaf6ef}.payment-summary-card em.review{color:#8a5b14;background:#fff0cf}.payment-summary-card em.missing{color:#7b8794;background:#edf1f4}
+.workbench-timeline-list{border-top:1px solid var(--atlas-border)}.workbench-timeline-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;align-items:center;border-bottom:1px solid var(--atlas-border)}.workbench-timeline-main{display:grid;grid-template-columns:80px minmax(0,1fr);gap:9px;min-width:0;padding:10px 0;color:var(--atlas-text);background:transparent;border:0;text-align:left;cursor:pointer}.workbench-timeline-main:hover .workbench-timeline-copy strong{text-decoration:underline}.workbench-date{align-self:start;color:var(--atlas-primary);font-size:11px;font-weight:900;font-variant-numeric:tabular-nums;line-height:1.45}.workbench-timeline-copy{min-width:0}.workbench-timeline-copy strong{display:block;overflow:hidden;color:var(--atlas-text);font-size:12px;line-height:1.45;text-overflow:ellipsis;white-space:nowrap}.workbench-timeline-copy small{display:-webkit-box;overflow:hidden;margin-top:3px;color:var(--atlas-muted);font-size:10px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.workbench-timeline-copy em{display:inline-flex;margin-top:5px;padding:2px 5px;color:#8a5b14;background:#fff4db;border-radius:2px;font-size:9px;font-style:normal;font-weight:900}.workbench-timeline-row.danger .workbench-date{color:#a84640}.workbench-timeline-row.done .workbench-date{color:#347254}.workbench-timeline-row.condition .workbench-date{color:#7b8794}.workbench-node-action{min-height:30px;padding:0 7px;color:#347254;background:#edf7f0;border:1px solid #bdd7c6;border-radius:3px;font-size:10px;font-weight:900;cursor:pointer}.workbench-node-action:hover{background:#dff0e5}
+.risk-focus-section{padding-bottom:16px}.workbench-risk-list{border-top:1px solid var(--atlas-border)}.workbench-risk-row{padding:10px 0;border-bottom:1px solid var(--atlas-border)}.workbench-risk-row.closed{opacity:.62}.workbench-risk-main{display:grid;grid-template-columns:48px minmax(0,1fr);gap:8px;width:100%;padding:0;color:var(--atlas-text);background:transparent;border:0;text-align:left;cursor:pointer}.workbench-risk-main .finding-sev{min-width:44px;height:20px;padding:0;font-size:9px}.workbench-risk-main span:last-child{min-width:0}.workbench-risk-main strong{display:block;color:var(--atlas-text);font-size:12px;line-height:1.45}.workbench-risk-main small{display:-webkit-box;overflow:hidden;margin-top:4px;color:var(--atlas-muted);font-size:10px;line-height:1.5;-webkit-line-clamp:2;-webkit-box-orient:vertical}.workbench-risk-main:hover strong{text-decoration:underline}.workbench-risk-actions{display:flex;gap:6px;margin:8px 0 0 56px}.workbench-risk-actions button{min-height:28px;padding:0 7px;color:var(--atlas-primary);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:3px;font-size:9px;font-weight:900;cursor:pointer}.workbench-risk-actions button:hover{border-color:var(--atlas-primary);background:#f2f7fb}.workbench-risk-state{display:block;margin:7px 0 0 56px;color:var(--atlas-subtle);font-size:9px;font-weight:800}.risk-empty p{margin:0 0 9px}.workbench-all-risks{width:100%;min-height:34px;margin-top:11px;color:var(--atlas-primary);background:transparent;border:1px dashed var(--atlas-border);font-size:10px;font-weight:900;cursor:pointer}.workbench-all-risks:hover{border-color:var(--atlas-primary);background:#f2f7fb}
+.workbench-runtime{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 22px;background:#f7faf8;border-top:1px solid var(--atlas-border)}.workbench-runtime span{color:#347254;font-size:10px;font-weight:900}.workbench-runtime small{color:var(--atlas-subtle);font-size:10px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.text-button{margin-left:auto;padding:0;color:var(--atlas-primary);background:transparent;border:0;font-size:10px;font-weight:900;cursor:pointer}.text-button:hover{text-decoration:underline}
 .document-progress-panel{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px 18px;align-items:center;margin:-8px 0 24px;padding:16px 18px;border:1px solid #b7cde0;border-left:4px solid var(--atlas-primary);background:#f5f9fc}
 .document-progress-copy{min-width:0}.document-progress-copy h3{margin:3px 0 4px;color:var(--atlas-text);font-size:14px;line-height:1.4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.document-progress-copy p{margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.55}.document-progress-value{display:flex;flex-direction:column;align-items:flex-end;gap:2px}.document-progress-value strong{color:var(--atlas-primary);font-size:20px;font-variant-numeric:tabular-nums}.document-progress-value span{color:var(--atlas-subtle);font-size:10px}.document-progress-track{grid-column:1 / -1;height:4px;overflow:hidden;background:#dbe6f0}.document-progress-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
 .contract-diagnostics{display:grid;gap:10px;margin:-8px 0 24px}
@@ -2270,13 +3037,17 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .evidence-snapshot-list{margin:8px 0 0;padding-left:16px;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .review-report-markdown,.review-report-json{max-height:280px;overflow:auto;margin:0;padding:12px;color:#354452;background:#f7f9fb;border:1px solid var(--atlas-border);font:11px/1.7 'JetBrains Mono','Fira Code',monospace;white-space:pre-wrap;word-break:break-word}
 
-.side-section{margin-bottom:20px;padding:18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px}
-.side-section h3{margin:0 0 12px;font-family:var(--atlas-font-display);font-size:16px;color:var(--atlas-text)}
-.party-row,.doc-row,.run-row,.finding-row,.obligation-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--atlas-border);font-size:12px}
-.party-row span,.doc-row span,.run-row span,.finding-row span,.obligation-row span{padding:2px 6px;border-radius:2px;font-size:9px;font-weight:800}
-.party-row strong,.doc-row strong,.run-row strong,.finding-row strong,.obligation-row strong{flex:1;color:var(--atlas-text)}
-.doc-row small,.run-row small,.finding-row small,.obligation-row small{color:var(--atlas-subtle);font-size:10px;white-space:nowrap}
+.run-row{display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid var(--atlas-border);font-size:12px}
+.run-row span{padding:2px 6px;border-radius:2px;font-size:9px;font-weight:800}
+.run-row strong{flex:1;color:var(--atlas-text)}
+.run-row small{color:var(--atlas-subtle);font-size:10px;white-space:nowrap}
+.run-current-step{flex:1 0 100%;margin:0 0 0 78px;color:var(--atlas-primary);font-size:10px;line-height:1.45;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.run-meta{flex:0 0 auto}
 .doc-row{flex-wrap:wrap}.doc-pipeline-action{flex:1 0 100%;margin-left:78px;color:var(--atlas-primary)!important}.doc-pipeline-track{flex:1 0 100%;height:3px;margin-left:78px;overflow:hidden;background:var(--atlas-border)}.doc-pipeline-track i{display:block;height:100%;background:var(--atlas-primary);transition:width .35s ease}
+.workbench-status-strip{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;margin:12px 20px 0;padding:12px 14px;border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px;background:#f7fbfd;color:var(--atlas-muted)}
+.workbench-status-strip strong{display:block;color:var(--atlas-text);font-size:12px}
+.workbench-status-strip small,.workbench-status-strip span{display:block;margin-top:3px;color:var(--atlas-muted);font-size:11px;line-height:1.5}
+.workbench-status-strip.error{border-left-color:#b35c56;background:#fff7f6;color:#9d4b45}
+.workbench-status-strip.error strong{color:#7f2f2a}
 .risk-workbench{margin:28px 0 22px;padding:0;border-top:2px solid var(--atlas-text);border-bottom:1px solid var(--atlas-border)}
 .risk-workbench-head{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;padding:18px 0 16px}
 .risk-workbench-head h3{margin:3px 0 5px;font-family:var(--atlas-font-display);font-size:22px;color:var(--atlas-text)}
@@ -2330,30 +3101,6 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .verification-list ul{margin:0;padding-left:16px;color:var(--atlas-text);font-size:12px;line-height:1.7}
 .verification-list li+li{margin-top:3px}
 .finding-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.risk-float-toggle{position:fixed;right:20px;top:78px;z-index:62;display:flex;align-items:center;gap:7px;min-height:38px;padding:0 12px;border:1px solid rgba(66,111,166,.34);border-radius:999px;background:#fff;color:var(--atlas-primary);box-shadow:0 10px 28px rgba(24,38,52,.18);font-size:11px;font-weight:900;cursor:pointer}
-.risk-float-toggle strong{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:22px;border-radius:999px;background:var(--atlas-primary);color:#fff;font-size:11px}
-.risk-float-toggle.active{background:#f2f7fb;border-color:var(--atlas-primary)}
-.risk-float-panel{position:fixed;right:18px;top:124px;z-index:61;width:304px;max-height:calc(100vh - 148px);display:flex;flex-direction:column;background:rgba(255,255,255,.98);border:1px solid var(--atlas-border);border-radius:6px;box-shadow:0 18px 50px rgba(24,38,52,.22);backdrop-filter:blur(8px)}
-.risk-float-head{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 13px;border-bottom:1px solid var(--atlas-border);background:#f7fafc}
-.risk-float-head span{display:block;color:var(--atlas-primary);font-size:10px;font-weight:900}
-.risk-float-head strong{display:block;margin-top:2px;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:22px;line-height:1}
-.risk-float-head small{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:10px;font-weight:900;background:var(--atlas-surface)}
-.risk-float-list{overflow:auto;padding:8px;display:grid;gap:8px}
-.risk-float-item{padding:10px;border:1px solid var(--atlas-border);border-left:3px solid #a67834;border-radius:4px;background:var(--atlas-surface);transition:opacity .18s ease,background-color .18s ease}
-.risk-float-item.high{border-left-color:#a84640}
-.risk-float-item.done{opacity:.58;background:#f1f4f6;border-left-color:#9aa7b2}
-.risk-float-title{display:grid;grid-template-columns:44px minmax(0,1fr);gap:8px;align-items:start;width:100%;padding:0;border:0;background:transparent;text-align:left;cursor:pointer}
-.risk-float-title span{display:inline-flex;align-items:center;justify-content:center;height:19px;border-radius:3px;font-size:9px;font-weight:900}
-.risk-float-title .sev-high{color:#903933;background:#f8e7e5}.risk-float-title .sev-medium{color:#7b591f;background:#fbf2df}.risk-float-title .sev-low{color:#2f694b;background:#e8f3ec}
-.risk-float-title strong{min-width:0;color:var(--atlas-text);font-size:12px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.risk-float-item p{margin:7px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.risk-float-status{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
-.risk-float-status small{padding:2px 5px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-subtle);font-size:9px;font-weight:800}
-.risk-float-actions{display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-top:9px}
-.risk-float-actions button{min-height:30px;border:1px solid var(--atlas-border);border-radius:4px;background:#fff;color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}
-.risk-float-actions button:hover{border-color:var(--atlas-primary);background:#f3f7fa}
-.risk-float-done{margin-top:9px;padding:6px;border:1px solid #d6dde4;border-radius:4px;background:#eef2f5;color:#6d7a86;font-size:10px;font-weight:900;text-align:center}
-.risk-float-done.report-only{color:#7b591f;background:#fff8e6;border-color:#ead4a2}
 .run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
 .run-row-failed{align-items:flex-start;flex-wrap:wrap}.run-row-failed .run-error-message{flex:1 0 100%;margin:0 0 2px 78px;color:#9d4b45;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
@@ -2450,23 +3197,85 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .intake-role-note{margin:13px 0 0;padding:10px 12px;border-left:3px solid var(--atlas-primary);background:#fff;color:var(--atlas-muted);font-size:12px;line-height:1.65}
 .intake-actions{display:flex;justify-content:flex-end;gap:10px;padding:15px 22px;background:#fff;border-top:1px solid var(--atlas-border)}
 .blank-state{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px}
-.loading-block{display:flex;align-items:center;justify-content:center;gap:9px;min-height:50vh;color:var(--atlas-muted)}
+.loading-block{display:flex;align-items:center;justify-content:flex-start;gap:9px;min-height:88px;margin:12px 0 18px;padding:14px 16px;color:var(--atlas-muted);background:var(--atlas-surface);border:1px dashed var(--atlas-border);border-radius:4px}
+.loading-block.error{justify-content:space-between;border-style:solid;border-color:#e2b8b2;background:#fff7f6;color:#9d4b45}
+.loading-block.error strong{display:block;color:#7f2f2a;font-size:13px}
+.loading-block.error small{display:block;margin-top:3px;color:#9d4b45;font-size:11px;line-height:1.5}
 .loader{width:20px;height:20px;border:3px solid var(--atlas-border);border-top-color:var(--atlas-primary);border-radius:50%;animation:spin .8s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-@media (max-width:760px){
-  .risk-float-toggle{right:14px;top:auto;bottom:18px}
-  .risk-float-panel{left:12px;right:12px;top:auto;bottom:66px;width:auto;max-height:58vh}
-  .risk-float-list{grid-template-columns:1fr}
+.case-page{max-width:1360px}
+.workbench-tabs{display:flex;flex-wrap:wrap;gap:8px;padding:12px 20px 0;background:#f7faf8;border-bottom:1px solid var(--atlas-border)}
+.workbench-tab{display:inline-flex;align-items:center;gap:10px;min-height:40px;padding:0 12px;color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-bottom-color:#cfd8e2;border-radius:4px 4px 0 0;font:inherit;font-size:12px;font-weight:900;cursor:pointer;transition:background-color .18s ease,border-color .18s ease,color .18s ease,box-shadow .18s ease}
+.workbench-tab strong{display:inline-flex;align-items:center;justify-content:center;min-width:22px;padding:2px 6px;border-radius:999px;background:#edf4fa;color:var(--atlas-primary);font-size:10px;font-weight:900}
+.workbench-tab:hover{color:var(--atlas-primary);border-color:var(--atlas-primary)}
+.workbench-tab.active{position:relative;z-index:1;color:var(--atlas-primary);background:var(--atlas-surface);border-color:#7fb38d;border-bottom-color:var(--atlas-surface);box-shadow:inset 0 0 0 1px rgba(52,114,84,.08)}
+.workbench-tab:focus-visible{outline:2px solid var(--atlas-primary);outline-offset:2px}
+.workbench-panel{padding:0 0 4px}
+.workbench-tab-panel{padding:0 20px 18px}
+.tab-panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:16px 0 12px}
+.tab-panel-head .section-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+.tab-panel-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:18px;line-height:1.25}
+.tab-panel-head p{max-width:760px;margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.tab-panel-head strong{flex:0 0 auto;padding:3px 8px;border:1px solid var(--atlas-border);border-radius:3px;background:var(--atlas-bg);color:var(--atlas-muted);font-size:11px;font-weight:900}
+.review-panel-flat{grid-template-columns:1fr}
+.review-main-flat{padding-right:0}
+.workbench-elements-lane{min-width:0;background:#f8fafc;border-left:1px solid var(--atlas-border)}
+.evidence-tab-switch{margin-left:0;padding:0}
+.contract-end-condition-inline{margin-top:0}
+.contract-end-condition.compact{padding:12px 14px}
+.contract-end-condition.compact strong{font-size:12px}
+.contract-end-condition.compact ol{margin-top:8px}
+.evidence-workbench-body{display:grid;grid-template-columns:minmax(0,1.14fr) minmax(300px,.86fr);gap:14px;align-items:start;padding-bottom:4px}
+.fact-decision-browser{grid-column:1/-1}
+.evidence-browser{min-width:0}
+.evidence-browser-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:14px 0 10px}
+.evidence-browser-head span{display:block;margin-bottom:3px;color:#347254;font-size:10px;font-weight:900;text-transform:uppercase}
+.evidence-browser-head h4{margin:0;color:var(--atlas-text);font-size:15px;line-height:1.35}
+.evidence-browser-head p{max-width:620px;margin:4px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
+.evidence-browser-head strong{padding:3px 6px;color:var(--atlas-subtle);background:var(--atlas-surface);border:1px solid var(--atlas-border);font-size:10px}
+.evidence-summary{margin-top:8px}
+.evidence-list-wide{margin-top:12px}
+.evidence-doc-list{display:grid;border-top:1px solid var(--atlas-border)}
+.evidence-doc-card{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:10px 0;border-bottom:1px solid var(--atlas-border)}
+.evidence-doc-card>div{min-width:0}
+.evidence-doc-card span{display:block;margin-bottom:3px;color:#347254;font-size:9px;font-weight:900}
+.evidence-doc-card strong{display:block;color:var(--atlas-text);font-size:12px;line-height:1.5;word-break:break-word}
+.evidence-doc-card small{display:block;margin-top:2px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
+.fact-decision-list{grid-template-columns:repeat(2,minmax(0,1fr));gap:0 18px}
+.fact-decision-card{display:block;min-width:0}
+.fact-decision-evidence{margin-top:9px;padding-top:8px;border-top:1px dashed var(--atlas-border)}
+.fact-decision-evidence summary{color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}
+.fact-decision-evidence blockquote{margin:8px 0 0;padding:8px 10px;border-left:3px solid #8eb79c;background:#f5f9f6;color:var(--atlas-muted);font-size:11px;line-height:1.6}
+.run-workflow-stages{margin-top:0}
+.run-workbench-runtime{margin-top:12px}
+.run-list-panel{margin-top:14px;border-top:1px solid var(--atlas-border)}
+.run-list-panel .run-row{padding:8px 0}
+.run-list-panel .run-current-step{margin-left:78px}
+.run-list-panel .run-error-message{margin-left:78px}
+.workbench-tab-panel .workbench-runtime{padding:10px 0}
+.workbench-tab-panel .text-button{margin-left:auto}
+.workbench-tab-panel .fact-empty{padding:12px 0 4px}
+
+@media (min-width:1600px){
+  .case-page{max-width:1360px}
 }
 
-/* Fulfillment timeline workbench */
-.timeline-panel{padding:0;overflow:hidden}
-.timeline-panel-head{margin:0;padding:18px 20px;border-bottom:1px solid var(--atlas-border)}
-.detail-timeline{display:block}
-.detail-timeline-node{display:grid;grid-template-columns:152px minmax(0,1fr) 142px;gap:18px;align-items:center;padding:16px 20px;background:var(--atlas-surface);border:0;border-bottom:1px solid var(--atlas-border);border-radius:0;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease}
-.detail-timeline-node:last-child{border-bottom:0}
-.detail-timeline-node:hover,.detail-timeline-node:focus-visible{background:#f7fafc;box-shadow:inset 3px 0 0 var(--atlas-primary);outline:0}
+@media (max-width:980px){
+  .contract-workbench-body{grid-template-columns:1fr}
+  .fact-lane{border-right:0;border-bottom:1px solid var(--atlas-border)}
+  .workbench-tabs{padding:12px 14px 0}
+  .workbench-tab-panel{padding:0 14px 14px}
+  .workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}
+  .evidence-workbench-body{grid-template-columns:1fr}
+  .evidence-doc-card{flex-direction:column}
+  .tab-panel-head{flex-direction:column;align-items:flex-start}
+  .run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
+  .workflow-complete-strip{align-items:flex-start;flex-direction:column}
+  .workflow-complete-meta{justify-content:flex-start}
+}
+
+/* Fulfillment timeline detail */
 .timeline-date-column{align-self:stretch;display:flex;flex-direction:column;justify-content:center;padding-right:16px;border-right:1px solid var(--atlas-border)}
 .timeline-date-column strong{color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:18px;line-height:1.25;font-variant-numeric:tabular-nums;word-break:break-word}
 .timeline-date-column small{margin-top:5px;color:var(--atlas-subtle);font-size:10px;font-weight:700}
@@ -2546,10 +3355,11 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-summary-row>strong{color:var(--atlas-text);font-size:17px}
 
 @media(max-width:700px){
-  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-grid div:nth-child(2n){border-right:0}.meta-grid div:nth-child(3n){border-right:1px solid var(--atlas-border)}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}
+  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-item:nth-child(2n){border-right:0}.meta-item-wide{grid-column:span 2}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}.workbench-tabs{padding:12px 14px 0}.workbench-tab{min-height:36px;padding:0 10px;font-size:11px}.workbench-tab strong{min-width:20px}.workbench-tab-panel{padding:0 14px 14px}.workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}.evidence-workbench-body{grid-template-columns:1fr}.evidence-browser-head{flex-direction:column}.evidence-doc-card{flex-direction:column}.contract-end-condition{grid-template-columns:1fr}.contract-end-condition li:before{margin-right:6px}.review-panel-flat{grid-template-columns:1fr}.run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
+  .contract-workbench-head{align-items:flex-start;flex-direction:column;padding:17px 15px}.workbench-snapshot{width:100%;padding:11px 0 0;border-top:1px solid var(--atlas-border);border-left:0}.contract-workbench-body{display:block}.fact-lane{padding:0 14px 14px}.fact-groups{grid-template-columns:1fr}.fact-row{grid-template-columns:92px minmax(0,1fr);gap:7px}.fact-row>em{grid-column:2;justify-self:start}.workbench-insight-section{padding:0 14px 14px;border-right:0;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.workbench-timeline-main{grid-template-columns:74px minmax(0,1fr)}.workbench-node-action{margin-right:2px}.workbench-runtime{align-items:flex-start;flex-direction:column;padding:10px 15px}.workbench-runtime small{max-width:100%;white-space:normal}.text-button{margin-left:0}
   .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
   .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}
-  .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}.review-coverage-grid,.review-risk-detail-grid{grid-template-columns:1fr}.review-risk-meta,.review-risk-card details{margin-left:0}.fulfillment-audit-summary{flex-direction:column;align-items:flex-start}
+  .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}.review-coverage-grid,.review-risk-detail-grid,.fact-decision-list{grid-template-columns:1fr}.review-risk-meta,.review-risk-card details{margin-left:0}.fulfillment-audit-summary{flex-direction:column;align-items:flex-start}
 }
 @media(prefers-reduced-motion:reduce){.finding-expand{transition:none}}
 </style>

@@ -1,0 +1,1204 @@
+"""LangGraph contract fact extraction.
+
+The graph creates a reusable, versioned fact snapshot. It is intentionally
+separate from risk review: parsing/indexing is shared, extraction is rerunnable,
+and review consumes the latest confirmed facts plus the original clauses.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import json
+import logging
+import re
+from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal, InvalidOperation
+from typing import Any, Awaitable
+
+from langgraph.graph import END, START, StateGraph
+
+from .state import BaseGraphState
+
+logger = logging.getLogger(__name__)
+
+EXTRACTION_SCHEMA_VERSION = "contract-extraction-v2"
+PROFILE_SCHEMA_VERSION = "contract-profile-v1"
+EXTRACTION_PROMPT_VERSION = "contract-elements-v2-profile"
+EXTRACTION_RETRIEVAL_VERSION = "contract-hybrid-retrieval-v2"
+PARSER_VERSION = "document-parser-v2"
+
+ELEMENT_PACKS: tuple[dict[str, Any], ...] = (
+    {
+        "packKey": "financial_terms",
+        "packName": "金额、付款与税务",
+        "elementKeys": ["payment_terms"],
+        "queries": ["付款 支付 发票 税率 结算 付款条件 付款比例"],
+    },
+    {
+        "packKey": "dates_obligations",
+        "packName": "日期、期限与履约义务",
+        "elementKeys": [
+            "termination_conditions", "delivery_obligations",
+            "acceptance_criteria", "required_materials",
+        ],
+        "queries": ["生效 有效期 到期 终止 结束 交付 服务 履约 验收 提交 材料 通知 期限"],
+    },
+    {
+        "packKey": "risk_terms", 
+        "packName": "责任、知识产权与合规",
+        "elementKeys": [
+            "liability_terms", "ip_ownership", "confidentiality_terms",
+            "data_protection_terms", "compliance_terms", "dispute_resolution", "notice_terms",
+        ],
+        "queries": ["违约 赔偿 责任上限 知识产权 著作权 保密 数据 个人信息 合规 争议 通知"],
+    },
+)
+
+
+def _run_async(awaitable: Awaitable[Any]) -> Any:
+    """Run an async store call from a synchronous LangGraph node."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(awaitable)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        return executor.submit(lambda: asyncio.run(awaitable)).result()
+
+
+def _json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _text_part(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, dict):
+        return _profile_display_value(value)
+    if isinstance(value, list):
+        return "；".join(filter(None, (_text_part(item) for item in value[:3])))
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def _profile_display_value(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if not isinstance(value, (dict, list)):
+        return _text_part(value)
+    if isinstance(value, list):
+        return "；".join(filter(None, (_profile_display_value(item) for item in value[:3])))
+
+    for key in ("displayValue", "summary", "value", "name", "fullName", "title"):
+        text = _text_part(value.get(key))
+        if text:
+            return text[:1000]
+
+    type_text = _text_part(value.get("type") or value.get("kind") or value.get("category"))
+    condition = _text_part(value.get("condition") or value.get("trigger") or value.get("requirement"))
+    timing = _text_part(value.get("timing") or value.get("deadline") or value.get("timeLimit") or value.get("period"))
+    action = _text_part(value.get("action") or value.get("obligation") or value.get("task"))
+    party = _text_part(value.get("party") or value.get("obligor") or value.get("responsibleParty"))
+    amount = _text_part(value.get("amount"))
+    currency = _text_part(value.get("currency"))
+    cap = _text_part(value.get("cap") or value.get("limit"))
+    note = _text_part(value.get("note") or value.get("remark") or value.get("comment"))
+    if amount and not (condition or timing or action or note or cap):
+        return f"{amount} {currency}".strip()[:1000]
+    if condition or timing or action or note or cap:
+        first = "，".join(part for part in (party, action or condition, f"{amount} {currency}".strip()) if part)
+        tail = "；".join(part for part in (
+            f"时限：{timing}" if timing else "",
+            f"上限：{cap}" if cap else "",
+            f"备注：{note}" if note else "",
+        ) if part)
+        return f"{type_text + '：' if type_text else ''}{'；'.join(part for part in (first, tail) if part)}"[:1000]
+
+    materials = value.get("materials")
+    if isinstance(materials, list) and materials:
+        return ("应提交材料：" + "、".join(filter(None, (_text_part(item) for item in materials[:5]))))[:1000]
+
+    parts = [_text_part(value.get(key)) for key in (
+        "role", "address", "contact", "phone", "tel", "mobile", "bank", "account",
+        "date", "startDate", "endDate", "effectiveCondition", "terminationCondition",
+    )]
+    return " · ".join(part for part in parts if part)[:1000]
+
+
+def _clamp_confidence(value: Any, default: float = 0.0) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        number = default
+    return round(max(0.0, min(1.0, number)), 4)
+
+
+def _source_id(item: dict[str, Any]) -> str:
+    raw = str(item.get("sourceId") or item.get("clauseId") or "").strip()
+    if raw.startswith("CONTRACT_CLAUSE:"):
+        return raw
+    return f"CONTRACT_CLAUSE:{raw}" if raw else ""
+
+
+def _compact_clause(item: dict[str, Any]) -> dict[str, Any]:
+    source_id = _source_id(item)
+    content = str(item.get("clauseText") or item.get("content") or "")
+    snippet = str(item.get("snippet") or content[:320])
+    return {
+        **item,
+        "sourceId": source_id,
+        "clauseText": content[:9000],
+        "content": content[:9000],
+        "snippet": snippet[:1800],
+        "pageNumber": item.get("pageNumber") or item.get("page"),
+    }
+
+
+def _citation_supported(citation: dict[str, Any], evidence_by_id: dict[str, dict[str, Any]]) -> bool:
+    source_id = str(citation.get("sourceId") or "")
+    quote = str(citation.get("quote") or "").strip()
+    source = evidence_by_id.get(source_id)
+    if not source or not quote:
+        return False
+    haystack = str(source.get("clauseText") or source.get("content") or source.get("snippet") or "")
+    return quote in haystack
+
+
+def _load_context(state: dict[str, Any]) -> dict[str, Any]:
+    from ..persistence import _conn, _normalize_value
+
+    case_id = int(state.get("subject_id") or 0)
+    task_input = state.get("task_input") or {}
+    requested_document_id = int(task_input.get("documentId") or 0)
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, case_key AS caseKey, title, contract_type AS contractType,
+                          status, our_entity AS ourEntity, counterparty, our_side AS ourSide,
+                          amount, currency, signed_date AS signedDate,
+                          effective_date AS effectiveDate, expiry_date AS expiryDate,
+                          department
+                   FROM contract_case WHERE id=%s AND deleted=0""",
+                (case_id,),
+            )
+            case_row = _normalize_value(cur.fetchone() or {})
+            if not case_row:
+                raise ValueError(f"Contract case {case_id} not found")
+
+            if requested_document_id:
+                cur.execute(
+                    """SELECT id, file_name AS fileName, version, content_hash AS contentHash,
+                              parse_status AS parseStatus, parse_quality AS parseQuality,
+                              content_text AS contentText
+                       FROM contract_document
+                       WHERE id=%s AND case_id=%s AND document_type='MAIN'
+                         AND COALESCE(deleted,0)=0""",
+                    (requested_document_id, case_id),
+                )
+            else:
+                cur.execute(
+                    """SELECT id, file_name AS fileName, version, content_hash AS contentHash,
+                              parse_status AS parseStatus, parse_quality AS parseQuality,
+                              content_text AS contentText
+                       FROM contract_document
+                       WHERE case_id=%s AND document_type='MAIN'
+                         AND parse_status='READY' AND COALESCE(deleted,0)=0
+                       ORDER BY version DESC, id DESC LIMIT 1""",
+                    (case_id,),
+                )
+            document = _normalize_value(cur.fetchone() or {})
+            if not document:
+                raise ValueError("没有可用于要素提取的主合同文档")
+            if str(document.get("parseStatus") or "").upper() != "READY":
+                raise ValueError("合同文档尚未解析完成，暂不能提取合同要素")
+
+            cur.execute(
+                """SELECT id AS clauseId, document_id AS documentId,
+                          clause_number AS clauseNumber, title, content,
+                          clause_type AS clauseType, page_number AS pageNumber,
+                          start_offset AS startOffset, end_offset AS endOffset
+                   FROM contract_clause
+                   WHERE case_id=%s AND document_id=%s
+                   ORDER BY id ASC LIMIT 240""",
+                (case_id, document.get("id")),
+            )
+            clause_count = 0
+            clauses = []
+            for row in cur.fetchall():
+                clause_count += 1
+                clauses.append(_compact_clause(_normalize_value(row)))
+
+            cur.execute(
+                """SELECT id, validated_json AS validatedJson,
+                          confirmed_json AS confirmedJson, content_hash AS contentHash,
+                          schema_version AS schemaVersion, prompt_version AS promptVersion,
+                          model, update_time AS confirmedAt
+                   FROM contract_intake
+                   WHERE case_id=%s AND status='CONFIRMED'
+                   ORDER BY id DESC LIMIT 1""",
+                (case_id,),
+            )
+            intake_row = _normalize_value(cur.fetchone() or {})
+
+    confirmed_intake: dict[str, Any] = {}
+    if intake_row:
+        try:
+            validated = json.loads(intake_row.get("validatedJson") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            validated = {}
+        try:
+            confirmed = json.loads(intake_row.get("confirmedJson") or "{}")
+        except (TypeError, ValueError, json.JSONDecodeError):
+            confirmed = {}
+        confirmed_intake = {
+            "id": intake_row.get("id"),
+            "contentHash": intake_row.get("contentHash"),
+            "schemaVersion": intake_row.get("schemaVersion"),
+            "promptVersion": intake_row.get("promptVersion"),
+            "model": intake_row.get("model"),
+            "confirmedAt": intake_row.get("confirmedAt"),
+            "fields": validated.get("fields") or {},
+            "confirmed": confirmed,
+        }
+
+    content_hash = str(document.get("contentHash") or "").strip()
+    if not content_hash:
+        content_hash = hashlib.sha256(str(document.get("contentText") or "").encode("utf-8")).hexdigest()
+    document.pop("contentText", None)
+    context = {
+        "case": case_row,
+        "document": {**document, "contentHash": content_hash},
+        "clauseCount": clause_count,
+        "clauses": clauses,
+        "confirmedIntake": confirmed_intake,
+        "contentHash": content_hash,
+        "documentQuality": {"parseQuality": document.get("parseQuality")},
+    }
+    return context
+
+
+def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
+    context = _load_context(state)
+    run_id = state.get("run_id", 0)
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "load_extraction_context",
+        "extraction_context": context,
+        "observations": [{
+            "callId": f"extraction-context-{run_id}",
+            "planStepId": "load_document_snapshot",
+            "toolName": "loadContractDocumentSnapshot",
+            "arguments": {"caseId": state.get("subject_id"), "documentId": context["document"].get("id")},
+            "output": {
+                "documentVersion": context["document"].get("version"),
+                "contentHash": context["contentHash"],
+                "clauseCount": context["clauseCount"],
+                "parseQuality": context["documentQuality"],
+            },
+            "status": "DONE",
+        }],
+    }
+
+
+def select_element_packs(state: dict[str, Any]) -> dict[str, Any]:
+    context = state.get("extraction_context") or {}
+    contract_type = str((context.get("case") or {}).get("contractType") or "OTHER")
+    packs = [dict(pack) for pack in ELEMENT_PACKS]
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "select_element_packs",
+        "element_packs": packs,
+        "plan": {
+            "type": "CONTRACT_ELEMENT_EXTRACTION",
+            "contractType": contract_type,
+            "packs": [pack["packKey"] for pack in packs],
+            "boundedCalls": len(packs) * 2,
+        },
+        "observations": [{
+            "callId": f"extraction-plan-{state.get('run_id', 0)}",
+            "planStepId": "select_element_packs",
+            "toolName": "planContractElementExtraction",
+            "arguments": {"contractType": contract_type},
+            "output": {"packs": [pack["packKey"] for pack in packs], "maxRetries": 1},
+            "status": "DONE",
+        }],
+    }
+
+
+def _retrieve_pack(case_id: int, pack: dict[str, Any]) -> list[dict[str, Any]]:
+    from ..contract_store import ContractStore
+
+    query = " ".join(str(value) for value in pack.get("queries") or [])[:700]
+    hits = _run_async(ContractStore().search_contract_clause(case_id, {"query": query, "topK": 12}))
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for hit in hits or []:
+        item = _compact_clause(dict(hit))
+        key = item.get("sourceId")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+    return result[:18]
+
+
+def retrieve_element_evidence(state: dict[str, Any]) -> dict[str, Any]:
+    case_id = int(state.get("subject_id") or 0)
+    evidence_by_pack: dict[str, list[dict[str, Any]]] = {}
+    observations: list[dict[str, Any]] = []
+    citations: list[dict[str, Any]] = []
+    for pack in state.get("element_packs") or []:
+        key = str(pack.get("packKey") or "")
+        try:
+            evidence = _retrieve_pack(case_id, pack)
+            status = "DONE"
+            error = ""
+        except Exception as exc:
+            evidence = []
+            status = "FAILED"
+            error = str(exc)[:500]
+            logger.warning("Element evidence retrieval failed for %s: %s", key, exc)
+        evidence_by_pack[key] = evidence
+        citations.extend(evidence)
+        stats = next((item.get("retrievalStats") for item in evidence if item.get("retrievalStats")), {})
+        observations.append({
+            "callId": f"extraction-retrieval-{state.get('run_id', 0)}-{key}",
+            "planStepId": f"retrieve_{key}",
+            "toolName": "searchContractClause",
+            "arguments": {"query": pack.get("queries") or [], "topK": 12, "packKey": key},
+            "output": {
+                "packName": pack.get("packName"),
+                "hitCount": len(evidence),
+                "sourceIds": [item.get("sourceId") for item in evidence],
+                "retrievalStats": stats,
+                "crossValidatedCount": sum(1 for item in evidence if item.get("crossValidated")),
+            },
+            "status": status,
+            "error": error,
+        })
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "retrieve_element_evidence",
+        "element_evidence": evidence_by_pack,
+        "citations": citations,
+        "observations": observations,
+    }
+
+
+def _fallback_elements(context: dict[str, Any], pack: dict[str, Any], evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Conservative fallback: expose existing case facts, never invent text."""
+    case = context.get("case") or {}
+    our_side = str(case.get("ourSide") or "").upper()
+    party_a = case.get("ourEntity") if our_side == "A" else case.get("counterparty")
+    party_b = case.get("counterparty") if our_side == "A" else case.get("ourEntity")
+    fallback_map = {
+        "contract_title": (case.get("title"), "TEXT"),
+        "contract_type": (case.get("contractType"), "ENUM"),
+        "party_a": (party_a, "PARTY"),
+        "party_b": (party_b, "PARTY"),
+        "our_side": (case.get("ourSide"), "ENUM"),
+        "contract_amount": (case.get("amount"), "MONEY"),
+        "effective_date": (case.get("effectiveDate"), "DATE"),
+        "expiry_date": (case.get("expiryDate"), "DATE"),
+    }
+    result = []
+    for key in pack.get("elementKeys") or []:
+        value, value_type = fallback_map.get(key, (None, "TEXT"))
+        if value in (None, ""):
+            continue
+        result.append({
+            "elementKey": key,
+            "category": str(pack.get("packKey") or "OTHER").upper(),
+            "valueType": value_type,
+            "rawValue": str(value),
+            "normalizedValue": {"value": value},
+            "confidence": 0.35,
+            "status": "NEEDS_REVIEW",
+            "applicable": True,
+            "citations": [],
+            "source": "CASE_PROJECTION",
+        })
+    return result
+
+
+def _normalize_model_elements(
+    raw_items: list[dict[str, Any]],
+    pack: dict[str, Any],
+    evidence: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    allowed = set(str(key) for key in pack.get("elementKeys") or [])
+    evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
+    counters: dict[str, int] = {}
+    result = []
+    for raw in raw_items:
+        if not isinstance(raw, dict):
+            continue
+        key = str(raw.get("elementKey") or "").strip()
+        if key not in allowed:
+            continue
+        counters[key] = counters.get(key, 0) + 1
+        citations = raw.get("citations") if isinstance(raw.get("citations"), list) else []
+        verified_citations = []
+        for citation in citations[:4]:
+            if not isinstance(citation, dict):
+                continue
+            normalized = dict(citation)
+            normalized["sourceId"] = _source_id(normalized)
+            if _citation_supported(normalized, evidence_by_id):
+                source = evidence_by_id[normalized["sourceId"]]
+                normalized["clauseId"] = normalized.get("clauseId") or source.get("clauseId")
+                normalized["documentId"] = source.get("documentId")
+                normalized["pageNumber"] = source.get("pageNumber")
+                verified_citations.append(normalized)
+        confidence = _clamp_confidence(raw.get("confidence"), 0.0)
+        if not verified_citations:
+            confidence = min(confidence, 0.45)
+        status = str(raw.get("status") or "EXTRACTED").upper()
+        if status not in {"EXTRACTED", "NEEDS_REVIEW", "NOT_FOUND"}:
+            status = "NEEDS_REVIEW"
+        if not verified_citations and status == "EXTRACTED":
+            status = "NEEDS_REVIEW"
+        result.append({
+            "elementKey": key,
+            "category": str(raw.get("category") or pack.get("packKey") or "OTHER").upper(),
+            "valueType": str(raw.get("valueType") or "TEXT").upper(),
+            "rawValue": str(raw.get("rawValue") or "").strip()[:4000],
+            "normalizedValue": raw.get("normalizedValue") if raw.get("normalizedValue") is not None else {},
+            "status": status,
+            "confidence": confidence,
+            "source": str(raw.get("source") or "LLM").upper(),
+            "applicable": bool(raw.get("applicable", True)),
+            "occurrenceNo": counters[key],
+            "citations": verified_citations,
+            "validation": {
+                "citationCount": len(verified_citations),
+                "citationVerified": bool(verified_citations),
+                "originalStatus": status,
+            },
+        })
+    return result
+
+
+def extract_element_batches(state: dict[str, Any]) -> dict[str, Any]:
+    from ...services.llm_service import LLMService
+
+    context = state.get("extraction_context") or {}
+    llm = LLMService()
+    elements: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for pack in state.get("element_packs") or []:
+        pack_key = str(pack.get("packKey") or "")
+        evidence = (state.get("element_evidence") or {}).get(pack_key) or []
+        try:
+            raw = llm.extract_contract_elements(
+                context.get("case") or {}, pack, evidence, int(state.get("run_id") or 0)
+            )
+            normalized = _normalize_model_elements(raw.get("elements") or [], pack, evidence)
+            status = "DONE"
+            error = ""
+            model_used = llm.model
+        except Exception as exc:
+            normalized = _fallback_elements(context, pack, evidence)
+            status = "FALLBACK"
+            error = str(exc)[:500]
+            model_used = "unavailable"
+            errors.append({"node": "extract_element_batches", "packKey": pack_key, "error": error})
+            logger.warning("LLM element extraction failed for %s: %s", pack_key, exc)
+        elements.extend(normalized)
+        observations.append({
+            "callId": f"extraction-llm-{state.get('run_id', 0)}-{pack_key}",
+            "planStepId": f"extract_{pack_key}",
+            "toolName": "extractContractElements",
+            "arguments": {
+                "packKey": pack_key,
+                "elementKeys": pack.get("elementKeys") or [],
+                "evidenceCount": len(evidence),
+                "promptVersion": EXTRACTION_PROMPT_VERSION,
+            },
+            "output": {
+                "model": model_used,
+                "elementCount": len(normalized),
+                "verifiedCitationCount": sum(len(item.get("citations") or []) for item in normalized),
+                "status": status,
+            },
+            "status": status,
+            "error": error,
+        })
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "extract_element_batches",
+        "extracted_elements": elements,
+        "observations": observations,
+        "errors": state.get("errors", []) + errors,
+    }
+
+
+def validate_extracted_elements(state: dict[str, Any]) -> dict[str, Any]:
+    context = state.get("extraction_context") or {}
+    evidence = [item for values in (state.get("element_evidence") or {}).values() for item in values]
+    evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
+    validated = []
+    unsupported = 0
+    for item in state.get("extracted_elements") or []:
+        value = dict(item)
+        citations = [c for c in value.get("citations") or [] if _citation_supported(c, evidence_by_id)]
+        if len(citations) != len(value.get("citations") or []):
+            unsupported += len(value.get("citations") or []) - len(citations)
+        value["citations"] = citations
+        value["confidence"] = _clamp_confidence(value.get("confidence"))
+        if not citations:
+            value["status"] = "NEEDS_REVIEW"
+            value["confidence"] = min(value["confidence"], 0.45)
+        elif value["confidence"] >= 0.75 and value.get("status") != "NOT_FOUND":
+            value["status"] = "EXTRACTED"
+        else:
+            value["status"] = "NEEDS_REVIEW"
+        value.setdefault("validation", {})
+        value["validation"].update({
+            "citationVerified": bool(citations),
+            "citationCount": len(citations),
+            "documentVersion": (context.get("document") or {}).get("version"),
+        })
+        validated.append(value)
+    counts = {
+        "total": len(validated),
+        "extracted": sum(1 for item in validated if item.get("status") == "EXTRACTED"),
+        "needsReview": sum(1 for item in validated if item.get("status") == "NEEDS_REVIEW"),
+        "unsupportedCitationCount": unsupported,
+    }
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "validate_extracted_elements",
+        "extracted_elements": validated,
+        "extraction_validation": counts,
+        "observations": [{
+            "callId": f"extraction-validation-{state.get('run_id', 0)}",
+            "planStepId": "validate_extracted_elements",
+            "toolName": "validateContractElementCitations",
+            "arguments": {"elementCount": len(validated)},
+            "output": counts,
+            "status": "DONE",
+        }],
+    }
+
+
+def _profile_field_key(value: Any, fallback: str) -> str:
+    key = re.sub(r"[^a-zA-Z0-9_]+", "_", str(value or "").strip()).strip("_").lower()
+    return key[:128] or fallback
+
+
+def _normalize_profile_citation(
+    citation: dict[str, Any], evidence_by_id: dict[str, dict[str, Any]]
+) -> dict[str, Any] | None:
+    if not isinstance(citation, dict):
+        return None
+    normalized = dict(citation)
+    normalized["sourceId"] = _source_id(normalized)
+    if not _citation_supported(normalized, evidence_by_id):
+        return None
+    source = evidence_by_id[normalized["sourceId"]]
+    normalized["clauseId"] = normalized.get("clauseId") or source.get("clauseId")
+    normalized["documentId"] = source.get("documentId")
+    normalized["pageNumber"] = normalized.get("pageNumber") or source.get("pageNumber")
+    normalized["clauseNumber"] = normalized.get("clauseNumber") or source.get("clauseNumber")
+    normalized["clauseTitle"] = normalized.get("clauseTitle") or source.get("title")
+    normalized["clauseContent"] = source.get("clauseText") or source.get("content") or source.get("snippet")
+    return normalized
+
+
+def _canonical_value_matches(candidate: Any, confirmed: Any) -> bool:
+    if candidate is None or confirmed is None:
+        return candidate is confirmed
+    try:
+        return Decimal(str(candidate)).compare(Decimal(str(confirmed))) == Decimal("0")
+    except (InvalidOperation, TypeError, ValueError):
+        return str(candidate).strip().casefold() == str(confirmed).strip().casefold()
+
+
+def _canonical_citations(
+    context: dict[str, Any], field_key: str, confirmed_value: Any
+) -> list[dict[str, Any]]:
+    intake_field = ((context.get("confirmedIntake") or {}).get("fields") or {}).get(field_key) or {}
+    if not _canonical_value_matches(intake_field.get("value"), confirmed_value):
+        return []
+    citations = intake_field.get("citations") if isinstance(intake_field.get("citations"), list) else []
+    clauses = context.get("clauses") or []
+    result = []
+    for citation in citations[:2]:
+        if not isinstance(citation, dict):
+            continue
+        quote = str(citation.get("quote") or "").strip()
+        if not quote:
+            continue
+        normalized = dict(citation)
+        for clause in clauses:
+            content = str(clause.get("clauseText") or clause.get("content") or "")
+            if quote not in content:
+                continue
+            normalized.update({
+                "sourceId": _source_id(clause),
+                "clauseId": clause.get("clauseId"),
+                "documentId": clause.get("documentId") or (context.get("document") or {}).get("id"),
+                "pageNumber": clause.get("pageNumber"),
+                "clauseNumber": clause.get("clauseNumber"),
+                "clauseTitle": clause.get("title"),
+                "clauseContent": content,
+            })
+            break
+        normalized.setdefault("documentId", (context.get("document") or {}).get("id"))
+        normalized["contentHash"] = (context.get("document") or {}).get("contentHash")
+        normalized["parserVersion"] = PARSER_VERSION
+        result.append(normalized)
+    return result
+
+
+def _canonical_base_fields(context: dict[str, Any]) -> list[dict[str, Any]]:
+    """Project human-confirmed case facts into the profile without another extraction."""
+    case = context.get("case") or {}
+    our_side = str(case.get("ourSide") or "").upper()
+    if our_side == "A":
+        party_a, party_b = case.get("ourEntity"), case.get("counterparty")
+    elif our_side == "B":
+        party_a, party_b = case.get("counterparty"), case.get("ourEntity")
+    else:
+        party_a = party_b = None
+    base_map = (
+        ("contractTitle", "合同名称", case.get("title"), "TEXT", "contractTitle"),
+        ("contractType", "合同类型", case.get("contractType"), "ENUM", "contractType"),
+        ("partyA", "甲方主体", party_a, "PARTY", "partyA"),
+        ("partyB", "乙方主体", party_b, "PARTY", "partyB"),
+        ("ourSide", "我方角色", our_side or None, "ENUM", "ourSide"),
+        ("amount", "合同金额", case.get("amount"), "MONEY", "amount"),
+        ("currency", "币种", case.get("currency"), "ENUM", "currency"),
+        ("signedDate", "签订日期", case.get("signedDate"), "DATE", "signedDate"),
+        ("effectiveDate", "生效日期", case.get("effectiveDate"), "DATE", "effectiveDate"),
+        ("expiryDate", "到期日期", case.get("expiryDate"), "DATE", "expiryDate"),
+    )
+    fields = []
+    for key, label, value, value_type, intake_key in base_map:
+        if value in (None, ""):
+            continue
+        citations = _canonical_citations(context, intake_key, value)
+        fields.append({
+            "key": key,
+            "label": label,
+            "value": value,
+            "valueType": value_type,
+            "importance": "CORE",
+            "confidence": 1.0,
+            "status": "EXTRACTED" if citations else "CONFIRMED",
+            "source": "CONFIRMED_INTAKE" if (context.get("confirmedIntake") or {}).get("id") else "CONFIRMED_CASE",
+            "citations": citations,
+            "decision": {
+                "intakeId": (context.get("confirmedIntake") or {}).get("id"),
+                "confirmedAt": (context.get("confirmedIntake") or {}).get("confirmedAt"),
+                "canonical": True,
+            },
+        })
+    return fields
+
+
+def _fallback_profile(context: dict[str, Any], elements: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keep the page useful when the optional profile call is unavailable."""
+    case = context.get("case") or {}
+    base_fields = _canonical_base_fields(context)
+    groups: dict[str, dict[str, Any]] = {}
+    for element in elements:
+        category = str(element.get("category") or "OTHER").lower()
+        group = groups.setdefault(category, {
+            "groupKey": category, "label": element.get("category") or "其他合同事实",
+            "reason": "由已有可引用合同事实暂时归组，等待画像重新生成。", "fields": [],
+        })
+        value = element.get("normalizedValue") or element.get("rawValue")
+        group["fields"].append({
+            "key": element.get("elementKey"), "label": element.get("elementKey"),
+            "value": value,
+            "displayValue": _profile_display_value(value),
+            "valueType": element.get("valueType") or "TEXT",
+            "importance": "SUPPORTING", "confidence": element.get("confidence", 0),
+            "status": element.get("status") or "NEEDS_REVIEW", "source": element.get("source") or "LLM",
+            "citations": element.get("citations") or [],
+        })
+    return {
+        "schemaVersion": PROFILE_SCHEMA_VERSION,
+        "title": "合同画像",
+        "contractType": case.get("contractType") or "OTHER",
+        "typeRationale": "模型不可用，暂由已有合同事实组成。",
+        "baseFields": base_fields,
+        "groups": list(groups.values()),
+        "status": "FALLBACK",
+    }
+
+
+def normalize_contract_profile(
+    raw_profile: dict[str, Any],
+    context: dict[str, Any],
+    elements: list[dict[str, Any]],
+    evidence: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
+    raw = raw_profile.get("profile") if isinstance(raw_profile, dict) else None
+    if not isinstance(raw, dict):
+        return _fallback_profile(context, elements), {"status": "FALLBACK", "fieldCount": 0, "verifiedCitationCount": 0}
+
+    def normalize_field(item: Any, fallback_key: str, fallback_label: str) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        key = _profile_field_key(item.get("key"), fallback_key)
+        label = str(item.get("label") or fallback_label or key).strip()[:256]
+        citations = []
+        for citation in item.get("citations") if isinstance(item.get("citations"), list) else []:
+            normalized = _normalize_profile_citation(citation, evidence_by_id)
+            if normalized:
+                citations.append(normalized)
+        status = str(item.get("status") or ("EXTRACTED" if citations else "NEEDS_REVIEW")).upper()
+        if status not in {"EXTRACTED", "NEEDS_REVIEW", "NOT_FOUND"}:
+            status = "NEEDS_REVIEW"
+        confidence = _clamp_confidence(item.get("confidence"), 0.0)
+        if not citations:
+            status = "NOT_FOUND" if item.get("value") in (None, "") else "NEEDS_REVIEW"
+            confidence = min(confidence, 0.45)
+        elif confidence < 0.75:
+            status = "NEEDS_REVIEW"
+        value = item.get("value")
+        return {
+            "key": key, "label": label, "value": value,
+            "displayValue": _profile_display_value(value),
+            "valueType": str(item.get("valueType") or "TEXT").upper(),
+            "importance": str(item.get("importance") or "SUPPORTING").upper(),
+            "confidence": confidence, "status": status,
+            "source": "CONTRACT" if citations else str(item.get("source") or "LLM").upper(),
+            "citations": citations,
+        }
+
+    # Base fields are canonical intake facts. The optional profile model may
+    # discover type-specific groups, but it cannot rewrite confirmed identity,
+    # party, amount or date values.
+    base_fields = _canonical_base_fields(context)
+    groups = []
+    field_count = len(base_fields)
+    citation_count = sum(len(field["citations"]) for field in base_fields)
+    for group_index, group in enumerate(raw.get("groups") or []):
+        if not isinstance(group, dict):
+            continue
+        group_key = _profile_field_key(group.get("groupKey"), f"group_{group_index + 1}")
+        fields = []
+        for field_index, item in enumerate(group.get("fields") or []):
+            field = normalize_field(item, f"{group_key}_{field_index + 1}", "合同专属要素")
+            if not field or field["status"] == "NOT_FOUND":
+                continue
+            fields.append(field)
+            field_count += 1
+            citation_count += len(field["citations"])
+        if fields:
+            groups.append({
+                "groupKey": group_key,
+                "label": str(group.get("label") or "合同专属要素").strip()[:256],
+                "reason": str(group.get("reason") or "基于本合同内容发现的业务字段").strip()[:1000],
+                "fields": fields,
+            })
+    profile = {
+        "schemaVersion": PROFILE_SCHEMA_VERSION,
+        "title": str(raw.get("title") or "合同画像"),
+        "contractType": str(raw.get("contractType") or (context.get("case") or {}).get("contractType") or "OTHER"),
+        "typeRationale": str(raw.get("typeRationale") or "").strip()[:1000],
+        "baseFields": base_fields,
+        "groups": groups,
+        "status": "READY" if citation_count else "NEEDS_REVIEW",
+    }
+    return profile, {
+        "status": profile["status"],
+        "fieldCount": field_count,
+        "verifiedCitationCount": citation_count,
+        "groupCount": len(groups),
+        "canonicalBaseFieldCount": len(base_fields),
+    }
+
+
+def build_contract_profile(state: dict[str, Any]) -> dict[str, Any]:
+    from ...services.llm_service import LLMService
+
+    context = state.get("extraction_context") or {}
+    evidence = [item for values in (state.get("element_evidence") or {}).values() for item in values]
+    elements = state.get("extracted_elements") or []
+    try:
+        raw = LLMService().extract_contract_profile(
+            context.get("case") or {}, evidence, elements, int(state.get("run_id") or 0)
+        )
+        profile, validation = normalize_contract_profile(raw, context, elements, evidence)
+        status = "DONE"
+        error = ""
+        model = LLMService().model
+    except Exception as exc:
+        profile = _fallback_profile(context, elements)
+        validation = {"status": "FALLBACK", "fieldCount": len(profile.get("baseFields") or []), "verifiedCitationCount": 0}
+        status = "FALLBACK"
+        error = str(exc)[:500]
+        model = "unavailable"
+        logger.warning("Contract profile extraction failed: %s", exc)
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "build_contract_profile",
+        "contract_profile": profile,
+        "profile_validation": validation,
+        "observations": [{
+            "callId": f"contract-profile-{state.get('run_id', 0)}",
+            "planStepId": "build_contract_profile",
+            "toolName": "extractContractProfile",
+            "arguments": {"evidenceCount": len(evidence), "schemaVersion": PROFILE_SCHEMA_VERSION},
+            "output": {"model": model, **validation},
+            "status": status,
+            "error": error,
+        }],
+        "errors": state.get("errors", []) + ([{"node": "build_contract_profile", "error": error}] if error else []),
+    }
+
+
+def _find_evidence_for_citation(citation: dict[str, Any], evidence_by_id: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    source_id = str(citation.get("sourceId") or "")
+    return evidence_by_id.get(source_id) or {}
+
+
+def _link_snapshot_to_workflow(
+    cur: Any,
+    *,
+    case_id: int,
+    document_id: int,
+    run_id: int,
+    snapshot_id: int,
+) -> None:
+    """Attach the current document's fact snapshot to downstream consumers."""
+    # A re-extraction replaces the provenance for the current document. Older
+    # snapshots remain immutable and are still reachable through their run.
+    cur.execute(
+        """UPDATE contract_timeline_node
+           SET extraction_snapshot_id=%s
+           WHERE case_id=%s AND document_id=%s""",
+        (snapshot_id, case_id, document_id),
+    )
+    cur.execute(
+        """UPDATE contract_analysis_workflow
+           SET extraction_snapshot_id=%s, extraction_run_id=%s,
+               extraction_status='READY_FOR_CONFIRMATION',
+               current_stage=CASE
+                   WHEN current_stage='FACT_EXTRACTION' THEN 'RISK_REVIEW'
+                   ELSE current_stage
+               END,
+               last_error=NULL
+           WHERE case_id=%s AND document_id=%s""",
+        (snapshot_id, run_id, case_id, document_id),
+    )
+
+
+def mark_extraction_workflow_failed(case_id: int, run_id: int, error_message: str) -> None:
+    """Keep the contract workflow honest when a graph run terminates early."""
+    from ..persistence import _conn
+
+    message = str(error_message or "合同要素提取失败")[:4000]
+    try:
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT workflow_id FROM agent_run WHERE id=%s", (run_id,))
+                run = cur.fetchone() or {}
+                workflow_id = run.get("workflow_id")
+                if workflow_id:
+                    cur.execute(
+                        """UPDATE contract_analysis_workflow
+                           SET extraction_status='FAILED',
+                               current_stage=CASE
+                                   WHEN current_stage='FACT_EXTRACTION' THEN 'FACT_EXTRACTION'
+                                   ELSE current_stage
+                               END,
+                               last_error=%s
+                           WHERE id=%s AND case_id=%s""",
+                        (message, workflow_id, case_id),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE contract_analysis_workflow
+                           SET extraction_status='FAILED', last_error=%s
+                           WHERE case_id=%s AND extraction_run_id=%s""",
+                        (message, case_id, run_id),
+                    )
+            conn.commit()
+    except Exception as exc:
+        logger.warning("Failed to mark extraction workflow %s as failed: %s", run_id, exc)
+
+
+def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    from ..persistence import _conn, _json_dumps, _normalize_value
+
+    context = state.get("extraction_context") or {}
+    document = context.get("document") or {}
+    case_id = int(state.get("subject_id") or 0)
+    run_id = int(state.get("run_id") or 0)
+    content_hash = str(context.get("contentHash") or "")
+    elements = state.get("extracted_elements") or []
+    evidence = [item for values in (state.get("element_evidence") or {}).values() for item in values]
+    evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
+    profile = state.get("contract_profile") or {}
+    canonical = json.dumps(
+        {"elements": elements, "profile": profile},
+        ensure_ascii=False,
+        sort_keys=True,
+        default=str,
+    )
+    snapshot_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, snapshot_hash AS snapshotHash, status,
+                          profile_schema_version AS profileSchemaVersion,
+                          profile_json AS profileJson, profile_hash AS profileHash,
+                          profile_status AS profileStatus
+                   FROM contract_extraction_snapshot
+                   WHERE source_run_id=%s
+                   ORDER BY id DESC LIMIT 1""",
+                (run_id,),
+            )
+            existing = cur.fetchone()
+            if existing and str(existing.get("status") or "").upper() in {"READY_FOR_CONFIRMATION", "CONFIRMED"}:
+                snapshot_id = int(existing["id"])
+                cur.execute(
+                    """SELECT id, element_key AS elementKey, category, value_type AS valueType,
+                              raw_value AS rawValue, normalized_value_json AS normalizedValue,
+                              status, confidence, source, applicable, occurrence_no AS occurrenceNo,
+                              validation_json AS validation
+                       FROM contract_extracted_element WHERE snapshot_id=%s ORDER BY id""",
+                    (snapshot_id,),
+                )
+                persisted = [_normalize_value(row) for row in cur.fetchall()]
+                for item in persisted:
+                    for field in ("normalizedValue", "validation"):
+                        try:
+                            item[field] = json.loads(item[field]) if isinstance(item.get(field), str) else item.get(field)
+                        except Exception:
+                            pass
+                try:
+                    persisted_profile = json.loads(existing.get("profileJson") or "{}")
+                except Exception:
+                    persisted_profile = {}
+                _link_snapshot_to_workflow(
+                    cur,
+                    case_id=case_id,
+                    document_id=int(document.get("id") or 0),
+                    run_id=run_id,
+                    snapshot_id=snapshot_id,
+                )
+                conn.commit()
+                return {
+                    "id": snapshot_id,
+                    "snapshotHash": existing.get("snapshotHash") or snapshot_hash,
+                    "status": existing.get("status"),
+                    "reused": True,
+                    "elements": persisted,
+                    "profile": persisted_profile,
+                }
+
+            if existing:
+                snapshot_id = int(existing["id"])
+                # Replaying the same run after a failed checkpoint must remain
+                # idempotent, but a later user-triggered extraction receives a
+                # distinct snapshot and preserves this run as history.
+                cur.execute(
+                    """DELETE l FROM contract_element_evidence_link l
+                       INNER JOIN contract_extracted_element e ON e.id=l.element_id
+                       WHERE e.snapshot_id=%s""",
+                    (snapshot_id,),
+                )
+                cur.execute(
+                    """DELETE c FROM contract_element_candidate c
+                       INNER JOIN contract_extracted_element e ON e.id=c.element_id
+                       WHERE e.snapshot_id=%s""",
+                    (snapshot_id,),
+                )
+                cur.execute("DELETE FROM contract_extracted_element WHERE snapshot_id=%s", (snapshot_id,))
+                cur.execute(
+                    """UPDATE contract_extraction_snapshot
+                       SET status='RUNNING', source_run_id=%s, error_message=NULL,
+                           snapshot_hash=NULL, profile_json=NULL, profile_hash=NULL,
+                           profile_status='RUNNING', update_time=NOW()
+                       WHERE id=%s""",
+                    (run_id, snapshot_id),
+                )
+            else:
+                cur.execute(
+                    """INSERT INTO contract_extraction_snapshot
+                       (case_id, document_id, document_version, content_hash,
+                        parser_version, schema_version, prompt_version, llm_model,
+                       retrieval_version, profile_schema_version, profile_status,
+                       status, source_run_id)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'RUNNING',%s)""",
+                    (case_id, document.get("id"), document.get("version"), content_hash,
+                     PARSER_VERSION, EXTRACTION_SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION,
+                     str(getattr(__import__("app.config", fromlist=["settings"]), "settings").llm_model or ""),
+                     EXTRACTION_RETRIEVAL_VERSION, PROFILE_SCHEMA_VERSION, "RUNNING", run_id),
+                )
+                snapshot_id = int(cur.lastrowid)
+            for element in elements:
+                cur.execute(
+                    """INSERT INTO contract_extracted_element
+                       (snapshot_id, element_key, category, value_type, raw_value,
+                        normalized_value_json, status, confidence, source, applicable,
+                        occurrence_no, validation_json)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                    (snapshot_id, element.get("elementKey"), element.get("category"),
+                     element.get("valueType"), element.get("rawValue"),
+                     _json_dumps(element.get("normalizedValue") or {}),
+                     element.get("status") or "NEEDS_REVIEW", element.get("confidence"),
+                     element.get("source") or "LLM", 1 if element.get("applicable", True) else 0,
+                     int(element.get("occurrenceNo") or 1), _json_dumps(element.get("validation") or {})),
+                )
+                element_id = int(cur.lastrowid)
+                citations = element.get("citations") or []
+                for citation in citations:
+                    source = _find_evidence_for_citation(citation, evidence_by_id)
+                    quote = str(citation.get("quote") or "").strip()
+                    if not quote:
+                        continue
+                    cur.execute(
+                        """INSERT INTO contract_element_evidence_link
+                           (element_id, document_id, clause_id, chunk_id, page_number,
+                            paragraph_index, quote, start_offset, end_offset,
+                            bbox_json, retrieval_method, score)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (element_id, source.get("documentId") or document.get("id"),
+                         citation.get("clauseId") or source.get("clauseId"),
+                         source.get("chunkId"), citation.get("pageNumber") or source.get("pageNumber"),
+                         citation.get("paragraphIndex"), quote, citation.get("startOffset"),
+                         citation.get("endOffset"), _json_dumps(citation.get("bbox")) if citation.get("bbox") else None,
+                         ",".join(source.get("retrievalSources") or []) or source.get("retrievalType"),
+                         source.get("fusionScore") or source.get("score")),
+                    )
+                cur.execute(
+                    """INSERT INTO contract_element_candidate
+                       (element_id, raw_value, normalized_value_json, source, confidence, selected, reason)
+                       VALUES (%s,%s,%s,%s,%s,1,%s)""",
+                    (element_id, element.get("rawValue"), _json_dumps(element.get("normalizedValue") or {}),
+                     element.get("source") or "LLM", element.get("confidence"),
+                     "当前最高置信度候选；最终以人工确认结果为准"),
+                )
+
+            profile_hash = hashlib.sha256(
+                json.dumps(profile, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest() if profile else None
+            profile_status = str((state.get("profile_validation") or {}).get("status") or "NEEDS_REVIEW")
+            cur.execute(
+                """UPDATE contract_extraction_snapshot
+                   SET status='READY_FOR_CONFIRMATION', snapshot_hash=%s,
+                       profile_schema_version=%s, profile_json=%s, profile_hash=%s,
+                       profile_status=%s, error_message=NULL,
+                       source_run_id=%s, update_time=NOW()
+                   WHERE id=%s""",
+                (snapshot_hash, PROFILE_SCHEMA_VERSION, _json(profile), profile_hash,
+                 profile_status, run_id, snapshot_id),
+            )
+            _link_snapshot_to_workflow(
+                cur,
+                case_id=case_id,
+                document_id=int(document.get("id") or 0),
+                run_id=run_id,
+                snapshot_id=snapshot_id,
+            )
+        conn.commit()
+
+    return {
+        "id": snapshot_id,
+        "snapshotHash": snapshot_hash,
+        "status": "READY_FOR_CONFIRMATION",
+        "reused": False,
+        "elements": elements,
+        "profile": profile,
+    }
+
+
+def persist_extraction_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    snapshot = _persist_snapshot(state)
+    context = state.get("extraction_context") or {}
+    validation = state.get("extraction_validation") or {}
+    artifact = {
+        "reportType": "CONTRACT_ELEMENT_EXTRACTION",
+        "title": "合同要素提取结果",
+        "summary": (
+            f"已从 {context.get('clauseCount', 0)} 条合同条款中整理 "
+            f"{validation.get('total', 0)} 个合同要素，其中 "
+            f"{validation.get('needsReview', 0)} 个需要人工确认。"
+        ),
+        "analysisMode": "EXTRACTION_WITH_CITATION_VALIDATION",
+        "extractionSnapshotId": snapshot.get("id"),
+        "extractionSnapshotHash": snapshot.get("snapshotHash"),
+        "documentId": (context.get("document") or {}).get("id"),
+        "documentVersion": (context.get("document") or {}).get("version"),
+        "contentHash": context.get("contentHash"),
+        "requiresHumanConfirmation": True,
+        "elements": snapshot.get("elements") or state.get("extracted_elements") or [],
+        "contractProfile": snapshot.get("profile") or state.get("contract_profile") or {},
+        "elementSummary": validation,
+        "citations": state.get("citations") or [],
+        "retrievalVersion": EXTRACTION_RETRIEVAL_VERSION,
+        "promptVersion": EXTRACTION_PROMPT_VERSION,
+        "model": str(state.get("model") or ""),
+        "content": {
+            "case": context.get("case") or {},
+            "document": context.get("document") or {},
+            "validation": validation,
+            "humanConfirmationRequired": True,
+        },
+    }
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "persist_extraction_snapshot",
+        "extraction_snapshot": snapshot,
+        "artifact": artifact,
+        "observations": [{
+            "callId": f"extraction-persist-{state.get('run_id', 0)}",
+            "planStepId": "persist_extraction_snapshot",
+            "toolName": "persistContractExtractionSnapshot",
+            "arguments": {"caseId": state.get("subject_id"), "documentId": artifact.get("documentId")},
+            "output": {
+                "snapshotId": snapshot.get("id"),
+                "snapshotHash": snapshot.get("snapshotHash"),
+                "reused": snapshot.get("reused", False),
+                "elementCount": len(artifact.get("elements") or []),
+                "profileFieldCount": sum(
+                    len(group.get("fields") or []) for group in (artifact.get("contractProfile") or {}).get("groups") or []
+                ) + len((artifact.get("contractProfile") or {}).get("baseFields") or []),
+            },
+            "status": "DONE",
+        }],
+    }
+
+
+def build_contract_extraction_graph(checkpointer: Any = None) -> Any:
+    builder = StateGraph(BaseGraphState)
+    builder.add_node("load_extraction_context", load_extraction_context)
+    builder.add_node("select_element_packs", select_element_packs)
+    builder.add_node("retrieve_element_evidence", retrieve_element_evidence)
+    builder.add_node("extract_element_batches", extract_element_batches)
+    builder.add_node("validate_extracted_elements", validate_extracted_elements)
+    builder.add_node("build_contract_profile", build_contract_profile)
+    builder.add_node("persist_extraction_snapshot", persist_extraction_snapshot)
+
+    builder.add_edge(START, "load_extraction_context")
+    builder.add_edge("load_extraction_context", "select_element_packs")
+    builder.add_edge("select_element_packs", "retrieve_element_evidence")
+    builder.add_edge("retrieve_element_evidence", "extract_element_batches")
+    builder.add_edge("extract_element_batches", "validate_extracted_elements")
+    builder.add_edge("validate_extracted_elements", "build_contract_profile")
+    builder.add_edge("build_contract_profile", "persist_extraction_snapshot")
+    builder.add_edge("persist_extraction_snapshot", END)
+    kwargs = {"checkpointer": checkpointer} if checkpointer else {}
+    return builder.compile(**kwargs)
+
+
+def register(registry=None) -> None:
+    if registry is None:
+        from .registry import get_graph_registry
+        registry = get_graph_registry()
+    registry.register(
+        name="contract_extraction",
+        version="v1",
+        builder=build_contract_extraction_graph,
+    )
+    logger.info("Registered ContractExtractionGraph v1")
