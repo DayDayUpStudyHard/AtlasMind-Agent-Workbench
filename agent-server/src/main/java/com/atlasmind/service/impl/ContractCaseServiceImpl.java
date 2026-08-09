@@ -3,8 +3,12 @@ package com.atlasmind.service.impl;
 import com.atlasmind.gateway.AiGateway;
 import com.atlasmind.gateway.GitHubIssueGateway;
 import com.atlasmind.service.AgentActionExecutor;
+import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
+import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.KnowledgeBaseService;
+import com.atlasmind.service.QuotaService;
+import com.atlasmind.service.UserService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -62,117 +66,205 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private final GitHubIssueGateway gitHubIssueGateway;
     private final AgentActionExecutor agentActionExecutor;
     private final KnowledgeBaseService knowledgeBaseService;
+    private final ContractAccessPolicy accessPolicy;
+    private final QuotaService quotaService;
+    private final UserService userService;
 
     // ── Portfolio ──────────────────────────────────────────────────
 
     @Override
     public Map<String, Object> portfolio() {
         Map<String, Object> data = new HashMap<>();
+
+        // Visibility filter for contract_case queries (no alias)
+        List<Object> visParams = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilterNoAlias(visParams);
+
+        // Visibility filter for queries with alias c (separate params — each call adds to list)
+        List<Object> visParamsC = new ArrayList<>();
+        String visFilterC = accessPolicy.buildVisibilityFilter(visParamsC);
+
         data.put("total", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE deleted=0", Integer.class));
+                "SELECT COUNT(*) FROM contract_case WHERE deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("pendingReview", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE status IN ('READY_FOR_REVIEW','REVIEWING') AND deleted=0", Integer.class));
+                "SELECT COUNT(*) FROM contract_case WHERE status IN ('READY_FOR_REVIEW','REVIEWING') AND deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("pendingApproval", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE status='PENDING_APPROVAL' AND deleted=0", Integer.class));
+                "SELECT COUNT(*) FROM contract_case WHERE status='PENDING_APPROVAL' AND deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("inFulfillment", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE status='IN_FULFILLMENT' AND deleted=0", Integer.class));
+                "SELECT COUNT(*) FROM contract_case WHERE status='IN_FULFILLMENT' AND deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("expiringSoon", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) AND deleted=0", Integer.class));
+                "SELECT COUNT(*) FROM contract_case WHERE expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY) AND deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("overdue", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_case WHERE status='IN_FULFILLMENT' AND expiry_date < CURDATE() AND deleted=0", Integer.class));
-        // Obligation stats
-        data.put("obligationsTotal", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_obligation", Integer.class));
-        data.put("obligationsOverdue", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_obligation WHERE status='OVERDUE'", Integer.class));
-        data.put("obligationsDueSoon", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_obligation WHERE status='PLANNED' AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)", Integer.class));
-        // Amount stats
+                "SELECT COUNT(*) FROM contract_case WHERE status='IN_FULFILLMENT' AND expiry_date < CURDATE() AND deleted=0 " + visFilter,
+                Integer.class, visParams.toArray()));
         data.put("totalAmount", jdbcTemplate.queryForObject(
-                "SELECT COALESCE(SUM(amount), 0) FROM contract_case WHERE deleted=0", java.math.BigDecimal.class));
-        // Active Agent runs
+                "SELECT COALESCE(SUM(amount), 0) FROM contract_case WHERE deleted=0 " + visFilter,
+                java.math.BigDecimal.class, visParams.toArray()));
+
+        // Obligation stats — join contract_case for visibility
+        data.put("obligationsTotal", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation o JOIN contract_case c ON c.id=o.case_id WHERE c.deleted=0 " + visFilterC,
+                Integer.class, visParamsC.toArray()));
+        data.put("obligationsOverdue", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation o JOIN contract_case c ON c.id=o.case_id WHERE o.status='OVERDUE' AND c.deleted=0 " + visFilterC,
+                Integer.class, visParamsC.toArray()));
+        data.put("obligationsDueSoon", jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_obligation o JOIN contract_case c ON c.id=o.case_id WHERE o.status='PLANNED' AND o.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY) AND c.deleted=0 " + visFilterC,
+                Integer.class, visParamsC.toArray()));
+
+        // Active Agent runs — join contract_case for visibility
         data.put("activeRuns", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM agent_run WHERE subject_type='CONTRACT_CASE' AND status IN ('CREATED','CONTEXT_BUILDING','ANALYZING','VERIFYING','PLANNING')", Integer.class));
-        // Open findings
+                "SELECT COUNT(*) FROM agent_run r JOIN contract_case c ON c.id=r.subject_id WHERE r.subject_type='CONTRACT_CASE' AND r.status IN ('CREATED','CONTEXT_BUILDING','ANALYZING','VERIFYING','PLANNING') " + visFilterC,
+                Integer.class, visParamsC.toArray()));
+        // Open findings — join contract_case for visibility
         data.put("openFindings", jdbcTemplate.queryForObject(
-                "SELECT COUNT(*) FROM contract_review_finding WHERE status='OPEN'", Integer.class));
+                "SELECT COUNT(*) FROM contract_review_finding f JOIN contract_case c ON c.id=f.case_id WHERE f.status='OPEN' AND c.deleted=0 " + visFilterC,
+                Integer.class, visParamsC.toArray()));
+
         data.put("workQueues", workQueueSummary());
         return data;
     }
 
     @Override
     public Map<String, Object> workQueueSummary() {
+        // Build visibility filters for contract_case (no-alias and c-alias).
+        // Each call to buildVisibilityFilter*() adds 2 params to the list (or 0 for admin).
+        List<Object> visParams1 = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilterNoAlias(visParams1);
+        List<Object> visParams2 = new ArrayList<>();
+        String visFilterC = accessPolicy.buildVisibilityFilter(visParams2);
+
         Map<String, Object> data = new HashMap<>();
+
+        // Review: visFilter appears once, visFilterC appears once
+        List<Object> reviewParams = new ArrayList<>();
+        reviewParams.addAll(visParams1);
+        reviewParams.addAll(visParams2);
         data.put("review", jdbcTemplate.queryForObject("""
                 SELECT
                     (SELECT COUNT(*) FROM contract_case
-                     WHERE status IN ('READY_FOR_REVIEW','REVIEWING') AND deleted=0)
+                     WHERE status IN ('READY_FOR_REVIEW','REVIEWING') AND deleted=0
+                     """ + visFilter + """
+                    )
                     +
                     (SELECT COUNT(*) FROM contract_document d
                      JOIN contract_case c ON c.id=d.case_id AND c.deleted=0
-                     WHERE d.parse_status IN ('PENDING','PARSING','FAILED'))
-                """, Integer.class));
+                     WHERE d.parse_status IN ('PENDING','PARSING','FAILED')
+                     """ + visFilterC + """
+                    )
+                """, Integer.class, reviewParams.toArray()));
+
+        // Approval: visFilterC appears 3 times, 2 SUBJECT_TYPE placeholders
+        List<Object> approvalParams = new ArrayList<>();
+        approvalParams.addAll(visParams2);
+        approvalParams.add(SUBJECT_TYPE);
+        approvalParams.addAll(visParams2);
+        approvalParams.add(SUBJECT_TYPE);
+        approvalParams.addAll(visParams2);
         data.put("approval", jdbcTemplate.queryForObject("""
                 SELECT
-                    (SELECT COUNT(*) FROM contract_review_finding WHERE status='OPEN')
+                    (SELECT COUNT(*) FROM contract_review_finding f
+                     JOIN contract_case c ON c.id=f.case_id
+                     WHERE f.status='OPEN' """ + visFilterC + """
+                    )
                     +
-                    (SELECT COUNT(*) FROM agent_action
-                     WHERE subject_type=? AND status='PENDING_APPROVAL')
+                    (SELECT COUNT(*) FROM agent_action a
+                     JOIN contract_case c ON c.id=a.subject_id
+                     WHERE a.subject_type=? AND a.status='PENDING_APPROVAL'
+                     """ + visFilterC + """
+                    )
                     +
-                    (SELECT COUNT(*) FROM agent_report
-                     WHERE subject_type=? AND report_type IN ('CONTRACT_REVIEW_REPORT','APPROVAL_MEMO')
-                       AND status='DRAFT')
-                """, Integer.class, SUBJECT_TYPE, SUBJECT_TYPE));
+                    (SELECT COUNT(*) FROM agent_report r
+                     JOIN contract_case c ON c.id=r.subject_id
+                     WHERE r.subject_type=? AND r.report_type IN ('CONTRACT_REVIEW_REPORT','APPROVAL_MEMO')
+                       AND r.status='DRAFT'
+                     """ + visFilterC + """
+                    )
+                """, Integer.class, approvalParams.toArray()));
+
+        // Fulfillment: visFilterC appears first, then visFilter, then visFilterC again
+        List<Object> fulfillmentParams = new ArrayList<>();
+        fulfillmentParams.addAll(visParams2);
+        fulfillmentParams.addAll(visParams1);
+        fulfillmentParams.addAll(visParams2);
         data.put("fulfillment", jdbcTemplate.queryForObject("""
                 SELECT
-                    (SELECT COUNT(*) FROM contract_obligation
-                     WHERE status IN ('OVERDUE','DUE_SOON')
-                        OR (status='PLANNED' AND due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)))
+                    (SELECT COUNT(*) FROM contract_obligation o
+                     JOIN contract_case c ON c.id=o.case_id
+                     WHERE (o.status IN ('OVERDUE','DUE_SOON')
+                        OR (o.status='PLANNED' AND o.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)))
+                     """ + visFilterC + """
+                    )
                     +
                     (SELECT COUNT(*) FROM contract_case
-                     WHERE deleted=0 AND expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY))
+                     WHERE deleted=0 AND expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+                     """ + visFilter + """
+                    )
                     +
                     (SELECT COUNT(*) FROM contract_case c
                      WHERE c.deleted=0 AND c.status='SIGNED'
-                       AND NOT EXISTS (SELECT 1 FROM contract_obligation o WHERE o.case_id=c.id))
-                """, Integer.class));
+                       AND NOT EXISTS (SELECT 1 FROM contract_obligation o WHERE o.case_id=c.id)
+                     """ + visFilterC + """
+                    )
+                """, Integer.class, fulfillmentParams.toArray()));
         return data;
     }
 
     @Override
     public List<Map<String, Object>> listWorkQueue(String type) {
         String queueType = type == null ? "REVIEW" : type.trim().toUpperCase(Locale.ROOT);
+
+        // Build visibility filter for contract_case (alias c) — reused in every subquery
+        List<Object> visParams = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilter(visParams);
+
         return switch (queueType) {
-            case "APPROVAL" -> jdbcTemplate.queryForList("""
+            case "APPROVAL" -> {
+                List<Object> params = new ArrayList<>(visParams);
+                params.add(SUBJECT_TYPE);
+                params.addAll(visParams);
+                yield jdbcTemplate.queryForList("""
                     SELECT 'OPEN_FINDING' AS itemType, f.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle, f.title,
                            f.severity AS severity, f.status, f.create_time AS createTime
                     FROM contract_review_finding f
                     JOIN contract_case c ON c.id=f.case_id AND c.deleted=0
-                    WHERE f.status='OPEN'
+                    WHERE f.status='OPEN' """ + visFilter + """
                     UNION ALL
                     SELECT 'PENDING_ACTION' AS itemType, a.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle, a.title,
                            NULL AS severity, a.status, a.create_time AS createTime
                     FROM agent_action a
                     JOIN contract_case c ON c.id=a.subject_id AND c.deleted=0
-                    WHERE a.subject_type=? AND a.status='PENDING_APPROVAL'
+                    WHERE a.subject_type=? AND a.status='PENDING_APPROVAL' """ + visFilter + """
                     ORDER BY createTime DESC LIMIT 12
-                    """, SUBJECT_TYPE);
-            case "FULFILLMENT" -> jdbcTemplate.queryForList("""
+                    """, params.toArray());
+            }
+            case "FULFILLMENT" -> {
+                List<Object> params = new ArrayList<>(visParams);
+                params.addAll(visParams);
+                params.addAll(visParams);
+                yield jdbcTemplate.queryForList("""
                     SELECT 'OBLIGATION' AS itemType, o.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle, o.title,
                            o.status, o.due_date AS dueDate, o.create_time AS createTime
                     FROM contract_obligation o
                     JOIN contract_case c ON c.id=o.case_id AND c.deleted=0
-                    WHERE o.status IN ('OVERDUE','DUE_SOON')
-                       OR (o.status='PLANNED' AND o.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY))
+                    WHERE (o.status IN ('OVERDUE','DUE_SOON')
+                       OR (o.status='PLANNED' AND o.due_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 7 DAY)))
+                    """ + visFilter + """
                     UNION ALL
                     SELECT 'EXPIRING_CONTRACT' AS itemType, c.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle, '合同即将到期' AS title,
                            c.status, c.expiry_date AS dueDate, c.update_time AS createTime
                     FROM contract_case c
                     WHERE c.deleted=0 AND c.expiry_date BETWEEN CURDATE() AND DATE_ADD(CURDATE(), INTERVAL 30 DAY)
+                    """ + visFilter + """
                     UNION ALL
                     SELECT 'MISSING_OBLIGATIONS' AS itemType, c.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle, '待提取履约义务' AS title,
@@ -180,9 +272,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     FROM contract_case c
                     WHERE c.deleted=0 AND c.status='SIGNED'
                       AND NOT EXISTS (SELECT 1 FROM contract_obligation o WHERE o.case_id=c.id)
+                    """ + visFilter + """
                     ORDER BY dueDate ASC, createTime DESC LIMIT 12
-                    """);
-            default -> jdbcTemplate.queryForList("""
+                    """, params.toArray());
+            }
+            default -> {
+                List<Object> params = new ArrayList<>(visParams);
+                params.addAll(visParams);
+                yield jdbcTemplate.queryForList("""
                     SELECT 'DOCUMENT_PARSE' AS itemType, d.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle,
                            CONCAT(d.file_name, '：', d.parse_status) AS title,
@@ -190,14 +287,17 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     FROM contract_document d
                     JOIN contract_case c ON c.id=d.case_id AND c.deleted=0
                     WHERE d.parse_status IN ('PENDING','PARSING','FAILED')
+                    """ + visFilter + """
                     UNION ALL
                     SELECT 'READY_REVIEW' AS itemType, c.id AS itemId, c.id AS caseId,
                            c.case_key AS caseKey, c.title AS caseTitle,
                            '等待合同审查' AS title, c.status, c.update_time AS createTime
                     FROM contract_case c
                     WHERE c.deleted=0 AND c.status IN ('READY_FOR_REVIEW','REVIEWING')
+                    """ + visFilter + """
                     ORDER BY createTime DESC LIMIT 12
-                    """);
+                    """, params.toArray());
+            }
         };
     }
 
@@ -205,24 +305,33 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
     @Override
     public List<Map<String, Object>> listCases(Map<String, Object> filters) {
-        StringBuilder sql = new StringBuilder("""
-                SELECT id, case_key AS caseKey, title, contract_type AS contractType,
-                       status, our_entity AS ourEntity, counterparty, our_side AS ourSide,
-                       amount, currency, effective_date AS effectiveDate,
-                       expiry_date AS expiryDate, signed_date AS signedDate,
-                       department, priority, owner_id AS ownerId,
-                       last_run_id AS lastRunId, last_run_at AS lastRunAt,
-                       create_time AS createTime, update_time AS updateTime
-                FROM contract_case WHERE deleted=0
-                """);
         List<Object> params = new ArrayList<>();
+        String visibilityFilter = accessPolicy.buildVisibilityFilter(params);
+
+        StringBuilder sql = new StringBuilder("""
+                SELECT c.id, c.case_key AS caseKey, c.title, c.contract_type AS contractType,
+                       c.status, c.our_entity AS ourEntity, c.counterparty, c.our_side AS ourSide,
+                       c.amount, c.currency, c.effective_date AS effectiveDate,
+                       c.expiry_date AS expiryDate, c.signed_date AS signedDate,
+                       c.department, c.priority, c.owner_id AS ownerId,
+                       c.creator_id AS creatorId, c.maintainer_id AS maintainerId,
+                       c.department_id AS departmentId, c.visibility,
+                       c.last_run_id AS lastRunId, c.last_run_at AS lastRunAt,
+                       c.create_time AS createTime, c.update_time AS updateTime,
+                       cu.nickname AS creatorName, mu.nickname AS maintainerName
+                FROM contract_case c
+                LEFT JOIN t_user cu ON cu.id = c.creator_id
+                LEFT JOIN t_user mu ON mu.id = c.maintainer_id
+                WHERE c.deleted=0
+                """);
+        sql.append(visibilityFilter);
         if (filters != null) {
             String status = str(filters, "status");
-            if (!status.isBlank()) { sql.append(" AND status=?"); params.add(status); }
+            if (!status.isBlank()) { sql.append(" AND c.status=?"); params.add(status); }
             String dept = str(filters, "department");
-            if (!dept.isBlank()) { sql.append(" AND department=?"); params.add(dept); }
+            if (!dept.isBlank()) { sql.append(" AND c.department=?"); params.add(dept); }
         }
-        sql.append(" ORDER BY update_time DESC, id DESC LIMIT 50");
+        sql.append(" ORDER BY c.update_time DESC, c.id DESC LIMIT 50");
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), params.toArray());
         attachTimelineNodes(rows);
         return rows;
@@ -233,17 +342,23 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Override
     public Map<String, Object> getCase(Long caseId) {
         Map<String, Object> c = first(jdbcTemplate.queryForList("""
-                SELECT id, case_key AS caseKey, title, contract_type AS contractType,
-                       status, description, our_entity AS ourEntity, counterparty,
-                       our_side AS ourSide,
-                       amount, currency, effective_date AS effectiveDate,
-                       expiry_date AS expiryDate, signed_date AS signedDate,
-                       department, owner_id AS ownerId,
-                       priority, tags, approved_version_id AS approvedVersionId,
-                       signed_version_id AS signedVersionId,
-                       last_run_id AS lastRunId, last_run_at AS lastRunAt,
-                       create_time AS createTime, update_time AS updateTime
-                FROM contract_case WHERE id=? AND deleted=0
+                SELECT c.id, c.case_key AS caseKey, c.title, c.contract_type AS contractType,
+                       c.status, c.description, c.our_entity AS ourEntity, c.counterparty,
+                       c.our_side AS ourSide,
+                       c.amount, c.currency, c.effective_date AS effectiveDate,
+                       c.expiry_date AS expiryDate, c.signed_date AS signedDate,
+                       c.department, c.owner_id AS ownerId,
+                       c.creator_id AS creatorId, c.maintainer_id AS maintainerId,
+                       c.department_id AS departmentId, c.visibility,
+                       c.priority, c.tags, c.approved_version_id AS approvedVersionId,
+                       c.signed_version_id AS signedVersionId,
+                       c.last_run_id AS lastRunId, c.last_run_at AS lastRunAt,
+                       c.create_time AS createTime, c.update_time AS updateTime,
+                       cu.nickname AS creatorName, mu.nickname AS maintainerName
+                FROM contract_case c
+                LEFT JOIN t_user cu ON cu.id = c.creator_id
+                LEFT JOIN t_user mu ON mu.id = c.maintainer_id
+                WHERE c.id=? AND c.deleted=0
                 """, caseId));
         if (c == null) throw new IllegalArgumentException("Contract case not found: " + caseId);
 
@@ -532,18 +647,34 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         String caseKey = str(request, "caseKey");
         if (caseKey.isBlank()) caseKey = "SRV-" + System.currentTimeMillis() % 100000;
 
+        // Auto-fill creator/maintainer/department from current user
+        Long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
+        com.atlasmind.entity.User currentUser = userService.getById(userId);
+        Long departmentId = currentUser != null ? currentUser.getDepartmentId() : null;
+        String visibility = str(request, "visibility");
+        if (visibility.isBlank()) visibility = "DEPARTMENT"; // default: only your department
+
         Long id = insert("""
                 INSERT INTO contract_case (case_key, title, contract_type, description,
                     our_entity, counterparty, our_side, amount, currency, effective_date, expiry_date, signed_date,
-                    department, owner_id, priority, tags, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DRAFT')
+                    department, owner_id, priority, tags, status,
+                    creator_id, maintainer_id, department_id, visibility)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'DRAFT',?,?,?,?)
                 """, caseKey, title, str(request, "contractType"),
                 str(request, "description"), str(request, "ourEntity"),
                 str(request, "counterparty"), normalizeOurSide(str(request, "ourSide")),
                 request.get("amount"), str(request, "currency"),
                 request.get("effectiveDate"), request.get("expiryDate"), request.get("signedDate"),
                 str(request, "department"), request.get("ownerId"),
-                str(request, "priority"), str(request, "tags"));
+                str(request, "priority"), str(request, "tags"),
+                userId, userId, departmentId, visibility);
+
+        // If SPECIFIED visibility, save department visibility records
+        if ("SPECIFIED".equals(visibility) && departmentId != null) {
+            jdbcTemplate.update(
+                "INSERT IGNORE INTO contract_department_visibility (contract_id, department_id) VALUES (?,?)",
+                id, departmentId);
+        }
 
         // Add counterparty party entry
         String counterparty = str(request, "counterparty");
@@ -934,6 +1065,12 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 "SELECT id FROM contract_case WHERE id=? AND deleted=0 FOR UPDATE", caseId));
         if (c == null) throw new IllegalArgumentException("Contract case not found");
 
+        // Quota check
+        Long userId = cn.dev33.satoken.stp.StpUtil.getLoginIdAsLong();
+        if (!quotaService.hasQuota(userId)) {
+            throw new QuotaService.QuotaExceededException("合同分析额度不足，请联系管理员调整额度");
+        }
+
         String taskType = str(request, "taskType");
         if (taskType.isBlank()) taskType = "CONTRACT_REVIEW";
 
@@ -1004,11 +1141,21 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 INSERT INTO agent_run
                     (subject_type, subject_id, project_id, run_type, trigger_type, question,
                      input_json, workflow_id, workflow_stage, evidence_snapshot_hash,
-                     status, progress, current_step)
-                VALUES (?,?,0,?,?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
+                     initiated_by, status, progress, current_step)
+                VALUES (?,?,0,?,?,?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
                 """, SUBJECT_TYPE, caseId, taskType,
                 str(request, "triggerType"), str(request, "question"),
-                json(inputJson), workflowId, workflowStage, evidenceSnapshotHash);
+                json(inputJson), workflowId, workflowStage, evidenceSnapshotHash,
+                userId);
+
+        // Pre-reserve quota
+        try {
+            quotaService.reserve(userId, runId);
+        } catch (Exception e) {
+            // Clean up the run if quota reserve fails
+            jdbcTemplate.update("DELETE FROM agent_run WHERE id=?", runId);
+            throw e;
+        }
 
         if ("FULFILLMENT_CHECK".equals(taskType)) {
             Object input = request.get("inputJson");
@@ -1620,12 +1767,15 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
     @Override
     public List<Map<String, Object>> listReminders() {
+        List<Object> params = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilter(params);
         return jdbcTemplate.queryForList("""
                 SELECT o.id, o.title, o.due_date AS dueDate, o.status, c.case_key AS caseKey, c.title AS caseTitle
                 FROM contract_obligation o JOIN contract_case c ON c.id=o.case_id
                 WHERE o.status IN ('PLANNED','OVERDUE','DUE_SOON')
+                """ + visFilter + """
                 ORDER BY o.due_date ASC LIMIT 30
-                """);
+                """, params.toArray());
     }
 
     // ── DB helpers ─────────────────────────────────────────────────

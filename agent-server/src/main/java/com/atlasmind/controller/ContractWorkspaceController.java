@@ -5,6 +5,7 @@ import com.atlasmind.annotation.OperationLog;
 import com.atlasmind.common.Result;
 import com.atlasmind.dto.StoreResult;
 import com.atlasmind.entity.User;
+import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
 import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.UserService;
@@ -36,6 +37,7 @@ import java.util.concurrent.Executors;
 public class ContractWorkspaceController {
 
     private final ContractCaseService contractCaseService;
+    private final ContractAccessPolicy accessPolicy;
     private final FileStorageService fileStorageService;
     private final UserService userService;
     private final StringRedisTemplate redisTemplate;
@@ -109,49 +111,64 @@ public class ContractWorkspaceController {
 
     @GetMapping("/{caseId}")
     public Result<Map<String, Object>> getCase(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.getCase(caseId));
     }
 
     @PutMapping("/{caseId}")
     public Result<Map<String, Object>> update(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.updateCase(caseId, request));
     }
 
     @PostMapping("/{caseId}/documents")
     public Result<Map<String, Object>> uploadDocument(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.uploadDocument(caseId, request));
     }
 
     @GetMapping("/{caseId}/documents")
     public Result<List<Map<String, Object>>> documents(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.listDocuments(caseId));
     }
 
     @GetMapping("/{caseId}/documents/{documentId}/content")
     public Result<Map<String, Object>> documentContent(
             @PathVariable Long caseId, @PathVariable Long documentId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.getDocumentContent(caseId, documentId));
     }
 
     @PostMapping("/{caseId}/runs")
     public Result<Map<String, Object>> startRun(@PathVariable Long caseId, @RequestBody(required = false) Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.startRun(caseId, request == null ? Map.of() : request));
     }
 
     @GetMapping("/{caseId}/runs")
     public Result<List<Map<String, Object>>> runs(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.listRuns(caseId));
     }
 
     @GetMapping("/runs/{runId}")
     public Result<Map<String, Object>> getRun(@PathVariable Long runId) {
-        return Result.ok(contractCaseService.getRun(runId));
+        Map<String, Object> run = contractCaseService.getRun(runId);
+        if (run != null && run.get("subjectId") instanceof Number sid) {
+            accessPolicy.checkAccess(sid.longValue());
+        }
+        return Result.ok(run);
     }
 
     @PatchMapping("/findings/{findingId}")
     public Result<Map<String, Object>> updateFinding(
             @PathVariable Long findingId,
             @RequestBody(required = false) Map<String, Object> request) {
+        // Resolve case ID from finding and check access
+        Long caseId = jdbcTemplate.queryForObject(
+            "SELECT case_id FROM contract_review_finding WHERE id=?", Long.class, findingId);
+        if (caseId != null) accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.updateFinding(
                 findingId, request == null ? Map.of() : request));
     }
@@ -162,6 +179,7 @@ public class ContractWorkspaceController {
             @PathVariable Long caseId,
             @PathVariable Long elementId,
             @RequestBody(required = false) Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.reviewContractElement(
                 caseId, elementId, request == null ? Map.of() : request, currentActor()));
     }
@@ -171,6 +189,7 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> reviewContractFact(
             @PathVariable Long caseId,
             @RequestBody(required = false) Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.reviewContractFact(
                 caseId, request == null ? Map.of() : request, currentActor()));
     }
@@ -179,6 +198,10 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> approve(
             @PathVariable Long runId, @PathVariable Long actionId,
             @RequestBody(required = false) Map<String, Object> request) {
+        Map<String, Object> run = contractCaseService.getRun(runId);
+        if (run != null && run.get("subjectId") instanceof Number sid) {
+            accessPolicy.checkAccess(sid.longValue());
+        }
         return Result.ok(contractCaseService.approveAction(runId, actionId,
                 request == null ? Map.of() : request, currentActor()));
     }
@@ -187,6 +210,7 @@ public class ContractWorkspaceController {
     @OperationLog(value = "发起合同履约核验", type = "CREATE")
     public Result<Map<String, Object>> startTimelineFulfillmentCheck(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.startTimelineFulfillmentCheck(caseId, timelineNodeId));
     }
 
@@ -196,6 +220,7 @@ public class ContractWorkspaceController {
             @PathVariable Long caseId,
             @PathVariable Long timelineNodeId,
             @RequestBody(required = false) Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.reviewTimelineNode(
                 caseId, timelineNodeId, request == null ? Map.of() : request, currentActor()));
     }
@@ -205,6 +230,9 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> confirmFulfillmentCheck(
             @PathVariable Long checkId,
             @RequestBody(required = false) Map<String, Object> request) {
+        Long caseId = jdbcTemplate.queryForObject(
+            "SELECT case_id FROM contract_fulfillment_check WHERE id=?", Long.class, checkId);
+        if (caseId != null) accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.confirmFulfillmentCheck(
                 checkId, request == null ? Map.of() : request, currentActor()));
     }
@@ -212,6 +240,7 @@ public class ContractWorkspaceController {
     @GetMapping("/{caseId}/timeline/{timelineNodeId}/evidence-links")
     public Result<Map<String, Object>> timelineEvidenceLinks(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.getTimelineEvidenceLinks(caseId, timelineNodeId));
     }
 
@@ -220,6 +249,7 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> saveTimelineEvidenceLinks(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId,
             @RequestBody(required = false) Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.saveTimelineEvidenceLinks(
                 caseId, timelineNodeId, request == null ? Map.of() : request));
     }
@@ -227,22 +257,28 @@ public class ContractWorkspaceController {
     // Obligations
     @GetMapping("/{caseId}/obligations")
     public Result<List<Map<String, Object>>> obligations(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.listObligations(caseId));
     }
 
     @PostMapping("/{caseId}/obligations")
     public Result<Map<String, Object>> createObligation(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.createObligation(caseId, request));
     }
 
     @PutMapping("/obligations/{obligationId}")
     public Result<Map<String, Object>> updateObligation(@PathVariable Long obligationId, @RequestBody Map<String, Object> request) {
+        Long caseId = jdbcTemplate.queryForObject(
+            "SELECT case_id FROM contract_obligation WHERE id=?", Long.class, obligationId);
+        if (caseId != null) accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.updateObligation(obligationId, request));
     }
 
     @PostMapping("/{caseId}/fulfillment-evidence")
     @OperationLog(value = "上传合同履约证据", type = "CREATE")
     public Result<Map<String, Object>> uploadFulfillmentEvidence(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.uploadFulfillmentEvidence(caseId, request));
     }
 
@@ -255,12 +291,23 @@ public class ContractWorkspaceController {
     @GetMapping("/memories/{memoryId}")
     public Result<Map<String, Object>> memory(@PathVariable Long memoryId) {
         Map<String, Object> row = jdbcTemplate.queryForMap(
-                "SELECT id, memory_type AS memoryType, title, content FROM agent_project_memory WHERE id=?", memoryId);
+                "SELECT id, memory_type AS memoryType, title, content, project_id FROM agent_project_memory WHERE id=?", memoryId);
+        // Check contract access: project_id references contract_case.id in contract mode
+        Object pid = row.get("project_id");
+        if (pid instanceof Number) {
+            accessPolicy.checkAccess(((Number) pid).longValue());
+        }
         return Result.ok(row);
     }
 
     @GetMapping(value = "/runs/{runId}/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamRun(@PathVariable Long runId) {
+        // Check contract access before subscribing to SSE stream
+        Map<String, Object> run = contractCaseService.getRun(runId);
+        if (run != null && run.get("subjectId") instanceof Number sid) {
+            accessPolicy.checkAccess(sid.longValue());
+        }
+
         SseEmitter emitter = new SseEmitter(300_000L);
         String channel = "run:" + runId + ":progress";
         sseExecutor.execute(() -> {

@@ -21,6 +21,12 @@ public class OperationLog {
     private String methodName;
     private String args;
     private Long executionTime;
+    private Long operatorId;
+    private String targetType;
+    private Long targetId;
+    private String targetLabel;
+    private String oldValueJson;
+    private String newValueJson;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }

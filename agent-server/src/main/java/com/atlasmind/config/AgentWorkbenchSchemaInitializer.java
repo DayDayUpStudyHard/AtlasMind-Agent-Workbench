@@ -559,6 +559,110 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                       WHERE s.project_id=p.id AND s.source_url=p.repository_url
                   )
                 """);
+
+        // ── Auth & Permission DDL ─────────────────────────────────────
+        // t_user extension
+        addColumnIfMissing("t_user", "role",
+                "VARCHAR(16) NOT NULL DEFAULT 'USER' COMMENT 'ADMIN|USER'");
+        addColumnIfMissing("t_user", "department_id", "BIGINT DEFAULT NULL");
+        addColumnIfMissing("t_user", "status",
+                "VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE|DISABLED'");
+        // department table
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS department (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(120) NOT NULL,
+                    code VARCHAR(60) NOT NULL,
+                    is_default TINYINT NOT NULL DEFAULT 0 COMMENT '默认部门标记，禁止删除',
+                    description VARCHAR(500) DEFAULT '',
+                    deleted TINYINT NOT NULL DEFAULT 0,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_code (code),
+                    INDEX idx_deleted (deleted)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // refresh token table
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS user_refresh_token (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    token_hash CHAR(64) NOT NULL COMMENT 'SHA-256(token)',
+                    family VARCHAR(64) NOT NULL COMMENT 'token family 标识，rotation 时保持',
+                    expires_at DATETIME NOT NULL,
+                    revoked TINYINT NOT NULL DEFAULT 0,
+                    revoked_reason VARCHAR(64) DEFAULT NULL COMMENT 'LOGOUT|ROTATION|REUSE_DETECTED',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_user_family (user_id, family),
+                    INDEX idx_expires (expires_at)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        addColumnIfMissing("user_refresh_token", "id",
+                "BIGINT AUTO_INCREMENT PRIMARY KEY");
+        // token_hash unique index (may fail if already exists via PK, safe to try)
+        try { jdbcTemplate.execute("""
+                ALTER TABLE user_refresh_token ADD UNIQUE INDEX uk_token_hash (token_hash)
+                """); } catch (Exception ignored) {}
+        // user_quota table
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS user_quota (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    total_quota INT NOT NULL DEFAULT 0,
+                    used_count INT NOT NULL DEFAULT 0,
+                    reserved_count INT NOT NULL DEFAULT 0,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_user (user_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // quota_transaction table
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS quota_transaction (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    user_id BIGINT NOT NULL,
+                    amount INT NOT NULL COMMENT '变动量',
+                    type VARCHAR(32) NOT NULL COMMENT 'ALLOCATE|RESERVE|CONFIRM|REFUND|ADMIN_ADJUST',
+                    balance_after INT NOT NULL COMMENT '变动后 available = total - used - reserved',
+                    operator_id BIGINT COMMENT '管理员操作时记录',
+                    run_id BIGINT COMMENT '关联 agent_run',
+                    remark VARCHAR(500) DEFAULT '',
+                    idempotency_key VARCHAR(128) DEFAULT NULL COMMENT '幂等键（run_id + type）',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_user_time (user_id, create_time),
+                    INDEX idx_run (run_id),
+                    UNIQUE KEY uk_idempotency (idempotency_key)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // contract_case extension
+        addColumnIfMissing("contract_case", "visibility",
+                "VARCHAR(16) NOT NULL DEFAULT 'LEGACY_REVIEW' COMMENT 'LEGACY_REVIEW|DEPARTMENT|SPECIFIED|ALL'");
+        addColumnIfMissing("contract_case", "creator_id",
+                "BIGINT DEFAULT NULL COMMENT '上传人'");
+        addColumnIfMissing("contract_case", "maintainer_id",
+                "BIGINT DEFAULT NULL COMMENT '维护人'");
+        addColumnIfMissing("contract_case", "department_id",
+                "BIGINT DEFAULT NULL COMMENT '创建时的部门快照（不可变）'");
+        // contract_department_visibility
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_department_visibility (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    contract_id BIGINT NOT NULL,
+                    department_id BIGINT NOT NULL,
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_contract_dept (contract_id, department_id),
+                    INDEX idx_dept_contract (department_id, contract_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // agent_run extension
+        addColumnIfMissing("agent_run", "initiated_by",
+                "BIGINT DEFAULT NULL COMMENT '发起人 user_id（额度归属依据）'");
+        // t_operation_log extension
+        addColumnIfMissing("t_operation_log", "operator_id", "BIGINT DEFAULT NULL");
+        addColumnIfMissing("t_operation_log", "target_type", "VARCHAR(64) DEFAULT NULL");
+        addColumnIfMissing("t_operation_log", "target_id", "BIGINT DEFAULT NULL");
+        addColumnIfMissing("t_operation_log", "target_label", "VARCHAR(256) DEFAULT NULL");
+        addColumnIfMissing("t_operation_log", "old_value_json", "LONGTEXT");
+        addColumnIfMissing("t_operation_log", "new_value_json", "LONGTEXT");
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {

@@ -93,6 +93,7 @@
             <div v-else class="activity-empty">暂无合同处理记录</div>
           </div>
         </div>
+        <span v-if="departmentName" class="dept-tag" :title="`所属部门：${departmentName}`">{{ departmentName }}</span>
         <a class="admin-link" :href="adminUrl" target="_blank" rel="noreferrer">管理端</a>
         <button type="button" class="logout-button" @click="logout">退出</button>
       </div>
@@ -150,7 +151,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useMessage } from 'naive-ui'
 import { useRouter } from 'vue-router'
-import { getRecentContractDocumentPipelines, getRecentWorkspaceRuns, getWorkspaceAiStatus, getWorkspaceUnreadCount } from '../api/index.js'
+import { getRecentContractDocumentPipelines, getRecentWorkspaceRuns, getWorkspaceAiStatus, getWorkspaceUnreadCount, getUserInfo, logout as logoutApi, clearAccessToken } from '../api/index.js'
 import { activityProgress as getActivityProgress, isActivityActive, mergeContractActivities } from '../utils/contractActivity.js'
 
 const router = useRouter()
@@ -165,6 +166,7 @@ const aiStatus = ref(null)
 const aiStatusLoading = ref(false)
 const recentRuns = ref([])
 const documentPipelines = ref([])
+const departmentName = ref('')
 let refreshTimer = null
 
 const modelStatusItems = computed(() => {
@@ -204,8 +206,8 @@ if (typeof window !== 'undefined') {
   window.addEventListener('scroll', () => { scrolled.value = window.scrollY > 10 })
 }
 
-onMounted(() => {
-  refreshHeaderData(); refreshAiStatus()
+onMounted(async () => {
+  refreshHeaderData(); refreshAiStatus(); fetchUserDept()
   document.addEventListener('click', closeNotificationPanel)
   refreshTimer = window.setInterval(refreshAll, 8000)
 })
@@ -246,7 +248,17 @@ async function refreshAiStatus() {
 }
 
 function doSearch() { router.push({ path:'/', query: keyword.value.trim() ? { keyword: keyword.value } : {} }) }
-function logout() { localStorage.removeItem('atlasmind-token'); router.push('/login') }
+async function fetchUserDept() {
+  try {
+    const res = await getUserInfo()
+    departmentName.value = res.data?.data?.departmentName || ''
+  } catch { /* silent */ }
+}
+async function logout() {
+  try { await logoutApi() } catch { /* best-effort */ }
+  clearAccessToken()
+  router.push('/login')
+}
 
 async function toggleNotificationPanel() {
   notificationOpen.value = !notificationOpen.value
@@ -505,6 +517,8 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 
 .admin-link,.logout-button{display:inline-flex;align-items:center;justify-content:center;min-height:34px;padding:0 10px;color:var(--atlas-muted);background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;cursor:pointer;font-size:12px;font-weight:800;text-decoration:none;white-space:nowrap}
 .admin-link:hover,.logout-button:hover{color:var(--atlas-primary);border-color:var(--atlas-primary)}
+
+.dept-tag{display:inline-flex;align-items:center;min-height:28px;padding:0 10px;color:var(--atlas-primary);background:rgba(66,111,166,.08);border:1px solid rgba(66,111,166,.22);border-radius:4px;font-size:11px;font-weight:800;white-space:nowrap;max-width:160px;overflow:hidden;text-overflow:ellipsis}
 
 @media(max-width:860px){.header-inner{height:auto;min-height:60px;flex-wrap:wrap;gap:10px;padding:12px 16px}.nav{order:3;flex:0 0 100%;width:100%;min-width:0;overflow-x:auto;justify-content:flex-start;padding-bottom:2px}.nav-link{white-space:nowrap}.search-box{margin-left:auto;max-width:min(172px,calc(100vw - 190px))}.search-input{width:100%;min-width:0}}
 @media(max-width:520px){.model-status-list{grid-template-columns:1fr}}

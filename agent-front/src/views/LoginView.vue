@@ -32,7 +32,7 @@
 <script setup>
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { login } from '../api/index.js'
+import { login, setAccessToken } from '../api/index.js'
 
 const router = useRouter()
 const loading = ref(false)
@@ -44,7 +44,7 @@ async function doLogin() {
   loading.value = true
   try {
     const response = await login(form.value)
-    localStorage.setItem('atlasmind-token', response.data.data.token)
+    setAccessToken(response.data.data.token)
     router.push('/')
   } catch (err) {
     error.value = err.response?.data?.message || '登录失败，请检查账号和密码'

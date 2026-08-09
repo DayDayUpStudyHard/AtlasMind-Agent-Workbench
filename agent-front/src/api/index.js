@@ -2,21 +2,110 @@ import axios from 'axios'
 
 const api = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || '',
-  timeout: 10000
+  timeout: 10000,
+  withCredentials: true
 })
 
+const authApi = axios.create({
+  baseURL: import.meta.env.VITE_API_BASE || '',
+  timeout: 10000,
+  withCredentials: true
+})
+
+// ── Memory-only access token (never localStorage) ──────────────
+let accessToken = null
+
+export function setAccessToken(token) {
+  accessToken = token
+}
+
+export function getAccessToken() {
+  return accessToken
+}
+
+export function clearAccessToken() {
+  accessToken = null
+}
+
 api.interceptors.request.use(config => {
-  const token = localStorage.getItem('atlasmind-token')
-  if (token) config.headers['atlasmind-token'] = token
+  if (accessToken) {
+    config.headers['atlasmind-token'] = accessToken
+  }
   return config
 })
 
+// ── Shared refresh logic (used by both 401 interceptor AND router guard) ──
+let isRefreshing = false
+let refreshQueue = []
+
+function resolveQueue(token) {
+  refreshQueue.forEach(([resolve]) => resolve(token))
+  refreshQueue = []
+}
+
+function rejectQueue(error) {
+  refreshQueue.forEach(([, reject]) => reject(error))
+  refreshQueue = []
+}
+
+/**
+ * Attempt to refresh the access token via httpOnly cookie.
+ * Guards against concurrent calls — only one refresh request flies at a time.
+ * Returns the new access token on success, or null on failure.
+ */
+export async function refreshAccessToken() {
+  if (isRefreshing) {
+    // Queue: wait for the in-flight refresh to finish
+    return new Promise((resolve, reject) => {
+      refreshQueue.push([resolve, reject])
+    })
+  }
+
+  isRefreshing = true
+  try {
+    console.log('[auth] refresh: sending request...')
+    const res = await authApi.post('/api/auth/refresh')
+    const token = res.data?.data?.token
+    if (token) {
+      console.log('[auth] refresh: success, got token')
+      accessToken = token
+      resolveQueue(token)
+      return token
+    }
+    console.warn('[auth] refresh: no token in response body', res.data)
+    rejectQueue(new Error('No token in refresh response'))
+    return null
+  } catch (err) {
+    if (err.response) {
+      console.warn('[auth] refresh: backend returned error', err.response.status, err.response.data)
+    } else {
+      console.warn('[auth] refresh: network error', err.message)
+    }
+    rejectQueue(err)
+    accessToken = null
+    return null
+  } finally {
+    isRefreshing = false
+  }
+}
+
 api.interceptors.response.use(
   response => response,
-  error => {
-    if (error.response?.status === 401 && window.location.pathname !== `${import.meta.env.BASE_URL}login`) {
-      localStorage.removeItem('atlasmind-token')
-      window.location.href = `${import.meta.env.BASE_URL}login`
+  async error => {
+    const originalRequest = error.config
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      const token = await refreshAccessToken()
+      if (token) {
+        originalRequest._retry = true
+        originalRequest.headers['atlasmind-token'] = token
+        return api(originalRequest)
+      }
+      // Refresh failed → redirect to login
+      accessToken = null
+      if (window.location.pathname !== `${import.meta.env.BASE_URL || '/'}login`) {
+        window.location.href = `${import.meta.env.BASE_URL || '/'}login`
+      }
+      return Promise.reject(error)
     }
     return Promise.reject(error)
   }
@@ -24,6 +113,10 @@ api.interceptors.response.use(
 
 export function login(data) {
   return api.post('/api/auth/login', data)
+}
+
+export function logout() {
+  return api.post('/api/auth/logout', {}, { withCredentials: true })
 }
 
 export function getUserInfo() {

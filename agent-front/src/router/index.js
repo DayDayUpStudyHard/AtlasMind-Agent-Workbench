@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { getAccessToken, setAccessToken, clearAccessToken, refreshAccessToken } from '../api/index.js'
 
 const routes = [
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { public: true } },
@@ -15,15 +16,31 @@ const router = createRouter({
   routes
 })
 
-router.beforeEach((to, from, next) => {
-  const token = localStorage.getItem('atlasmind-token')
-  if (!to.meta.public && !token) {
-    next('/login')
-  } else if (to.path === '/login' && token) {
-    next('/')
-  } else {
-    next()
+router.beforeEach(async (to, from, next) => {
+  // Public pages (login) always allowed
+  if (to.meta.public) return next()
+
+  // Already have a token in memory → good to go
+  if (getAccessToken()) {
+    if (to.path === '/login') return next('/')
+    return next()
   }
+
+  // No memory token → try silent refresh via httpOnly cookie
+  try {
+    const token = await refreshAccessToken()
+    if (token) {
+      if (to.path === '/login') return next('/')
+      return next()
+    }
+  } catch {
+    // Refresh failed
+    clearAccessToken()
+  }
+
+  // Not authenticated → login page
+  if (to.path !== '/login') return next('/login')
+  return next()
 })
 
 export default router

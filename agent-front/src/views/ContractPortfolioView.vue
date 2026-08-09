@@ -88,6 +88,7 @@
           <span v-if="c.amount">{{ c.amount }} {{ c.currency || 'CNY' }}</span>
           <span v-if="c.department">{{ c.department }}</span>
           <span>{{ contractTypeLabel(c.contractType) }}</span>
+          <span v-if="c.creatorName" class="meta-creator">上传：{{ c.creatorName }}</span>
         </div>
         <div v-if="timelineNodes(c).length" class="case-timeline" @click.stop>
           <div class="timeline-head">
@@ -296,6 +297,7 @@ function timelineStatusClass(node) {
 .case-card h3{margin:0;font-size:16px;color:var(--atlas-text)}
 .case-meta{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px}
 .case-meta span{padding:2px 6px;border:1px solid var(--atlas-border);border-radius:3px;font-size:10px;color:var(--atlas-muted)}
+.meta-creator{color:var(--atlas-primary) !important;border-color:rgba(66,111,166,.22) !important;background:rgba(66,111,166,.06)}
 .case-timeline{margin-top:14px;padding-top:12px;border-top:1px solid var(--atlas-border)}
 .case-timeline.empty{padding:10px 0 0}
 .timeline-head{display:flex;align-items:center;gap:8px;margin-bottom:10px}

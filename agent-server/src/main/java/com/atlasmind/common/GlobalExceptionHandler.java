@@ -1,5 +1,7 @@
 package com.atlasmind.common;
 
+import cn.dev33.satoken.exception.NotPermissionException;
+import cn.dev33.satoken.exception.NotRoleException;
 import cn.dev33.satoken.exception.NotLoginException;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
@@ -16,6 +18,8 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.method.annotation.MethodArgumentTypeMismatchException;
 import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.util.stream.Collectors;
 
@@ -103,12 +107,33 @@ public class GlobalExceptionHandler {
         return Result.fail(e.getMessage());
     }
 
+    @ExceptionHandler(IllegalStateException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Result<?> handleIllegalState(IllegalStateException e) {
+        return Result.fail(e.getMessage());
+    }
+
     // ==================== 认证鉴权 ====================
 
     @ExceptionHandler(NotLoginException.class)
     @ResponseStatus(HttpStatus.UNAUTHORIZED)
     public Result<?> handleNotLogin(NotLoginException e) {
         return Result.fail(401, "请先登录");
+    }
+
+    @ExceptionHandler({NotRoleException.class, NotPermissionException.class})
+    @ResponseStatus(HttpStatus.FORBIDDEN)
+    public Result<?> handleForbidden(Exception e) {
+        return Result.fail(403, "无权访问");
+    }
+
+    @ExceptionHandler(ResponseStatusException.class)
+    public org.springframework.http.ResponseEntity<Result<?>> handleResponseStatus(ResponseStatusException e) {
+        int status = e.getStatusCode().value();
+        String message = e.getReason() == null || e.getReason().isBlank()
+                ? e.getStatusCode().toString()
+                : e.getReason();
+        return org.springframework.http.ResponseEntity.status(status).body(Result.fail(status, message));
     }
 
     // ==================== 数据库 ====================
@@ -136,6 +161,12 @@ public class GlobalExceptionHandler {
     @ResponseStatus(HttpStatus.NOT_FOUND)
     public Result<?> handleNoHandlerFound(NoHandlerFoundException e) {
         return Result.fail(404, "接口不存在: " + e.getRequestURL());
+    }
+
+    @ExceptionHandler(NoResourceFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public Result<?> handleNoResourceFound(NoResourceFoundException e) {
+        return Result.fail(404, "接口不存在: " + e.getResourcePath());
     }
 
     // ==================== 兜底处理 ====================

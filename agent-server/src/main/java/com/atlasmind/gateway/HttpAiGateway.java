@@ -1,5 +1,8 @@
 package com.atlasmind.gateway;
 
+import cn.dev33.satoken.stp.StpUtil;
+import com.atlasmind.entity.User;
+import com.atlasmind.service.UserService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -21,6 +24,7 @@ import java.util.Map;
 public class HttpAiGateway implements AiGateway {
 
     private final ObjectMapper objectMapper;
+    private final UserService userService;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
@@ -142,6 +146,18 @@ public class HttpAiGateway implements AiGateway {
 
             if (internalToken != null && !internalToken.isBlank()) {
                 builder.header("X-Internal-Token", internalToken);
+            }
+
+            // Inject current user identity (from StpUtil, never trust frontend)
+            try {
+                long userId = StpUtil.getLoginIdAsLong();
+                builder.header("X-User-Id", String.valueOf(userId));
+                User user = userService.getById(userId);
+                if (user != null && user.getDepartmentId() != null) {
+                    builder.header("X-Department-Id", String.valueOf(user.getDepartmentId()));
+                }
+            } catch (Exception ignored) {
+                // Not logged in — some internal calls may not have a user context
             }
 
             if ("DELETE".equalsIgnoreCase(method)) {

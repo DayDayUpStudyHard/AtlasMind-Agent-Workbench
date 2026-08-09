@@ -8,6 +8,10 @@
         <span class="case-status" :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span>
         <h1>{{ c.title }}</h1>
         <p>{{ c.description || '没有补充说明' }}</p>
+        <div class="case-attribution" v-if="c.creatorName || c.maintainerName">
+          <span v-if="c.creatorName">上传：{{ c.creatorName }}</span>
+          <span v-if="c.maintainerName">维护：{{ c.maintainerName }}</span>
+        </div>
       </div>
       <div class="case-actions">
         <details class="task-menu">
@@ -3080,6 +3084,8 @@ function formatBytes(size) {
 .case-status.warn{color:var(--atlas-subtle);background:var(--atlas-bg)}
 .case-header h1{margin:6px 0 5px;font-family:var(--atlas-font-display);font-size:34px;color:var(--atlas-text)}
 .case-header p{color:var(--atlas-muted);font-size:14px;max-width:600px}
+.case-attribution{display:flex;gap:16px;margin-top:8px;color:var(--atlas-subtle);font-size:12px}
+.case-attribution span{font-weight:600}
 .case-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:flex-end}
 .revision-upload-button{border-color:rgba(63,127,93,.32);color:#347254;background:#f3faf6}
 .revision-upload-button:hover{border-color:#347254;background:#edf7f1}

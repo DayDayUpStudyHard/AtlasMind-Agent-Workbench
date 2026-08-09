@@ -25,7 +25,14 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:15173",  # agent-admin dev
+        "http://localhost:15174",  # agent-front dev
+        "http://localhost:5173",   # agent-front dev
+        "http://localhost:5174",   # agent-admin dev
+        "http://localhost:18080",  # Java gateway
+        # Production: replace with nginx domain
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

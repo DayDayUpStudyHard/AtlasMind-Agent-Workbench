@@ -2,6 +2,62 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 权限体系四个硬点补全：合同访问边角、额度幂等、管理员保护、Token 测试
+
+**日期**：2026-08-09
+
+### 调整原因
+
+权限体系（Sa-Token + BCrypt + Redis + httpOnly Cookie Token Rotation）主链路已跑通，但存在四个硬点：
+1. 间接合同资源（reminders / memories / runs/{runId}/stream）缺少 `ContractAccessPolicy` 校验，可通过猜 ID 跨部门访问
+2. 额度 `confirm/refund` 的 UPDATE 语句不幂等，重复调用会二次修改 `used_count`/`reserved_count`
+3. 禁用用户时没有"最后一个管理员"保护，可禁用所有管理员导致系统不可管理
+4. Refresh token 旋转缺少并发双 refresh 和重放检测的自动化测试
+
+### 合同访问策略边角补全
+
+**Controller 层** (`ContractWorkspaceController.java`)：
+- `GET /memories/{memoryId}`：查询带出 `project_id`，调用 `accessPolicy.checkAccess(project_id)` 校验合同可见性
+- `GET /runs/{runId}/stream`：SSE 订阅前解析 run 的 `subjectId` 并校验访问权限，防止未授权用户监听进度事件
+
+**Service 层** (`ContractCaseServiceImpl.java`)：
+- `listReminders()`：SQL 增加 `accessPolicy.buildVisibilityFilter(params)`，按 `c` 别名过滤
+- `listWorkQueue()`：三种队列（APPROVAL / FULFILLMENT / REVIEW）所有子查询均加 visibility filter
+- `portfolio()`：7 个 contract_case 直接查询加 `buildVisibilityFilterNoAlias`；3 个 obligation 查询新 join contract_case 并加 filter；agent_run / contract_review_finding 同样 join 加 filter
+- `workQueueSummary()`：三个维度的嵌套子查询全部加 visibility filter，params 按 filter 出现次数正确重复组合（每处 filter 各 2 个占位参数）
+
+### 额度幂等加固
+
+**`QuotaService.java`**：
+- 抽取 `hasIdempotencyKey(key)` 辅助方法，统一检查 `quota_transaction` 表中是否已有同名幂等键
+- `reserve()`：`SELECT FOR UPDATE` 持锁后、UPDATE 计数器前增加幂等检查，已存在则直接返回；INSERT 改 `ON DUPLICATE KEY UPDATE`
+- `confirm()`：`SELECT FOR UPDATE` 持锁后、UPDATE `used_count` 前增加幂等检查，防止重复累加
+- `refund()`：`SELECT FOR UPDATE` 持锁后、UPDATE `reserved_count` 前增加幂等检查，防止重复扣减
+
+### 最后一个管理员保护
+
+**`AdminUserController.java` — `disable()` 方法**：
+- 禁用前查目标用户 role，若为 ADMIN 则查 `SELECT COUNT(*) FROM t_user WHERE role='ADMIN' AND status='ACTIVE'`
+- 仅剩 1 个活跃管理员时抛出 `IllegalStateException("不能禁用最后一个管理员")`
+- 逻辑与已有的角色降级保护（`update()` 中 line 144-156）完全一致
+
+### Refresh Token 并发与重放测试
+
+**`UserServiceImplTest.java`** — 新增 7 个测试：
+- `rotateRefreshTokenSuccess`：正常轮换，旧 token → ROTATION，新 token 入库
+- `rotateRefreshTokenReplayDetection`：已 revoke 的 token 再次使用 → 整族 `REUSE_DETECTED`
+- `rotateRefreshTokenExpired`：过期 token 抛异常
+- `rotateRefreshTokenUserDisabled`：禁用用户拒绝刷新
+- `rotateRefreshTokenNotFound`：不存在的 token 抛异常
+- `concurrentDoubleRefreshDetectsReplay`：模拟两次连续调用，第一次成功轮换、第二次检测到已 revoke → 触发整族作废
+- `revokeRefreshTokenByHash` / `revokeAllRefreshTokensForUser`：撤销单 token / 撤销用户所有 token
+
+新增 `@Mock JdbcTemplate`，token row 辅助方法 `tokenRow()` / `tokenList()`。
+
+### 验证
+
+- Java：`.\\mvnw.cmd -q -DskipTests compile` 通过
+
 ## 合同首次识别 P0/P1/P2：候选裁决、唯一事实源与字段审计
 
 **日期**：2026-08-08

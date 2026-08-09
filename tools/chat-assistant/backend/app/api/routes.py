@@ -53,8 +53,11 @@ _contract_document_tasks: dict[int, asyncio.Task] = {}
 
 def _check_internal_token(token: str | None) -> None:
     expected = settings.internal_token
-    if expected and (not token or not secrets.compare_digest(token, expected)):
-        raise HTTPException(status_code=401, detail="Invalid internal token")
+    if not expected:
+        # Fail-closed: production must configure SERVICE_TOKEN
+        raise HTTPException(status_code=500, detail="SERVICE_TOKEN not configured")
+    if not token or not secrets.compare_digest(token, expected):
+        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 def get_es() -> ESService:

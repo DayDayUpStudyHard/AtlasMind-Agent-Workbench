@@ -118,8 +118,9 @@ services:
       UPLOAD_PATH: /app/upload
       LIBREOFFICE_PATH: /usr/bin/soffice
       TZ: Asia/Shanghai
-    ports:
-      - "${AI_SERVICE_PORT:-18088}:18088"
+    # Python port NOT exposed to host — only accessible via Docker internal network
+    expose:
+      - "18088"
     volumes:
       - upload_data:/app/upload
     depends_on:

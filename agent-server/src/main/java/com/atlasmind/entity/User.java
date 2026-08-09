@@ -24,6 +24,11 @@ public class User {
     private String avatar;
     @Email(message = "邮箱格式不正确")
     private String email;
+    private String role;         // ADMIN | USER
+    private Long departmentId;   // FK → department.id
+    private String status;       // ACTIVE | DISABLED
+    @TableField(exist = false)
+    private String departmentName; // 冗余字段，不映射到数据库，由 Service 层填充
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     private String bio;

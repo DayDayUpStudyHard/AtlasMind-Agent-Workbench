@@ -67,10 +67,11 @@ public class OperationLogAspect {
         // 获取客户端 IP
         String ip = getClientIp();
 
-        // 截断参数避免过长
+        // Filter sensitive fields and truncate
         String args = Arrays.toString(joinPoint.getArgs());
-        if (args.length() > 200) {
-            args = args.substring(0, 200) + "...";
+        args = maskSensitive(args);
+        if (args.length() > 2000) {
+            args = args.substring(0, 2000) + "...";
         }
 
         // 获取方法名
@@ -88,6 +89,7 @@ public class OperationLogAspect {
         try {
             Map<String, String> fields = new LinkedHashMap<>();
             fields.put("username", username);
+            fields.put("operatorId", String.valueOf(getLoginUserId()));
             fields.put("ip", ip);
             fields.put("operation", annotation.value());
             fields.put("type", annotation.type());
@@ -109,6 +111,24 @@ public class OperationLogAspect {
         } catch (Exception e) {
             return "unknown";
         }
+    }
+
+    private long getLoginUserId() {
+        try {
+            return StpUtil.getLoginIdAsLong();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    /** Replace password/token values with *** to prevent sensitive data in logs. */
+    private String maskSensitive(String args) {
+        if (args == null) return "";
+        return args
+            .replaceAll("(?i)(password|token|refresh_token|secret|apiKey|accessKey)\\s*[=:]\\s*\"[^\"]*\"",
+                         "$1=***")
+            .replaceAll("(?i)(password|token|refresh_token|secret|apiKey|accessKey)\\s*[=:]\\s*[^,)}\\]\"]+",
+                         "$1=***");
     }
 
     private String getClientIp() {
