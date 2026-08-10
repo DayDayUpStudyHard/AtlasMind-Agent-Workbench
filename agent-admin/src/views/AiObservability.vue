@@ -742,6 +742,7 @@ function runTypeLabel(type) {
     PROJECT_ONBOARDING: '项目接手与入职',
     ENGINEERING_DECISION: '研发决策',
     CONTRACT_REVIEW: '合同审查',
+    TIMELINE_EXTRACTION: '正式履约日程',
     CONTRACT_INTAKE: '合同发起',
     APPROVAL_DECISION: '审批决策',
     VERSION_REVIEW: '版本复核',

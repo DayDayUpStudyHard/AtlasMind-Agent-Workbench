@@ -79,7 +79,8 @@ function isRunning(status) {
 function runTypeLabel(type) {
   return {
     HEALTH_ANALYSIS: '健康分析', PROJECT_ONBOARDING: '项目接手', ENGINEERING_DECISION: '研发决策',
-    CONTRACT_REVIEW: '合同审查', CONTRACT_INTAKE: '合同发起', APPROVAL_DECISION: '审批决策',
+    CONTRACT_REVIEW: '合同审查', CONTRACT_INTAKE: '合同发起', APPROVAL_DECISION: '审批意见草案',
+    TIMELINE_EXTRACTION: '正式履约日程',
     VERSION_REVIEW: '版本复核', OBLIGATION_EXTRACTION: '义务提取'
   }[type] || type || 'Agent 任务'
 }

@@ -580,13 +580,32 @@ def _fallback_rule_findings(task: dict[str, Any], evidence: list[dict[str, Any]]
 
 
 def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
-    """Analyze each domain with the LLM and normalize all findings against real evidence."""
+    """Analyze each domain with the LLM and normalize all findings against real evidence.
+
+    When ``gap_domains`` is present in state (set by targeted_retrieval), only
+    the listed domains are re-analysed; existing findings for already-covered
+    domains are preserved.  This implements the "只重新分析缺失领域" constraint.
+    """
     domain_results = state.get("domain_results") or {}
     rule_findings = state.get("rule_findings") or []
     domain_tasks = state.get("domain_tasks") or []
     case_snapshot = state.get("case_snapshot") or {}
     run_id = int(state.get("run_id") or 0)
     extracted_facts = (state.get("extraction_snapshot") or {}).get("elements") or []
+    gap_domains: set[str] = set(state.get("gap_domains") or [])
+    existing_draft: list[dict[str, Any]] = state.get("draft_findings") or []
+    existing_analysis: dict[str, dict[str, Any]] = state.get("domain_analysis") or {}
+
+    # When re-running after targeted retrieval, only re-analyze gap domains.
+    # Preserve findings from previously-covered domains.
+    if gap_domains:
+        domain_tasks = [t for t in domain_tasks if str(t.get("domainKey") or t.get("domain") or "") in gap_domains]
+        if not domain_tasks:
+            # No gap domains to re-analyze — keep existing state.
+            return {
+                "state_revision": state.get("state_revision", 0) + 1,
+                "current_node": "draft_domain_findings",
+            }
 
     def _analyze(task: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str]:
         key = str(task.get("domainKey") or task.get("domain") or "")
@@ -637,8 +656,41 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
     draft: list[dict[str, Any]] = []
     domain_analysis: dict[str, dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
-    for task in domain_tasks:
+
+    # When re-analysing only gap domains, start from the existing findings
+    # and analysis, then replace entries for re-analysed domains.
+    if gap_domains:
+        # Keep findings for non-gap domains.
+        for finding in existing_draft:
+            domain_key = str(finding.get("domainKey") or "")
+            # Drop previous findings for domains that are being re-analysed
+            # so we don't double-count after the LLM re-run.
+            if domain_key not in gap_domains:
+                draft.append(finding)
+        # Keep analysis for non-gap domains.
+        for key, value in existing_analysis.items():
+            if key not in gap_domains:
+                domain_analysis[key] = value
+
+    all_tasks = state.get("domain_tasks") or []
+    for task in all_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
+        # In gap-only mode, skip domains that were not re-analysed —
+        # their findings and analysis were already preserved above.
+        if gap_domains and key not in gap_domains:
+            observations.append({
+                "callId": f"graph-domain-analysis-{key}-{state.get('subject_id', 0)}",
+                "planStepId": f"analyze_{key}",
+                "toolName": "analyzeContractRiskDomain",
+                "arguments": {
+                    "domainKey": key,
+                    "domainName": task.get("domainName"),
+                    "rerun": False,
+                },
+                "output": domain_analysis.get(key, {}),
+                "status": domain_analysis.get(key, {}).get("status", "PRESERVED"),
+            })
+            continue
         findings, status, conclusion = results.get(key, ([], "FALLBACK", "分析结果缺失"))
         draft.extend(findings)
         domain_analysis[key] = {

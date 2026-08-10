@@ -1,5 +1,7 @@
 import unittest
-from unittest.mock import patch
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 from app.agent_runtime import contract_document_parser as parser
 from app.agent_runtime.contract_document_parser import (
@@ -11,6 +13,25 @@ from app.agent_runtime.contract_document_parser import (
 
 
 class ContractDocumentParserTest(unittest.TestCase):
+    def test_docx_parse_returns_diagnostics(self):
+        document = {
+            "case_id": 41,
+            "content_text": "",
+            "file_path": "/upload/contracts/contract.docx",
+            "file_name": "contract.docx",
+        }
+        blocks = [SimpleNamespace(text="合同正文", source_page=1)]
+
+        with patch.object(parser, "_resolve_local_file", return_value=Path("contract.docx")), \
+             patch.object(parser, "parse_docx_blocks", return_value=blocks), \
+             patch.object(parser, "_update_job"), \
+             patch.object(parser, "_append_job_trace"):
+            result = parser._parse_document_content(MagicMock(), 41, 41, document)
+
+        self.assertEqual("python-docx", result["parser"])
+        self.assertEqual("python-docx", result["diagnostics"]["provider"])
+        self.assertIn("quality", result["diagnostics"])
+
     def test_splits_and_classifies_numbered_chinese_clauses(self):
         clauses = split_contract_text(
             "第1条 服务范围：乙方提供咨询服务。\n"
@@ -159,6 +180,156 @@ class ContractDocumentParserTest(unittest.TestCase):
 
         self.assertEqual(clause_text, captured["candidates"][0]["clauseText"])
         self.assertIn("两台机组通过168小时试运后45天内", captured["candidates"][0]["matchedText"])
+
+    def test_final_timeline_does_not_publish_unreviewed_rule_candidates(self):
+        clause = {
+            "id": 41,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "7.2.3",
+            "title": "竣工图设计文件",
+            "content": "两台机组通过168小时试运后45天内完成编制。",
+        }
+        nodes = parser._extract_clause_timeline_nodes_v2(clause, 2026, None, set())
+
+        with patch.object(parser.LLMService, "enrich_contract_timeline", return_value={"nodes": []}):
+            final_nodes, result = parser._enrich_timeline_nodes(nodes, [clause], strict=True)
+
+        self.assertEqual([], final_nodes)
+        self.assertEqual("LLM_ENRICHED", result["status"])
+        self.assertEqual(len(nodes), result["dropped"])
+
+    def test_final_timeline_retries_only_missing_candidates_and_keeps_reviewed_nodes(self):
+        clause = {
+            "id": 42,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "7.2.3",
+            "title": "竣工图设计文件",
+            "content": "两台机组通过168小时试运后45天内完成竣工图编制；收到书面通知后10日内提交资料。",
+        }
+        nodes = [
+            {
+                "clauseId": 42,
+                "nodeType": "DELIVERY",
+                "label": "完成竣工图编制",
+                "date": None,
+                "condition": "两台机组通过168小时试运后45天内",
+                "responsibleParty": "COUNTERPARTY",
+                "businessMeaning": "完成竣工图编制",
+                "confidence": 0.84,
+                "status": "EXTRACTED",
+                "source": "RULE_CANDIDATE",
+                "citation": {"quote": clause["content"], "clauseNumber": "7.2.3", "title": "竣工图设计文件"},
+            },
+            {
+                "clauseId": 42,
+                "nodeType": "NOTICE",
+                "label": "提交资料",
+                "date": None,
+                "condition": "收到书面通知后10日内",
+                "responsibleParty": "COUNTERPARTY",
+                "businessMeaning": "提交资料",
+                "confidence": 0.84,
+                "status": "EXTRACTED",
+                "source": "RULE_CANDIDATE",
+                "citation": {"quote": clause["content"], "clauseNumber": "7.2.3", "title": "竣工图设计文件"},
+            },
+        ]
+        calls = []
+
+        def enrich(candidates):
+            calls.append([candidate["candidateId"] for candidate in candidates])
+            if len(calls) == 1:
+                return {
+                    "nodes": [{
+                        "candidateId": "timeline-1",
+                        "keep": True,
+                        "label": "完成竣工图编制",
+                        "businessMeaning": "乙方应在两台机组通过168小时试运后45天内完成竣工图编制。",
+                        "responsibleParty": "COUNTERPARTY",
+                        "eventType": "DELIVERY",
+                        "confidence": 0.9,
+                    }],
+                }
+            return {
+                "nodes": [{
+                    "candidateId": "timeline-2",
+                    "keep": True,
+                    "label": "提交资料",
+                    "businessMeaning": "收到书面通知后10日内提交合同约定资料。",
+                    "responsibleParty": "COUNTERPARTY",
+                    "eventType": "NOTICE",
+                    "confidence": 0.9,
+                }],
+            }
+
+        with patch.object(parser.LLMService, "enrich_contract_timeline", side_effect=enrich):
+            final_nodes, result = parser._enrich_timeline_nodes(nodes, [clause], strict=True)
+
+        self.assertEqual([["timeline-1", "timeline-2"], ["timeline-2"]], calls)
+        self.assertEqual(2, len(final_nodes))
+        self.assertEqual(2, result["returned"])
+        self.assertEqual(0, result["missing"])
+        self.assertEqual(1, result["retryCount"])
+        self.assertTrue(all(node["source"] == "LLM_ENRICHED" for node in final_nodes))
+
+    def test_final_timeline_allows_partial_llm_review_without_publishing_missing_candidates(self):
+        clause = {
+            "id": 43,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "8",
+            "title": "交付期限",
+            "content": "收到通知后10日内提交资料；验收通过后5日内提交归档文件。",
+        }
+        nodes = [
+            {
+                "clauseId": 43,
+                "nodeType": "DELIVERY",
+                "label": "提交资料",
+                "date": None,
+                "condition": "收到通知后10日内",
+                "responsibleParty": "COUNTERPARTY",
+                "businessMeaning": "提交资料",
+                "confidence": 0.84,
+                "status": "EXTRACTED",
+                "source": "RULE_CANDIDATE",
+                "citation": {"quote": clause["content"], "clauseNumber": "8", "title": "交付期限"},
+            },
+            {
+                "clauseId": 43,
+                "nodeType": "DELIVERY",
+                "label": "提交归档文件",
+                "date": None,
+                "condition": "验收通过后5日内",
+                "responsibleParty": "COUNTERPARTY",
+                "businessMeaning": "提交归档文件",
+                "confidence": 0.84,
+                "status": "EXTRACTED",
+                "source": "RULE_CANDIDATE",
+                "citation": {"quote": clause["content"], "clauseNumber": "8", "title": "交付期限"},
+            },
+        ]
+
+        def enrich(candidates):
+            return {
+                "nodes": [{
+                    "candidateId": "timeline-1",
+                    "keep": True,
+                    "label": "提交资料",
+                    "businessMeaning": "收到书面通知后10日内提交资料。",
+                    "responsibleParty": "COUNTERPARTY",
+                    "eventType": "DELIVERY",
+                    "confidence": 0.9,
+                }],
+            }
+
+        with patch.object(parser.LLMService, "enrich_contract_timeline", side_effect=enrich):
+            final_nodes, result = parser._enrich_timeline_nodes(nodes, [clause], strict=True)
+
+        self.assertEqual(1, len(final_nodes))
+        self.assertEqual("timeline-1", final_nodes[0]["candidateId"])
+        self.assertEqual(1, result["missing"])
+        self.assertEqual(2, result["retryCount"])
+        self.assertEqual("LLM_ENRICHED", result["status"])
 
     def test_rule_fallback_extracts_action_without_exposing_match_prefix(self):
         quote = (

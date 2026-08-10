@@ -881,7 +881,7 @@ def _link_snapshot_to_workflow(
            SET extraction_snapshot_id=%s, extraction_run_id=%s,
                extraction_status='READY_FOR_CONFIRMATION',
                current_stage=CASE
-                   WHEN current_stage='FACT_EXTRACTION' THEN 'RISK_REVIEW'
+                   WHEN current_stage='FACT_EXTRACTION' THEN 'TIMELINE_EXTRACTION'
                    ELSE current_stage
                END,
                last_error=NULL

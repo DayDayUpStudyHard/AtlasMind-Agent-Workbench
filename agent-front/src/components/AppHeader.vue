@@ -366,9 +366,9 @@ function activityMainLabel(activity) {
   }
   if (activity?.pipeline?.status === 'FAILED' || activity?.run?.status === 'FAILED') return '合同处理失败，点击查看原因'
   if (activity?.run?.status === 'COMPLETED') {
-    return activity.run.runType === 'CONTRACT_ELEMENT_EXTRACTION'
-      ? '合同要素已生成，等待确认并可供后续 Agent 复用'
-      : '审查结果已生成，点击查看合同详情'
+    if (activity.run.runType === 'CONTRACT_ELEMENT_EXTRACTION') return '合同要素已生成，正在衔接正式履约日程'
+    if (activity.run.runType === 'TIMELINE_EXTRACTION') return '正式履约日程已生成，正在衔接风险审查'
+    return '审查结果已生成，点击查看合同详情'
   }
   if (activity?.pipeline?.status === 'READY') return '合同文件处理完成，等待下一步'
   return '合同处理记录'
@@ -386,6 +386,7 @@ function runTypeLabel(type) {
     OBLIGATION_EXTRACTION: '义务提取',
     FULFILLMENT_CHECK: '履约核验',
     CONTRACT_ELEMENT_EXTRACTION: '合同要素提取',
+    TIMELINE_EXTRACTION: '正式履约日程',
     HEALTH_ANALYSIS: '健康分析',
     PROJECT_ONBOARDING: '项目接手',
     ENGINEERING_DECISION: '研发决策',

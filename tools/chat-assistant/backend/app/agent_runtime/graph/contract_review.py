@@ -49,8 +49,14 @@ def _route_after_reflection(state: dict[str, Any]) -> str:
 
 
 def _route_after_targeted(state: dict[str, Any]) -> str:
-    """After targeted retrieval, go back to validation then reflection."""
-    return "validate_claims"
+    """After targeted retrieval, re-analyze gap domains with the new evidence.
+
+    Supplementary evidence found during targeted_retrieval must flow back into
+    domain analysis and claim validation before a report is composed.  The
+    coverage_reflection → _route_after_reflection gate enforces at most one
+    retry, so this cannot loop.
+    """
+    return "draft_domain_findings"
 
 
 def build_contract_review_graph(checkpointer: Any = None) -> Any:
@@ -111,10 +117,16 @@ def build_contract_review_graph(checkpointer: Any = None) -> Any:
             "targeted_retrieval": "targeted_retrieval",
         },
     )
-    # Targeted retrieval is a bounded evidence expansion. The resulting
-    # report must remain honest about unresolved coverage instead of looping
-    # through another full LLM pass.
-    builder.add_edge("targeted_retrieval", "compose_limited_report")
+    # Targeted retrieval feeds supplementary evidence back into domain analysis
+    # so gap domains get a second LLM pass before the report is composed.
+    # The coverage_reflection retry gate prevents unbounded loops.
+    builder.add_conditional_edges(
+        "targeted_retrieval",
+        _route_after_targeted,
+        {
+            "draft_domain_findings": "draft_domain_findings",
+        },
+    )
 
     # Report paths with quality gate
     builder.add_edge("compose_report", "validate_schema")

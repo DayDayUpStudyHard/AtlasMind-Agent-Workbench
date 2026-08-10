@@ -50,10 +50,20 @@ class Settings:
     chat_max_tokens: int = int(os.getenv("CHAT_MAX_TOKENS", "2048"))
     chat_temperature: float = float(os.getenv("CHAT_TEMPERATURE", "0.7"))
     project_analysis_timeout_seconds: float = float(os.getenv("PROJECT_ANALYSIS_TIMEOUT_SECONDS", "90"))
-    contract_timeline_llm_timeout_seconds: float = float(os.getenv("CONTRACT_TIMELINE_LLM_TIMEOUT_SECONDS", "20"))
+    contract_timeline_llm_timeout_seconds: float = float(os.getenv("CONTRACT_TIMELINE_LLM_TIMEOUT_SECONDS", "45"))
     contract_timeline_llm_max_candidates: int = int(os.getenv("CONTRACT_TIMELINE_LLM_MAX_CANDIDATES", "24"))
-    contract_timeline_llm_batch_size: int = int(os.getenv("CONTRACT_TIMELINE_LLM_BATCH_SIZE", "8"))
+    contract_timeline_llm_batch_size: int = int(os.getenv("CONTRACT_TIMELINE_LLM_BATCH_SIZE", "3"))
     retrieval_top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "5"))
+
+    # ====== Reranker (LLM cross-encoder for retrieval re-ranking) ======
+    reranker_api_key: str = os.getenv("RERANKER_API_KEY", "")
+    reranker_base_url: str = os.getenv("RERANKER_BASE_URL", "")
+    reranker_model: str = os.getenv("RERANKER_MODEL", "")
+    reranker_timeout_seconds: float = float(os.getenv("RERANKER_TIMEOUT_SECONDS", "15"))
+    reranker_recall_multiplier: int = int(os.getenv("RERANKER_RECALL_MULTIPLIER", "6"))
+    reranker_min_recall: int = int(os.getenv("RERANKER_MIN_RECALL", "30"))
+    reranker_max_recall: int = int(os.getenv("RERANKER_MAX_RECALL", "50"))
+
     internal_token: str = os.getenv("CHAT_ASSISTANT_TOKEN", "")
     java_backend_url: str = os.getenv("JAVA_BACKEND_URL", "http://localhost:18080")
     kb_chunk_insert_batch_size: int = int(os.getenv("KB_CHUNK_INSERT_BATCH_SIZE", "200"))

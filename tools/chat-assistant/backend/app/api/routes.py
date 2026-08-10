@@ -239,6 +239,22 @@ def _init_contract_runtime():
             logger.info("Registered contract_extraction graph adapter")
         except Exception as exc:
             logger.warning("contract_extraction graph init failed: %s", exc)
+        try:
+            from app.agent_runtime.graph.timeline_extraction import build_timeline_extraction_graph
+            timeline_graph = build_timeline_extraction_graph(checkpointer=checkpointer)
+            _contract_runtime_router.register(
+                "timeline_extraction",
+                GraphAdapter(
+                    timeline_graph,
+                    checkpointer,
+                    graph_name="timeline_extraction",
+                    graph_version="v1",
+                    run_store=run_store,
+                ),
+            )
+            logger.info("Registered timeline_extraction graph adapter")
+        except Exception as exc:
+            logger.warning("timeline_extraction graph init failed: %s", exc)
         logger.info("Graph adapters registered via RuntimeRouter")
     except Exception as exc:
         logger.info("Graph adapters not available (LangGraph may not be installed): %s", exc)
@@ -1390,6 +1406,25 @@ async def _dispatch_via_router(router, request) -> None:
     run_id = request.run_id
     heartbeat_task: asyncio.Task | None = None
 
+    async def mark_timeline_failed(error_message: str) -> None:
+        if request.task_type != "TIMELINE_EXTRACTION":
+            return
+        from app.agent_runtime.persistence import _conn
+
+        def _mark() -> None:
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE contract_analysis_workflow
+                           SET timeline_status='FAILED', current_stage='TIMELINE_EXTRACTION',
+                               last_error=%s
+                           WHERE id=(SELECT workflow_id FROM agent_run WHERE id=%s)""",
+                        (str(error_message or "正式履约日程生成失败")[:4000], run_id),
+                    )
+                conn.commit()
+
+        await asyncio.to_thread(_mark)
+
     async def mark_extraction_failed(error_message: str) -> None:
         if request.task_type != "CONTRACT_ELEMENT_EXTRACTION":
             return
@@ -1437,6 +1472,8 @@ async def _dispatch_via_router(router, request) -> None:
                     progress=100,
                     current_step=f"合同要素已生成（快照 #{snapshot_id}）",
                 )
+                if bool((request.task_input or {}).get("autoPipeline")):
+                    await _enqueue_contract_pipeline_followup(router, request, "TIMELINE_EXTRACTION")
                 return
             # Graphs normally persist inside persist_report. Keep a second
             # guard here so a successful graph response cannot hide a missing
@@ -1470,12 +1507,15 @@ async def _dispatch_via_router(router, request) -> None:
                 return
             await run_store.update_run(run_id, status="COMPLETED", progress=100,
                                        current_step="Graph 产物已生成")
+            if request.task_type == "TIMELINE_EXTRACTION" and bool((request.task_input or {}).get("autoPipeline")):
+                await _enqueue_contract_pipeline_followup(router, request, "CONTRACT_REVIEW")
         else:
             # FAILED or other
             error_msg = str((result.artifact or {}).get("artifactError", "Graph execution failed"))[:500]
             await run_store.update_run(run_id, status="FAILED", progress=0,
                                        error_message=error_msg)
             await mark_extraction_failed(error_msg)
+            await mark_timeline_failed(error_msg)
     except Exception as exc:
         logger.exception("Graph dispatch failed for run %s", run_id)
         error_message = str(exc)[:500]
@@ -1485,6 +1525,7 @@ async def _dispatch_via_router(router, request) -> None:
         except Exception:
             pass
         await mark_extraction_failed(error_message)
+        await mark_timeline_failed(error_message)
     finally:
         if heartbeat_task is not None:
             heartbeat_task.cancel()
@@ -1492,6 +1533,116 @@ async def _dispatch_via_router(router, request) -> None:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+
+async def _enqueue_contract_pipeline_followup(router, parent_request, task_type: str) -> int | None:
+    """Create and dispatch the next background stage for one analysis workflow."""
+    from app.agent_runtime.api_models import StartRunRequest
+    from app.agent_runtime.persistence import _conn, _json_dumps
+
+    questions = {
+        "TIMELINE_EXTRACTION": "生成经 LLM 语义复核的正式履约日程",
+        "CONTRACT_REVIEW": "复用合同画像和正式履约日程进行合同风险审查",
+    }
+    workflow_stages = {
+        "TIMELINE_EXTRACTION": "TIMELINE_EXTRACTION",
+        "CONTRACT_REVIEW": "RISK_REVIEW",
+    }
+
+    def _create() -> tuple[int | None, dict]:
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT workflow_id AS workflowId, initiated_by AS initiatedBy,
+                              evidence_snapshot_hash AS evidenceSnapshotHash,
+                              document_snapshot_json AS documentSnapshotJson
+                       FROM agent_run WHERE id=%s""",
+                    (parent_request.run_id,),
+                )
+                parent = cur.fetchone() or {}
+                workflow_id = parent.get("workflowId")
+                if not workflow_id:
+                    return None, {}
+                cur.execute(
+                    """SELECT id, status FROM agent_run
+                       WHERE workflow_id=%s AND run_type=%s
+                         AND status IN ('CREATED','CONTEXT_BUILDING','PLANNING','ANALYZING',
+                                        'VERIFYING','WAITING_HUMAN','WAITING_APPROVAL')
+                       ORDER BY id DESC LIMIT 1""",
+                    (workflow_id, task_type),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    return None, {}
+
+                task_input = dict(parent_request.task_input or {})
+                task_input["autoPipeline"] = True
+                task_input["pipelineParentRunId"] = parent_request.run_id
+                cur.execute(
+                    """INSERT INTO agent_run
+                       (subject_type, subject_id, project_id, run_type, trigger_type,
+                        question, input_json, workflow_id, workflow_stage,
+                        evidence_snapshot_hash, document_snapshot_json, initiated_by,
+                        status, progress, current_step)
+                       VALUES (%s,%s,%s,%s,'AUTO',%s,%s,%s,%s,%s,%s,%s,
+                               'CREATED',0,'等待前序分析结果')""",
+                    (
+                        parent_request.subject_type,
+                        parent_request.subject_id,
+                        parent_request.project_id,
+                        task_type,
+                        questions[task_type],
+                        _json_dumps(task_input),
+                        workflow_id,
+                        workflow_stages[task_type],
+                        parent.get("evidenceSnapshotHash"),
+                        parent.get("documentSnapshotJson"),
+                        parent.get("initiatedBy"),
+                    ),
+                )
+                next_run_id = int(cur.lastrowid)
+                if task_type == "TIMELINE_EXTRACTION":
+                    cur.execute(
+                        """UPDATE contract_analysis_workflow
+                           SET timeline_run_id=%s, timeline_status='RUNNING',
+                               current_stage='TIMELINE_EXTRACTION', last_error=NULL
+                           WHERE id=%s""",
+                        (next_run_id, workflow_id),
+                    )
+                else:
+                    cur.execute(
+                        """UPDATE contract_analysis_workflow
+                           SET review_run_id=%s, status='REVIEWING',
+                               current_stage='RISK_REVIEW', last_error=NULL
+                           WHERE id=%s""",
+                        (next_run_id, workflow_id),
+                    )
+            conn.commit()
+        payload = {
+            "requestId": f"auto-pipeline-{next_run_id}",
+            "runId": next_run_id,
+            "subjectType": parent_request.subject_type,
+            "subjectId": parent_request.subject_id,
+            "projectId": parent_request.project_id,
+            "taskType": task_type,
+            "question": questions[task_type],
+            "actor": "analysis-pipeline",
+            "project": parent_request.project,
+            "taskInput": task_input,
+            "options": {},
+        }
+        return next_run_id, payload
+
+    next_run_id, payload = await asyncio.to_thread(_create)
+    if not next_run_id:
+        return None
+    next_request = StartRunRequest(payload)
+    task = asyncio.create_task(_dispatch_via_router(router, next_request))
+    request_id = next_request.request_id
+    if request_id:
+        _active_runs[request_id] = task
+        task.add_done_callback(lambda _t, rid=request_id: _active_runs.pop(rid, None))
+    return next_run_id
 
 
 async def _graph_heartbeat_loop(run_store, run_id: int) -> None:

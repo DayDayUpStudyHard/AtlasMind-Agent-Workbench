@@ -68,6 +68,39 @@ class CircuitBreaker:
 
 _llm_circuit_breaker = CircuitBreaker()
 
+
+def _compact_timeline_candidate_for_llm(item: dict, max_clause_chars: int = 4500) -> dict:
+    """Keep a timeline candidate small enough for reliable JSON review.
+
+    The persisted citation still carries the full clause. This payload keeps the
+    quote plus surrounding clause context so the model can judge the actual
+    obligation without timing out on very long engineering clauses.
+    """
+    prepared = dict(item)
+    clause_text = str(prepared.get("clauseText") or "")
+    quote = str(prepared.get("quote") or prepared.get("matchedText") or "").strip()
+    max_clause_chars = max(1200, int(max_clause_chars))
+    if len(clause_text) <= max_clause_chars:
+        prepared["clauseText"] = clause_text
+        prepared["clauseTextWasTruncated"] = False
+        prepared["originalClauseTextLength"] = len(clause_text)
+        return prepared
+
+    anchor = clause_text.find(quote) if quote else -1
+    if anchor < 0:
+        anchor = max(0, len(clause_text) // 2)
+    half_window = max_clause_chars // 2
+    start = max(0, anchor - half_window)
+    end = min(len(clause_text), start + max_clause_chars)
+    start = max(0, end - max_clause_chars)
+    excerpt = clause_text[start:end]
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(clause_text) else ""
+    prepared["clauseText"] = f"{prefix}{excerpt}{suffix}"
+    prepared["clauseTextWasTruncated"] = True
+    prepared["originalClauseTextLength"] = len(clause_text)
+    return prepared
+
 RAG_SYSTEM_PROMPT = """你是 AtlasMind Agent Workbench 的企业知识库 AI 助手。你的知识来源于企业内部知识内容和上传文档（Markdown/TXT/PDF），涵盖研发文档、项目复盘、制度 SOP、FAQ 和交付资料。
 
 ## 核心原则
@@ -1091,7 +1124,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
         all_nodes: list[dict] = []
         errors: list[str] = []
         max_candidates = max(0, int(settings.contract_timeline_llm_max_candidates or 0))
-        batch_size = max(1, int(settings.contract_timeline_llm_batch_size or 8))
+        batch_size = max(1, int(settings.contract_timeline_llm_batch_size or 3))
         selected_candidates = candidates[:max_candidates]
         if not selected_candidates:
             return {"nodes": [], "errors": ["timeline enrichment disabled or no candidates"]}
@@ -1101,7 +1134,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
         for start in range(0, len(selected_candidates), batch_size):
             payload = {
                 "candidates": [
-                    {**item, "clauseText": str(item.get("clauseText") or "")[:12000]}
+                    _compact_timeline_candidate_for_llm(item)
                     for item in selected_candidates[start:start + batch_size]
                 ]
             }
@@ -1120,9 +1153,11 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                     }
                     if structured:
                         kwargs["response_format"] = {"type": "json_object"}
+                    if self._uses_deepseek_reasoning_model():
+                        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
                     response = self._call_llm_with_retry(
                         lambda kwargs=kwargs: timeline_client.chat.completions.create(**kwargs),
-                        max_retries=0,
+                        max_retries=1,
                         backoff_base=1.0,
                     )
                     message = response.choices[0].message if response.choices else None

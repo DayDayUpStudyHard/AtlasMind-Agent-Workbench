@@ -1184,10 +1184,16 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             analysisWorkflow.put("evidenceSnapshotHash", evidenceSnapshotHash);
             analysisWorkflow.put("confirmedVersion", workflow.get("confirmedVersion"));
             inputJson.put("analysisWorkflow", analysisWorkflow);
-        } else if ("CONTRACT_ELEMENT_EXTRACTION".equals(taskType)) {
+        } else if ("CONTRACT_ELEMENT_EXTRACTION".equals(taskType)
+                || "TIMELINE_EXTRACTION".equals(taskType)) {
             Map<String, Object> workflow = prepareExtractionWorkflow(caseId, inputJson);
+            if ("TIMELINE_EXTRACTION".equals(taskType)
+                    && numberAsLongOrNull(workflow.get("extractionSnapshotId")) == null) {
+                throw new IllegalArgumentException("请先完成合同要素提取，再生成正式履约日程");
+            }
             workflowId = numberAsLong(workflow.get("id"));
-            workflowStage = "FACT_EXTRACTION";
+            workflowStage = "TIMELINE_EXTRACTION".equals(taskType)
+                    ? "TIMELINE_EXTRACTION" : "FACT_EXTRACTION";
             evidenceSnapshotHash = str(workflow, "evidenceSnapshotHash");
             Map<String, Object> analysisWorkflow = new LinkedHashMap<>();
             analysisWorkflow.put("workflowId", workflowId);
@@ -1264,6 +1270,14 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     UPDATE contract_analysis_workflow
                     SET extraction_run_id=?, extraction_status='RUNNING',
                         current_stage='FACT_EXTRACTION', last_error=NULL
+                    WHERE id=?
+                    """, runId, workflowId);
+            jdbcTemplate.update("UPDATE contract_case SET last_run_id=?, last_run_at=NOW() WHERE id=?", runId, caseId);
+        } else if ("TIMELINE_EXTRACTION".equals(taskType)) {
+            jdbcTemplate.update("""
+                    UPDATE contract_analysis_workflow
+                    SET timeline_run_id=?, timeline_status='RUNNING',
+                        current_stage='TIMELINE_EXTRACTION', last_error=NULL
                     WHERE id=?
                     """, runId, workflowId);
             jdbcTemplate.update("UPDATE contract_case SET last_run_id=?, last_run_at=NOW() WHERE id=?", runId, caseId);
@@ -1797,6 +1811,13 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                                 last_error=?
                             WHERE id=?
                             """, errorMessage, workflowId);
+                } else if ("TIMELINE_EXTRACTION".equals(taskType)) {
+                    jdbcTemplate.update("""
+                            UPDATE contract_analysis_workflow
+                            SET timeline_status='FAILED', current_stage='TIMELINE_EXTRACTION',
+                                last_error=?
+                            WHERE id=?
+                            """, errorMessage, workflowId);
                 } else if ("CONTRACT_REVIEW".equals(taskType)) {
                     jdbcTemplate.update("""
                             UPDATE contract_analysis_workflow
@@ -1937,6 +1958,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
                        review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
                        extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                       timeline_run_id AS timelineRunId, timeline_status AS timelineStatus,
                        last_error AS lastError,
                        confirmed_at AS confirmedAt, create_time AS createTime, update_time AS updateTime
                 FROM contract_analysis_workflow
@@ -1976,6 +1998,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                        confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
                        review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
                        extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                       timeline_run_id AS timelineRunId, timeline_status AS timelineStatus,
                        last_error AS lastError
                 FROM contract_analysis_workflow
                 WHERE case_id=? AND document_id=?
@@ -1998,6 +2021,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                            confirmed_version AS confirmedVersion, status, current_stage AS currentStage,
                            review_run_id AS reviewRunId, extraction_snapshot_id AS extractionSnapshotId,
                            extraction_run_id AS extractionRunId, extraction_status AS extractionStatus,
+                            timeline_run_id AS timelineRunId, timeline_status AS timelineStatus,
                            last_error AS lastError
                     FROM contract_analysis_workflow WHERE id=?
                     """, workflowId));
@@ -2060,6 +2084,12 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         }
         if ("FACT_EXTRACTION".equals(stage) && "RUNNING".equalsIgnoreCase(str(workflow, "extractionStatus"))) {
             throw new IllegalArgumentException("合同要素提取正在运行，请等待当前任务完成");
+        }
+        if ("RUNNING".equalsIgnoreCase(str(workflow, "timelineStatus"))) {
+            throw new IllegalArgumentException("正式履约日程正在生成，请等待当前任务完成");
+        }
+        if (!"COMPLETED".equalsIgnoreCase(str(workflow, "timelineStatus"))) {
+            throw new IllegalArgumentException("请先生成正式履约日程，再发起风险审查");
         }
         if ("WAITING_CONFIRMATION".equals(status)) {
             throw new IllegalArgumentException("请先确认合同识别结果，再发起风险审查");
@@ -2432,13 +2462,6 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         List<Map<String, Object>> nodes = new ArrayList<>();
         Set<String> seen = new LinkedHashSet<>();
 
-        addTimelineNode(nodes, seen, "CONTRACT_START", "合同开始", objectDate(contractCase.get("effectiveDate")),
-                null, "CASE_FIELD", caseId, str(contractCase, "title"),
-                "来自合同案件的生效日期", "CASE_FIELD", "PLANNED");
-        addTimelineNode(nodes, seen, "CONTRACT_END", "合同结束/到期", objectDate(contractCase.get("expiryDate")),
-                null, "CASE_FIELD", caseId, str(contractCase, "title"),
-                "来自合同案件的到期日期", "CASE_FIELD", "PLANNED");
-
         List<Map<String, Object>> extractedNodes = jdbcTemplate.queryForList("""
                 SELECT n.id, n.node_type AS nodeType, n.label,
                        n.node_date AS nodeDate, n.condition_text AS conditionText,
@@ -2453,6 +2476,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 FROM contract_timeline_node n
                 LEFT JOIN contract_clause c ON c.id=n.clause_id
                 WHERE n.case_id=?
+                  AND (n.source='AGENT_FINAL' OR n.manual_override=1)
                 ORDER BY COALESCE(n.node_date, '9999-12-31'), n.id
                 LIMIT 80
                 """, caseId);
@@ -2486,43 +2510,6 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 added.put("reviewNote", str(node, "reviewNote"));
                 added.put("reviewedBy", str(node, "reviewedBy"));
                 added.put("reviewedAt", node.get("reviewedAt"));
-            }
-        }
-
-        List<Map<String, Object>> obligations = jdbcTemplate.queryForList("""
-                SELECT id, title, obligation_type AS obligationType,
-                       due_date AS dueDate, trigger_condition AS triggerCondition,
-                       status, evidence_required AS evidenceRequired
-                FROM contract_obligation
-                WHERE case_id=?
-                ORDER BY due_date ASC, id ASC
-                """, caseId);
-        for (Map<String, Object> obligation : obligations) {
-            String title = str(obligation, "title");
-            String trigger = str(obligation, "triggerCondition");
-            String description = trigger.isBlank()
-                    ? "来自 Agent 或人工沉淀的履约义务"
-                    : "触发条件：" + trigger;
-            addTimelineNode(nodes, seen, str(obligation, "obligationType"), title,
-                    objectDate(obligation.get("dueDate")), trigger,
-                    "OBLIGATION", obligation.get("id"), title,
-                    description, "AGENT_OBLIGATION", str(obligation, "status"));
-        }
-
-        if (extractedNodes.isEmpty()) {
-            List<Map<String, Object>> clauses = jdbcTemplate.queryForList("""
-                    SELECT id, clause_type AS clauseType, clause_number AS clauseNumber,
-                           title, content
-                    FROM contract_clause
-                    WHERE case_id=?
-                    ORDER BY id ASC
-                    LIMIT 160
-                    """, caseId);
-            Integer inferredYear = Optional.ofNullable(objectDate(contractCase.get("effectiveDate")))
-                    .map(LocalDate::getYear)
-                    .orElseGet(() -> LocalDate.now().getYear());
-            for (Map<String, Object> clause : clauses) {
-                extractClauseTimeNodes(nodes, seen, clause, inferredYear);
             }
         }
 

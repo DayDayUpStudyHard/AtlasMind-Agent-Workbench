@@ -434,16 +434,11 @@ def parse_contract_document(document_id: int) -> dict:
 
                 chunks = _persist_contract_chunks(cur, job_id, document["case_id"], document_id, persisted_clauses)
                 conn.commit()
-                timeline_nodes = _persist_timeline_nodes(
-                    cur,
-                    job_id,
-                    document["case_id"],
-                    document_id,
-                    persisted_clauses,
-                    parsed.get("diagnostics") or {},
-                    commit_callback=conn.commit,
-                )
-                conn.commit()
+                # Timeline candidates are intentionally not published during
+                # parsing. The analysis pipeline creates the user-facing
+                # schedule only after the fact snapshot is ready and the LLM
+                # has reviewed every published candidate.
+                timeline_nodes = []
                 lifecycle_conditions = _persist_lifecycle_conditions(
                     cur,
                     job_id,
@@ -605,6 +600,93 @@ def parse_inline_document(document_id: int) -> dict:
     return parse_contract_document(document_id)
 
 
+def extract_final_contract_timeline(case_id: int, run_id: int) -> dict:
+    """Publish the final, LLM-reviewed fulfillment schedule for one contract.
+
+    Parsing owns text and clause evidence only. This task runs after the fact
+    snapshot is ready, reuses those clauses, and replaces only non-manual
+    schedule nodes. Rule-only candidates are deliberately not published.
+    """
+    with new_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT id, version, parse_diagnostics_json AS parseDiagnostics
+                   FROM contract_document
+                   WHERE case_id=%s AND document_type='MAIN'
+                     AND parse_status='READY' AND COALESCE(deleted,0)=0
+                   ORDER BY version DESC, id DESC LIMIT 1""",
+                (case_id,),
+            )
+            document = cur.fetchone()
+            if not document:
+                raise ValueError("合同正文尚未解析完成，无法生成正式履约日程")
+
+            document_id = int(document["id"])
+            cur.execute(
+                """SELECT id, clause_number AS clauseNumber, title, content,
+                          clause_type AS clauseType, page_number AS pageNumber,
+                          start_offset AS startOffset, end_offset AS endOffset
+                   FROM contract_clause
+                   WHERE case_id=%s AND document_id=%s
+                   ORDER BY id""",
+                (case_id, document_id),
+            )
+            clauses = list(cur.fetchall())
+            if not clauses:
+                raise ValueError("合同条款证据为空，无法生成正式履约日程")
+
+            diagnostics = document.get("parseDiagnostics")
+            if isinstance(diagnostics, str):
+                try:
+                    diagnostics = json.loads(diagnostics)
+                except Exception:
+                    diagnostics = {}
+            if not isinstance(diagnostics, dict):
+                diagnostics = {}
+
+            # Keep manually maintained nodes intact. Previously published
+            # automatic nodes are replaced atomically by this version.
+            cur.execute(
+                """DELETE FROM contract_timeline_node
+                   WHERE case_id=%s AND document_id=%s AND manual_override=0""",
+                (case_id, document_id),
+            )
+            nodes = _persist_timeline_nodes(
+                cur,
+                None,
+                case_id,
+                document_id,
+                clauses,
+                diagnostics,
+                require_llm=True,
+                published_source="AGENT_FINAL",
+            )
+            cur.execute(
+                """UPDATE contract_analysis_workflow
+                   SET timeline_run_id=%s, timeline_status='COMPLETED',
+                       current_stage='RISK_REVIEW', last_error=NULL
+                   WHERE case_id=%s AND document_id=%s""",
+                (run_id, case_id, document_id),
+            )
+        conn.commit()
+
+    return {
+        "reportType": "TIMELINE_EXTRACTION_REPORT",
+        "title": "正式履约日程",
+        "summary": f"已基于合同条款证据生成 {len(nodes)} 个经语义复核的履约节点。",
+        "analysisMode": "LLM_REVIEWED_TIMELINE",
+        "documentId": document_id,
+        "documentVersion": int(document.get("version") or 1),
+        "timelineNodeCount": len(nodes),
+        "nodes": nodes,
+        "content": {
+            "timelineNodeCount": len(nodes),
+            "publicationStatus": "FINAL",
+            "ruleOnlyFallbackPublished": False,
+        },
+    }
+
+
 def _persist_contract_chunks(
     cur,
     job_id: int | None,
@@ -680,6 +762,8 @@ def _persist_timeline_nodes(
     clauses: list[dict],
     parse_diagnostics: dict | None = None,
     commit_callback=None,
+    require_llm: bool = False,
+    published_source: str | None = None,
 ) -> list[dict]:
     _update_job(cur, job_id, "PROCESSING", "TIMELINE_EXTRACTING", 88)
     if commit_callback:
@@ -710,7 +794,12 @@ def _persist_timeline_nodes(
                 "requiresReview": True,
                 "qualityNotice": "原文可能存在识别误差，日期和数字请核对合同原页",
             }
-    nodes, enrichment = _enrich_timeline_nodes(nodes, clauses)
+    nodes, enrichment = _enrich_timeline_nodes(nodes, clauses, strict=require_llm)
+    if require_llm and candidate_count and enrichment.get("status") != "LLM_ENRICHED":
+        raise RuntimeError("正式履约日程语义复核暂不可用，请稍后重试")
+    if published_source:
+        for node in nodes:
+            node["source"] = published_source
 
     inserted = []
     for node in nodes:
@@ -748,6 +837,8 @@ def _persist_timeline_nodes(
         {
             "candidateCount": candidate_count,
             "timelineNodeCount": len(inserted),
+            "llmReviewedCandidateCount": int(enrichment.get("returned") or 0),
+            "pendingSemanticReviewCount": int(enrichment.get("missing") or 0),
             "needsReview": len([n for n in inserted if n["status"] == "NEEDS_REVIEW"]),
             "needsRecognition": len([n for n in inserted if n["citation"].get("textQuality", {}).get("requiresReview")]),
             "enrichment": enrichment,
@@ -1251,7 +1342,9 @@ def _write_preprocess_parties(cur, document_id: int, case_id: int, parties: list
         )
 
 
-def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list[dict], dict]:
+def _enrich_timeline_nodes(
+    nodes: list[dict], clauses: list[dict], *, strict: bool = False
+) -> tuple[list[dict], dict]:
     if not nodes:
         return [], {"status": "SKIPPED", "reason": "NO_CANDIDATES"}
     clause_text_by_id = {
@@ -1284,11 +1377,42 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
     except Exception as exc:
         logger.warning("Contract timeline LLM enrichment failed: %s", exc)
         return nodes, {"status": "FALLBACK_RULE", "error": str(exc)[:300]}
-    result_by_id = {
-        str(item.get("candidateId")): item
-        for item in (response.get("nodes") or [])
-        if isinstance(item, dict) and item.get("candidateId")
-    }
+
+    result_by_id = _timeline_results_by_id(response)
+    retry_count = 0
+    retry_errors: list[str] = []
+    # Compatible models occasionally omit candidates from a large JSON response.
+    # Re-submit only the omitted candidates in short batches. This preserves the
+    # rule->LLM quality gate while avoiding a whole workflow failure for a
+    # partial model response.
+    if strict:
+        missing_candidates = [
+            candidate for candidate in candidates
+            if candidate["candidateId"] not in result_by_id
+        ]
+        for attempt in range(2):
+            if not missing_candidates:
+                break
+            retry_count += 1
+            recovered: dict[str, dict] = {}
+            for batch_start in range(0, len(missing_candidates), 8):
+                batch = missing_candidates[batch_start:batch_start + 8]
+                try:
+                    retry_response = LLMService().enrich_contract_timeline(batch)
+                    recovered.update(_timeline_results_by_id(retry_response))
+                except Exception as exc:
+                    retry_errors.append(str(exc)[:300])
+                    logger.warning(
+                        "Contract timeline LLM retry %s failed for %s candidates: %s",
+                        attempt + 1,
+                        len(batch),
+                        exc,
+                    )
+            result_by_id.update(recovered)
+            missing_candidates = [
+                candidate for candidate in missing_candidates
+                if candidate["candidateId"] not in result_by_id
+            ]
     enriched: list[dict] = []
     dropped = 0
     for node in nodes:
@@ -1328,7 +1452,7 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
             }
             if node["confidence"] < 0.8:
                 node["status"] = "NEEDS_REVIEW"
-        else:
+        elif not strict:
             explicit_consequence = _rule_explicit_consequence(
                 str(node.get("citation", {}).get("quote") or "")
             )
@@ -1336,13 +1460,28 @@ def _enrich_timeline_nodes(nodes: list[dict], clauses: list[dict]) -> tuple[list
                 node["citation"].setdefault("timelineEnrichment", {})
                 node["citation"]["timelineEnrichment"]["explicitConsequence"] = explicit_consequence
                 node["citation"]["timelineEnrichment"]["aiRisk"] = _normalize_ai_risk(_rule_ai_risk(node))
+        else:
+            dropped += 1
+            continue
         enriched.append(node)
-    enriched.extend(nodes[60:])
+    if not strict:
+        enriched.extend(nodes[60:])
     return enriched, {
         "status": "LLM_ENRICHED",
         "requested": len(candidates),
         "returned": len(result_by_id),
+        "missing": len(candidates) - len(result_by_id),
         "dropped": dropped,
+        "retryCount": retry_count,
+        "retryErrors": retry_errors,
+    }
+
+
+def _timeline_results_by_id(response: dict | None) -> dict[str, dict]:
+    return {
+        str(item.get("candidateId")): item
+        for item in ((response or {}).get("nodes") or [])
+        if isinstance(item, dict) and item.get("candidateId")
     }
 
 
@@ -1893,13 +2032,14 @@ def _parse_document_content(cur, job_id: int | None, document_id: int, document:
         parser = f"document-parser:{parser_provider}"
 
     content = normalize_document_text("\n\n".join(block.text for block in blocks if block.text.strip()))
-    diagnostics.setdefault("quality", assess_extracted_text_quality(content))
     if file_type in {"DOC", "DOCX"}:
         diagnostics = {
             "provider": parser,
             "quality": assess_extracted_text_quality(content),
             "requiresReparse": False,
         }
+    else:
+        diagnostics.setdefault("quality", assess_extracted_text_quality(content))
     pages = [block.source_page for block in blocks if block.source_page]
     stage = "DOC_CONVERSION" if file_type == "DOC" else "DOCX_PARSING" if file_type == "DOCX" else "PDF_RECOGNITION_OPTIMIZATION" if diagnostics.get("qualityEscalated") else "PDF_PARSING" if file_type == "PDF" else "TEXT_PARSING"
     if file_type == "PDF":

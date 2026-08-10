@@ -221,4 +221,8 @@ def targeted_retrieval(state: dict[str, Any]) -> dict[str, Any]:
         "domain_results": domain_results,
         "citations": citations,
         "observations": observations,
+        # Signal draft_domain_findings to only re-analyze domains that
+        # received supplementary evidence, keeping existing findings for
+        # already-covered domains intact.
+        "gap_domains": sorted(missing),
     }

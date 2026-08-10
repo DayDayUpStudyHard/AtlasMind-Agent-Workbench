@@ -35,6 +35,7 @@ _NODE_PROGRESS: dict[str, tuple[str, int, str]] = {
     "coverage_reflection": ("VERIFYING", 84, "Reflection 正在检查证据覆盖"),
     "targeted_retrieval": ("VERIFYING", 87, "正在补充检索缺失证据"),
     "persist_extraction_snapshot": ("VERIFYING", 96, "正在保存可复用合同事实快照"),
+    "publish_final_timeline": ("VERIFYING", 96, "正在发布经 LLM 复核的正式履约日程"),
     "decompose_requirements": ("PLANNING", 30, "正在拆解当前履约节点的合同要求"),
     "retrieve_fulfillment_evidence": ("ANALYZING", 48, "正在检索合同条款与已上传履约材料"),
     "judge_each_requirement": ("ANALYZING", 68, "正在逐项比对合同要求与履约证据"),

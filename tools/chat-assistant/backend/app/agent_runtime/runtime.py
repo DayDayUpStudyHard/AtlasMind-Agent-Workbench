@@ -516,10 +516,12 @@ class RuntimeRouter:
         # by default while still allowing DB or environment configuration to
         # opt out during a rollback.
         if (
-            task_type == "CONTRACT_ELEMENT_EXTRACTION"
+            task_type in {"CONTRACT_ELEMENT_EXTRACTION", "TIMELINE_EXTRACTION"}
             and not has_db_override
             and not env_override
-            and self._adapters.get("contract_extraction") is not None
+            and self._adapters.get(
+                "timeline_extraction" if task_type == "TIMELINE_EXTRACTION" else "contract_extraction"
+            ) is not None
         ):
             resolved = "langgraph"
 
@@ -529,6 +531,7 @@ class RuntimeRouter:
                 "CONTRACT_REVIEW": "contract_review",
                 "FULFILLMENT_CHECK": "fulfillment_check",
                 "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
+                "TIMELINE_EXTRACTION": "timeline_extraction",
             }.get(task_type, "")
             if graph_name:
                 adapter = self._adapters.get(graph_name)
@@ -563,6 +566,7 @@ class RuntimeRouter:
                 "CONTRACT_REVIEW": "contract_review",
                 "FULFILLMENT_CHECK": "fulfillment_check",
                 "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
+                "TIMELINE_EXTRACTION": "timeline_extraction",
             }.get(context.task_type, "")
             adapter = self._adapters.get(graph_name) if graph_name else None
         else:
@@ -604,6 +608,7 @@ class RuntimeRouter:
                             "FULFILLMENT_CHECK": "fulfillment_check",
                             "CONTRACT_REVIEW": "contract_review",
                             "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
+                            "TIMELINE_EXTRACTION": "timeline_extraction",
                         }
                         graph_name = _TASK_TO_GRAPH.get(run_type)
         except Exception:

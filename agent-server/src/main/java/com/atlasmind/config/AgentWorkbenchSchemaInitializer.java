@@ -292,6 +292,8 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         addColumnIfMissing("contract_analysis_workflow", "extraction_snapshot_id", "BIGINT");
         addColumnIfMissing("contract_analysis_workflow", "extraction_run_id", "BIGINT");
         addColumnIfMissing("contract_analysis_workflow", "extraction_status", "VARCHAR(32)");
+        addColumnIfMissing("contract_analysis_workflow", "timeline_run_id", "BIGINT");
+        addColumnIfMissing("contract_analysis_workflow", "timeline_status", "VARCHAR(32)");
         addContractExtractionProfileColumnsIfPresent();
         addContractFactReviewColumnsIfPresent();
         addColumnIfMissing("contract_timeline_node", "review_status", "VARCHAR(32)");

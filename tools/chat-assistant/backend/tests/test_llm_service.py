@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from app.services.llm_service import LLMService
+from app.services.llm_service import LLMService, _compact_timeline_candidate_for_llm
 
 
 def response(content="", reasoning_content=""):
@@ -91,6 +91,21 @@ class LlmServiceStructuredResponseTest(unittest.TestCase):
 
         if service._uses_deepseek_reasoning_model():
             self.assertEqual({"thinking": {"type": "disabled"}}, calls[0]["extra_body"])
+
+    def test_compacts_long_timeline_clause_around_quote(self):
+        clause = "前文" * 1200 + "收到发票后10日内付款" + "后文" * 1200
+        candidate = {
+            "candidateId": "timeline-1",
+            "quote": "收到发票后10日内付款",
+            "clauseText": clause,
+        }
+
+        compacted = _compact_timeline_candidate_for_llm(candidate, max_clause_chars=1200)
+
+        self.assertLess(len(compacted["clauseText"]), len(clause))
+        self.assertIn("收到发票后10日内付款", compacted["clauseText"])
+        self.assertTrue(compacted["clauseTextWasTruncated"])
+        self.assertEqual(len(clause), compacted["originalClauseTextLength"])
 
 
 if __name__ == "__main__":

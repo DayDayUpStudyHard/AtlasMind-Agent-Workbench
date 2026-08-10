@@ -13,6 +13,8 @@ import re
 from typing import Any
 
 from .persistence import _conn, _run_sync, _normalize_value
+from .reranker import get_reranker
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -607,7 +609,11 @@ class ContractStore:
             # never a pretend vector fallback.
             return (keyword_hits or await _run_sync(_fallback_keyword))[:top_k]
 
-        candidate_k = max(top_k * 4, 20)
+        # Recall 30–50 candidates (configurable) for the reranker to narrow to 8–12.
+        candidate_k = min(
+            max(top_k * settings.reranker_recall_multiplier, settings.reranker_min_recall),
+            settings.reranker_max_recall,
+        )
         vector_hits: list[dict] = []
         es_keyword_hits: list[dict] = []
         try:
@@ -625,7 +631,10 @@ class ContractStore:
         )
         if not hits:
             return keyword_hits
-        hits = _rerank_contract_hits(query, hits)[:top_k]
+        # LLM cross-encoder reranker: semantic relevance &gt; keyword bonus.
+        # Falls back to keyword heuristics when RERANKER_API_KEY is not configured.
+        reranker = get_reranker()
+        hits = reranker.rerank_contract_clauses(query, hits, top_k)
 
         clause_ids = [h.get("clauseId") for h in hits if h.get("clauseId")]
         if not clause_ids:
@@ -695,7 +704,7 @@ class ContractStore:
     async def _timeline(self, case_id: int, query: str, limit: int) -> list[dict]:
         def _get():
             params: list[Any] = [case_id]
-            where = "n.case_id=%s"
+            where = "n.case_id=%s AND (n.source='AGENT_FINAL' OR n.manual_override=1)"
             if query:
                 like = f"%{query}%"
                 where += """ AND (
@@ -740,6 +749,10 @@ class ContractStore:
         limit = max(1, min(10, int(arguments.get("limit", 5))))
         standard_limit = max(1, min(3, limit // 2 or 1))
         kb_limit = max(1, limit - standard_limit)
+        # Recall more candidates for the reranker to narrow down.
+        standard_recall = min(standard_limit * 6, 20)
+        kb_recall = min(max(kb_limit * settings.reranker_recall_multiplier, settings.reranker_min_recall), settings.reranker_max_recall)
+        reranker = get_reranker()
 
         def _standard():
             with _conn() as conn:
@@ -761,7 +774,7 @@ class ContractStore:
                     if q in (str(r.get("title") or "") + " " + str(r.get("content") or "")).lower()
                 ]
             result = []
-            for row in rows[:standard_limit]:
+            for row in rows[:standard_recall]:
                 result.append({
                     **row,
                     "sourceType": "CONTRACT_STANDARD_CLAUSE",
@@ -781,16 +794,16 @@ class ContractStore:
                 es = ESService()
                 try:
                     vector = embedding.embed(query) if embedding.configured else None
-                    vector_hits = es.search_kb_by_embedding(vector, kb_limit * 2) if vector else []
+                    vector_hits = es.search_kb_by_embedding(vector, kb_recall) if vector else []
                 except Exception as exc:
                     logger.warning("policy KB vector retrieval failed: %s", exc)
                     vector_hits = []
                 try:
-                    keyword_hits = es.search_kb_by_keyword(query, kb_limit * 2)
+                    keyword_hits = es.search_kb_by_keyword(query, kb_recall)
                 except Exception as exc:
                     logger.warning("policy KB keyword retrieval failed: %s", exc)
                     keyword_hits = []
-                hits = _fuse_policy_retrieval(vector_hits, keyword_hits, kb_limit * 2)
+                hits = _fuse_policy_retrieval(vector_hits, keyword_hits, kb_recall)
                 return [
                     {
                         **hit,
@@ -798,7 +811,7 @@ class ContractStore:
                         "sourceId": hit.get("chunkId") or hit.get("sourceId") or hit.get("documentId"),
                         "documentId": hit.get("documentId") or hit.get("sourceId"),
                     }
-                    for hit in await _filter_allowed_kb_hits(hits, case_id, kb_limit)
+                    for hit in await _filter_allowed_kb_hits(hits, case_id, kb_recall)
                 ]
             except Exception as exc:
                 logger.warning("policy KB ES search failed, fallback to MySQL: %s", exc)
@@ -891,7 +904,7 @@ class ContractStore:
                              AND ({conditions})
                            ORDER BY c.document_id DESC, c.chunk_index ASC
                            LIMIT %s""",
-                        [case_id] + [like for like in likes for _ in range(3)] + [kb_limit],
+                        [case_id] + [like for like in likes for _ in range(3)] + [kb_recall],
                     )
                     rows = [_normalize_value(r) for r in cur.fetchall()]
             return [
@@ -913,7 +926,13 @@ class ContractStore:
         kb_hits = await _kb_es_search()
         if not kb_hits:
             kb_hits = await _run_sync(_kb_mysql_fallback)
-        return _merge_policy_items(standard, kb_hits, limit=limit)
+
+        # Rerank contract standard clauses and KB chunks **separately** —
+        # they address different concerns and must not compete for the same slots.
+        standard_reranked = reranker.rerank_policy_items(query, standard, standard_limit) if standard else []
+        kb_reranked = reranker.rerank_policy_items(query, kb_hits, kb_limit) if kb_hits else []
+
+        return _merge_policy_items(standard_reranked, kb_reranked, limit=limit)
 
     # ── Standard clause matching ───────────────────────────────────
 

@@ -27,7 +27,7 @@
               @click="startAdditionalTask('CONTRACT_REVIEW')"
             >
               <strong>{{ contractReviewTaskLabel }}</strong>
-              <small>{{ canRunContractReview ? '复用已解析证据、合同要素和知识库规则生成风险发现' : '请先上传并完成合同解析' }}</small>
+              <small>{{ canRunContractReview ? '复用已解析证据、合同要素、正式履约日程和知识库规则生成风险发现' : '请先完成合同要素和正式履约日程' }}</small>
             </button>
             <button
               type="button"
@@ -37,6 +37,15 @@
             >
               <strong>{{ contractElementTaskLabel }}</strong>
               <small>{{ extractionSnapshot.id ? '重新从当前合同版本生成可引用的事实快照' : '整理主体、金额、期限、义务和关键风险条款' }}</small>
+            </button>
+            <button
+              type="button"
+              class="task-menu-item"
+              :disabled="running || hasActiveRun || !extractionSnapshot.id"
+              @click="startAdditionalTask('TIMELINE_EXTRACTION')"
+            >
+              <strong>{{ timelineExtractionDone ? '重新生成正式履约日程' : '生成正式履约日程' }}</strong>
+              <small>基于已确认的合同证据，由 LLM 复核期限、付款、交付和验收节点</small>
             </button>
             <button
               type="button"
@@ -124,7 +133,8 @@
           <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
           <div>
             <strong>{{ stage.label }}</strong>
-            <small>{{ stage.description }}</small>
+            <small>{{ stage.state === 'active' && stage.currentStep ? stage.currentStep : stage.description }}</small>
+            <span v-if="stage.state === 'active'" class="workflow-stage-progress"><i :style="{ width: `${stage.progress || 0}%` }"></i></span>
           </div>
         </div>
       </div>
@@ -802,6 +812,31 @@
         </div>
       </section>
 
+      <section v-if="approvalMemo.id" class="approval-memo-panel">
+        <header>
+          <div>
+            <span class="section-kicker">审批意见草案</span>
+            <h3>{{ approvalMemo.title || '合同审批意见草案' }}</h3>
+          </div>
+          <strong>{{ approvalRecommendationLabel(approvalMemoContent.recommendation) }}</strong>
+        </header>
+        <p>{{ approvalMemo.summary || approvalMemoContent.summary || '已根据当前审查结果生成审批建议，最终意见以人工审批为准。' }}</p>
+        <div class="approval-memo-summary">
+          <span>可信度 {{ levelLabel(approvalMemoContent.confidence) }}</span>
+          <span>{{ approvalMemoContent.conditions.length }} 项通过条件</span>
+          <span>{{ approvalMemoContent.keyFindings.length }} 项重点风险</span>
+        </div>
+        <details>
+          <summary>查看审批路径、条件与重点风险</summary>
+          <div class="approval-memo-detail">
+            <section v-if="approvalMemoContent.conditions.length"><strong>通过条件</strong><ul><li v-for="item in approvalMemoContent.conditions" :key="item">{{ item }}</li></ul></section>
+            <section v-if="approvalMemoContent.keyFindings.length"><strong>重点风险</strong><ul><li v-for="item in approvalMemoContent.keyFindings" :key="item">{{ item }}</li></ul></section>
+            <section v-if="approvalMemoContent.approvalPath.length"><strong>建议审批路径</strong><ol><li v-for="item in approvalMemoContent.approvalPath" :key="item">{{ item }}</li></ol></section>
+          </div>
+        </details>
+        <small>AI 生成的审批意见草案，仅供人工审批参考，不代表审批已完成。</small>
+      </section>
+
       <div v-if="!findingGroups.length" class="fact-empty risk-empty-state">
         {{ riskReviewEmptyText }}
       </div>
@@ -1399,6 +1434,7 @@ import {
 
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const loadError = ref(''); const running = ref(false)
+let analysisAutoStarting = false
 const expandedFindings = reactive(new Set())
 const expandedElementGroupKeys = reactive(new Set())
 const selectedElementKey = ref('')
@@ -1610,7 +1646,10 @@ const hasActiveRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs 
   .some(run => ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
 const extractionRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .find(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_ELEMENT_EXTRACTION') || null)
+const timelineExtractionRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
+  .find(run => String(run?.runType || '').toUpperCase() === 'TIMELINE_EXTRACTION') || null)
 const extractionRunActive = computed(() => ACTIVE_RUN_STATUSES.has(String(extractionRun.value?.status || '').toUpperCase()))
+const timelineExtractionRunActive = computed(() => ACTIVE_RUN_STATUSES.has(String(timelineExtractionRun.value?.status || '').toUpperCase()))
 const extractionRunFailed = computed(() =>
   String(extractionRun.value?.status || '').toUpperCase() === 'FAILED'
   || String(analysisWorkflow.value?.extractionStatus || '').toUpperCase() === 'FAILED'
@@ -1626,6 +1665,12 @@ const workflowIsComplete = computed(() =>
 const riskReviewRunActive = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .some(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW'
     && ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
+const latestRiskReviewRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
+  .find(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW') || null)
+const timelineExtractionDone = computed(() =>
+  String(analysisWorkflow.value?.timelineStatus || '').toUpperCase() === 'COMPLETED'
+  || hasCompletedRun('TIMELINE_EXTRACTION')
+)
 const canExtractContractElements = computed(() => hasParsedContractDocument.value && !extractionRunActive.value)
 const workbenchSectionTabMap = {
   elements: 'elements',
@@ -1938,7 +1983,22 @@ const riskReviewEmptyText = computed(() =>
     : '\u98ce\u9669\u5ba1\u67e5\u5df2\u5b8c\u6210\uff0c\u4f46\u672c\u6b21\u6ca1\u6709\u8fd4\u56de\u53ef\u5c55\u793a\u7684\u98ce\u9669\u53d1\u73b0\u3002\u8bf7\u5728 \u0041\u0067\u0065\u006e\u0074 \u8fd0\u884c\u4e2d\u67e5\u770b\u62a5\u544a\u6458\u8981\uff0c\u6216\u91cd\u65b0\u53d1\u8d77\u5ba1\u67e5\u3002'
 )
 const hasVersionReviewResult = computed(() => hasReportOfTypes(['VERSION_REVIEW_REPORT', 'VERSION_REVIEW']))
-const hasApprovalDecisionResult = computed(() => hasReportOfTypes(['APPROVAL_DECISION_REPORT', 'APPROVAL_DECISION']))
+const hasApprovalDecisionResult = computed(() => hasReportOfTypes(['APPROVAL_MEMO', 'APPROVAL_DECISION_REPORT', 'APPROVAL_DECISION']))
+const approvalMemo = computed(() => (Array.isArray(c.value.reports) ? c.value.reports : [])
+  .find(report => ['APPROVAL_MEMO', 'APPROVAL_DECISION_REPORT', 'APPROVAL_DECISION']
+    .includes(String(report?.reportType || '').toUpperCase())) || {})
+const approvalMemoContent = computed(() => {
+  const content = approvalMemo.value?.contentJson && typeof approvalMemo.value.contentJson === 'object'
+    ? approvalMemo.value.contentJson : {}
+  const array = value => Array.isArray(value) ? value.map(String).filter(Boolean) : []
+  return {
+    ...content,
+    keyFindings: array(content.keyFindings),
+    acceptedExceptions: array(content.acceptedExceptions),
+    approvalPath: array(content.approvalPath),
+    conditions: array(content.conditions),
+  }
+})
 const hasObligationExtractionResult = computed(() =>
   hasCompletedRun('OBLIGATION_EXTRACTION')
   || (Array.isArray(c.value.obligations) && c.value.obligations.length > 0)
@@ -1950,7 +2010,7 @@ const canVersionReview = computed(() => {
     .filter(Number.isFinite)
   return new Set(versions).size >= 2
 })
-const canRunContractReview = computed(() => hasParsedContractDocument.value)
+const canRunContractReview = computed(() => hasParsedContractDocument.value && timelineExtractionDone.value)
 const canApprovalDecision = computed(() =>
   hasContractReviewResult.value
   || ['PENDING_APPROVAL', 'SIGNED', 'IN_FULFILLMENT'].includes(String(c.value.status || '').toUpperCase())
@@ -1959,28 +2019,29 @@ const canObligationExtraction = computed(() => hasParsedContractDocument.value)
 const contractReviewTaskLabel = computed(() => hasContractReviewResult.value ? '重新风险审查' : '风险审查')
 const contractElementTaskLabel = computed(() => extractionSnapshot.value?.id ? '重新提取合同要素' : '提取合同要素')
 const versionReviewTaskLabel = computed(() => hasVersionReviewResult.value ? '重新版本差异复核' : '版本差异复核')
-const approvalDecisionTaskLabel = computed(() => hasApprovalDecisionResult.value ? '重新生成审批意见' : '生成审批意见')
+const approvalDecisionTaskLabel = computed(() => hasApprovalDecisionResult.value ? '重新生成审批意见草案' : '生成审批意见草案')
 const obligationExtractionTaskLabel = computed(() => hasObligationExtractionResult.value ? '重新提取履约义务' : '提取履约义务')
 const analysisStages = computed(() => {
   const workflow = analysisWorkflow.value || {}
   const status = String(workflow.status || '').toUpperCase()
   const current = String(workflow.currentStage || '').toUpperCase()
   const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
-    || ['HUMAN_CONFIRMATION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
-  const confirmDone = ['READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
-    || ['RISK_REVIEW', 'REPORT_READY'].includes(current)
+    || ['HUMAN_CONFIRMATION', 'FACT_EXTRACTION', 'TIMELINE_EXTRACTION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
   const extractionDone = Boolean(extractionSnapshot.value?.id)
   const extractionActive = extractionRunActive.value
   const extractionFailed = extractionRunFailed.value
+  const timelineDone = timelineExtractionDone.value
+  const timelineActive = timelineExtractionRunActive.value
+  const timelineFailed = String(workflow.timelineStatus || '').toUpperCase() === 'FAILED'
   const reviewDone = status === 'COMPLETED' || current === 'REPORT_READY'
   const reviewActive = riskReviewRunActive.value || status === 'REVIEWING'
   const failedStage = status === 'FAILED' ? current : ''
   return [
     { index: '01', key: 'DOCUMENT_PARSE', label: '文档解析', description: '读取正文并建立条款证据', state: failedStage === 'DOCUMENT_PARSE' ? 'error' : parseDone ? 'done' : status === 'PARSING' ? 'active' : 'pending' },
-    { index: '02', key: 'HUMAN_CONFIRMATION', label: '人工确认', description: '核对主体、日期和关键字段', state: failedStage === 'HUMAN_CONFIRMATION' ? 'error' : confirmDone ? 'done' : status === 'WAITING_CONFIRMATION' ? 'active' : 'pending' },
-    { index: '03', key: 'FACT_EXTRACTION', label: '要素提取', description: '生成可引用事实快照', state: extractionDone ? 'done' : extractionActive ? 'active' : extractionFailed ? 'error' : 'pending' },
-    { index: '04', key: 'RISK_REVIEW', label: '风险审查', description: '检索证据并分析适用风险', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : reviewActive ? 'active' : 'pending' },
-    { index: '05', key: 'REPORT_READY', label: '报告生成', description: '保存报告、发现和处理建议', state: reviewDone ? 'done' : 'pending' },
+    { index: '02', key: 'FACT_EXTRACTION', label: '合同要素', description: extractionDone ? '可引用事实快照已生成' : '等待文档解析完成', state: extractionDone ? 'done' : extractionActive ? 'active' : extractionFailed ? 'error' : 'pending', progress: extractionRun.value?.progress, currentStep: extractionRun.value?.currentStep },
+    { index: '03', key: 'TIMELINE_EXTRACTION', label: '履约日程', description: timelineDone ? '正式履约日程已发布' : extractionDone ? '等待合同要素完成后生成' : '等待合同要素', state: timelineDone ? 'done' : timelineActive ? 'active' : timelineFailed ? 'error' : 'pending', progress: timelineExtractionRun.value?.progress, currentStep: timelineExtractionRun.value?.currentStep },
+    { index: '04', key: 'RISK_REVIEW', label: '风险审查', description: timelineDone ? '等待正式履约日程完成后审查' : '等待履约日程', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : reviewActive ? 'active' : 'pending', progress: latestRiskReviewRun.value?.progress, currentStep: latestRiskReviewRun.value?.currentStep },
+    { index: '05', key: 'REPORT_READY', label: '分析就绪', description: '保存风险发现与处理建议', state: reviewDone ? 'done' : 'pending' },
   ]
 })
 
@@ -2063,6 +2124,7 @@ async function loadCase() {
     message.error(loadError.value)
   }
   finally { loading.value = false }
+  if (!loadError.value) void ensureAutomaticAnalysisPipeline()
 }
 
 async function doUpload() {
@@ -2141,6 +2203,7 @@ async function refreshCase() {
       ) || selectedTimelineNode.value
     }
     checkPendingIntake()
+    void ensureAutomaticAnalysisPipeline()
   } finally {
     caseRefreshInFlight = false
   }
@@ -2324,7 +2387,7 @@ function documentPipelineStatusActive(document) {
   )
 }
 
-async function startRun(taskType) {
+async function startRun(taskType, options = {}) {
   if (running.value || hasActiveRun.value) {
     message.info('当前合同已有 Agent 任务运行中，请先查看运行进度')
     return
@@ -2333,19 +2396,48 @@ async function startRun(taskType) {
   try {
     const response = await api.post(`/api/workspace/contracts/${route.params.id}/runs`, {
       taskType,
-      triggerType: 'MANUAL',
+      triggerType: options.triggerType || 'MANUAL',
       question: taskQuestion(taskType),
-      inputJson: taskInputFor(taskType),
+      inputJson: taskInputFor(taskType, Boolean(options.autoPipeline)),
     })
-    if (response.data.data?.deduplicated) {
+    if (response.data.data?.deduplicated && !options.silent) {
       message.info('当前合同已有同类 Agent 任务，已沿用现有运行记录')
-    } else {
+    } else if (!options.silent) {
       message.success('Agent 任务已创建')
     }
     await refreshCase()
-    followTaskVisibility(taskType)
-  } catch (e) { message.error(e.response?.data?.message || e.message || '启动失败') }
+    if (!options.silent) followTaskVisibility(taskType)
+  } catch (e) {
+    if (!options.silent) message.error(e.response?.data?.message || e.message || '启动失败')
+  }
   finally { running.value = false }
+}
+
+function latestRunForType(taskType) {
+  const expected = String(taskType || '').toUpperCase()
+  return (Array.isArray(c.value.runs) ? c.value.runs : [])
+    .find(run => String(run?.runType || '').toUpperCase() === expected) || null
+}
+
+async function ensureAutomaticAnalysisPipeline() {
+  if (analysisAutoStarting || loading.value || running.value || hasActiveRun.value
+    || documentPipelineActive.value || !hasParsedContractDocument.value) return
+
+  let taskType = ''
+  if (!extractionSnapshot.value?.id) taskType = 'CONTRACT_ELEMENT_EXTRACTION'
+  else if (!timelineExtractionDone.value) taskType = 'TIMELINE_EXTRACTION'
+  else if (!hasContractReviewResult.value && !hasCompletedRun('CONTRACT_REVIEW')) taskType = 'CONTRACT_REVIEW'
+  if (!taskType) return
+
+  const latest = latestRunForType(taskType)
+  if (String(latest?.status || '').toUpperCase() === 'FAILED') return
+
+  analysisAutoStarting = true
+  try {
+    await startRun(taskType, { triggerType: 'AUTO', autoPipeline: true, silent: true })
+  } finally {
+    analysisAutoStarting = false
+  }
 }
 
 function delay(ms) {
@@ -2384,11 +2476,13 @@ async function followTaskVisibility(taskType) {
   }
 }
 
-function taskInputFor(taskType) {
-  if (taskType === 'CONTRACT_ELEMENT_EXTRACTION' && latestMainDocument.value?.id) {
-    return { documentId: latestMainDocument.value.id }
+function taskInputFor(taskType, autoPipeline = false) {
+  const input = {}
+  if (['CONTRACT_ELEMENT_EXTRACTION', 'TIMELINE_EXTRACTION'].includes(taskType) && latestMainDocument.value?.id) {
+    input.documentId = latestMainDocument.value.id
   }
-  return {}
+  if (autoPipeline) input.autoPipeline = true
+  return input
 }
 
 function hasReportOfTypes(types) {
@@ -2465,7 +2559,9 @@ async function scrollToFinding(finding) {
 }
 
 function startAdditionalTask(taskType) {
-  startRun(taskType)
+  startRun(taskType, {
+    autoPipeline: ['CONTRACT_ELEMENT_EXTRACTION', 'TIMELINE_EXTRACTION'].includes(taskType),
+  })
 }
 
 function canFulfillmentCheck(node) {
@@ -3105,7 +3201,10 @@ function timelineStatusClass(node) {
 function timelineEmptyText() {
   const parsing = c.value.status === 'INTAKE_PARSING'
     || c.value.documents?.some(d => ['PENDING', 'PARSING'].includes(d.parseStatus))
-  return parsing ? '合同文档仍在解析，时间节点会在解析完成后自动出现。' : '暂未识别到明确的生效、到期、付款、交付、验收、续签或通知时间节点。'
+  if (parsing) return '合同文档仍在解析，正式履约日程将在合同要素完成后自动生成。'
+  if (timelineExtractionRunActive.value) return '正在生成正式履约日程。规则候选不会在这里提前展示。'
+  if (!timelineExtractionDone.value) return '正式履约日程正在等待合同要素完成。'
+  return '正式履约日程已完成，本合同未发现可作为履约跟踪依据的明确时间节点。'
 }
 
 function statusClass(s) {
@@ -3119,8 +3218,11 @@ function partyRoleLabel(r) { return { OUR_ENTITY:'我方', COUNTERPARTY:'对方'
 function docTypeLabel(t) { return { MAIN:'主合同', ATTACHMENT:'附件', PRICING:'报价', CERTIFICATE:'资质', FULFILLMENT_EVIDENCE:'履约证据' }[t] || t }
 function runStatusClass(s) { return { COMPLETED:'ok', FAILED:'error' }[s] || '' }
 function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', PLANNING:'规划中', ANALYZING:'审查中', VERIFYING:'验证中', WAITING_HUMAN:'等待人工确认', COMPLETED:'完成', FAILED:'失败', CANCELLED:'已取消' }[s] || s }
-function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批决策', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验', CONTRACT_ELEMENT_EXTRACTION:'合同要素提取' }[t] || t }
-function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据', CONTRACT_ELEMENT_EXTRACTION:'提取当前合同版本的可引用要素事实' }[t] || '执行合同任务' }
+function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批意见草案', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验', CONTRACT_ELEMENT_EXTRACTION:'合同要素提取', TIMELINE_EXTRACTION:'正式履约日程' }[t] || t }
+function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见草案', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据', CONTRACT_ELEMENT_EXTRACTION:'提取当前合同版本的可引用要素事实', TIMELINE_EXTRACTION:'生成经语义复核的正式履约日程' }[t] || '执行合同任务' }
+function approvalRecommendationLabel(value) {
+  return { APPROVE:'建议通过', APPROVE_WITH_CONDITIONS:'建议有条件通过', REJECT:'建议不通过', ESCALATE:'建议升级复核' }[String(value || '').toUpperCase()] || '待人工决定'
+}
 function elementCategory(element) {
   const key = String(element?.elementKey || '')
   const sectionKey = String(element?.sectionKey || element?.groupKey || element?.category || '').toUpperCase()
@@ -3516,6 +3618,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .analysis-workflow-stage strong{display:block;color:var(--atlas-text);font-size:11px;line-height:1.4}.analysis-workflow-stage small{display:block;margin-top:3px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
 .analysis-workflow-stage.done{border-color:#b9d8c5;background:#f4faf6}.analysis-workflow-stage.done .workflow-stage-mark{color:#fff;background:#347254}.analysis-workflow-stage.active{border-color:#b7cde0;background:#f5f9fc}.analysis-workflow-stage.active .workflow-stage-mark{color:#fff;background:var(--atlas-primary)}.analysis-workflow-stage.error{border-color:#e4b2ad;background:#fff7f6}.analysis-workflow-stage.error .workflow-stage-mark{color:#fff;background:#b35c56}
 .analysis-workflow-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.analysis-workflow-foot small{color:var(--atlas-subtle);font-size:10px;word-break:break-all}.analysis-workflow-foot .small{min-height:32px;padding:0 10px;font-size:11px}.workflow-evidence-summary{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-evidence-summary .extraction-status{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px}.workflow-evidence-summary .extraction-status.running{color:var(--atlas-primary);background:#f4f8fc}.workflow-evidence-summary .extraction-status.ready_for_confirmation{color:#8a5b14;background:#fff8e6}.workflow-evidence-summary .extraction-status.confirmed{color:#347254;background:#edf7f0}.workflow-evidence-summary .extraction-status.failed{color:#b35c56;background:#fff5f4}
+.workflow-stage-progress{display:block;width:100%;height:3px;margin-top:7px;overflow:hidden;background:var(--atlas-border)}.workflow-stage-progress i{display:block;height:100%;background:var(--atlas-primary);transition:width .3s ease}
 .analysis-workflow-panel.compact{padding:12px 16px}.analysis-workflow-panel.compact .analysis-workflow-head{align-items:center}.analysis-workflow-panel.compact .section-kicker{margin-bottom:2px}.analysis-workflow-panel.compact .analysis-workflow-head h3{font-size:16px}
 .workflow-complete-strip{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;padding-top:10px;border-top:1px solid var(--atlas-border)}.workflow-complete-stages{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-complete-stages span{display:inline-flex;align-items:center;gap:5px;color:var(--atlas-muted);font-size:10px;font-weight:800;white-space:nowrap}.workflow-complete-stages i{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;color:#fff;background:#347254;border-radius:2px;font-size:9px;font-style:normal}.workflow-complete-meta{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}.workflow-complete-meta small{color:var(--atlas-subtle);font-size:9px;white-space:nowrap}
 .contract-workbench{margin:0 0 22px;border-top:3px solid #347254;border-bottom:1px solid var(--atlas-border);background:var(--atlas-surface)}
@@ -3659,6 +3762,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .review-panel-prominent{margin-top:20px;border-color:rgba(66,111,166,.28);box-shadow:0 8px 24px rgba(34,58,80,.08)}
 .review-prominent-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
 .review-run-badge{padding:5px 8px;border:1px solid var(--atlas-border);border-radius:3px;color:var(--atlas-primary);background:var(--atlas-surface);font-size:10px;font-weight:900;white-space:nowrap}
+.approval-memo-panel{margin:0 22px 18px;padding:16px 18px;border:1px solid #cbd8d0;border-left:4px solid #3f7f5d;background:#f7faf8}.approval-memo-panel header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}.approval-memo-panel h3{margin:3px 0 0;color:var(--atlas-text);font-size:16px}.approval-memo-panel header>strong{padding:5px 8px;color:#2f694d;background:#e9f4ed;border:1px solid #bdd7c7;border-radius:3px;font-size:11px;white-space:nowrap}.approval-memo-panel>p{margin:10px 0 0;color:var(--atlas-muted);font-size:12px;line-height:1.65}.approval-memo-summary{display:flex;gap:12px;flex-wrap:wrap;margin-top:11px}.approval-memo-summary span{color:var(--atlas-subtle);font-size:10px;font-weight:800}.approval-memo-panel details{margin-top:12px;border-top:1px solid var(--atlas-border);padding-top:10px}.approval-memo-panel summary{color:var(--atlas-primary);font-size:11px;font-weight:900;cursor:pointer}.approval-memo-detail{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:12px}.approval-memo-detail section{min-width:0}.approval-memo-detail strong{color:var(--atlas-text);font-size:11px}.approval-memo-detail ul,.approval-memo-detail ol{margin:7px 0 0;padding-left:18px;color:var(--atlas-muted);font-size:11px;line-height:1.65}.approval-memo-panel>small{display:block;margin-top:11px;color:#8a5b14;font-size:10px}
 .review-highlight-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:14px}
 .review-highlight-grid div{display:flex;flex-direction:column;gap:4px;padding:9px;background:rgba(255,255,255,.72);border:1px solid var(--atlas-border);border-radius:4px}
 .review-highlight-grid strong{color:var(--atlas-text);font-size:17px}
@@ -4049,6 +4153,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .member-joined{color:var(--atlas-subtle);font-size:11px;margin-left:auto}
 
 @media(max-width:700px){
+  .approval-memo-panel{margin:0 14px 14px}.approval-memo-panel header{flex-direction:column}.approval-memo-detail{grid-template-columns:1fr}
   .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-item:nth-child(2n){border-right:0}.meta-item-wide{grid-column:span 2}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}.workbench-tabs{padding:12px 14px 0}.workbench-tab{min-height:36px;padding:0 10px;font-size:11px}.workbench-tab strong{min-width:20px}.workbench-tab-panel{padding:0 14px 14px}.workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}.evidence-workbench-body{grid-template-columns:1fr}.evidence-browser-head{flex-direction:column}.evidence-doc-card{flex-direction:column}.contract-end-condition{grid-template-columns:1fr}.contract-end-condition li:before{margin-right:6px}.review-panel-flat{grid-template-columns:1fr}.run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
   .contract-workbench-head{align-items:flex-start;flex-direction:column;padding:17px 15px}.workbench-snapshot{width:100%;padding:11px 0 0;border-top:1px solid var(--atlas-border);border-left:0}.contract-workbench-body{display:block}.fact-lane{padding:0 14px 14px}.fact-groups{grid-template-columns:1fr}.fact-row{grid-template-columns:92px minmax(0,1fr);gap:7px}.fact-row>em{grid-column:2;justify-self:start}.workbench-insight-section{padding:0 14px 14px;border-right:0;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.workbench-timeline-main{grid-template-columns:74px minmax(0,1fr)}.workbench-node-action{margin-right:2px}.workbench-runtime{align-items:flex-start;flex-direction:column;padding:10px 15px}.workbench-runtime small{max-width:100%;white-space:normal}.text-button{margin-left:0}
   .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
