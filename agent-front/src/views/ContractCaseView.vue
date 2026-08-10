@@ -70,6 +70,9 @@
         <button class="quiet-button revision-upload-button" type="button" @click="openRevisionUpload">
           上传修改后合同
         </button>
+        <button v-if="canWrite" class="quiet-button revision-upload-button" type="button" @click="openEditCaseDialog">
+          编辑案件信息
+        </button>
       </div>
     </header>
 
@@ -1259,6 +1262,90 @@
       </div>
     </div>
 
+    <!-- Edit case dialog -->
+    <div v-if="editDialogOpen" class="modal-overlay" @click.self="editDialogOpen = false">
+      <div class="modal-content" style="max-width:560px;width:95vw;max-height:88vh">
+        <div class="modal-head" style="display:flex;justify-content:space-between;align-items:flex-start;padding:16px 20px;border-bottom:1px solid var(--atlas-border)">
+          <div>
+            <h3 style="margin:0;font-size:16px;color:var(--atlas-text)">编辑案件信息</h3>
+            <small style="display:block;margin-top:3px;color:var(--atlas-subtle);font-size:11px">修改后将立即更新合同工作台显示</small>
+          </div>
+          <button class="quiet-button small" @click="editDialogOpen = false" style="min-height:30px;padding:0 10px;font-size:11px">✕</button>
+        </div>
+        <div style="padding:16px 20px;overflow-y:auto;max-height:calc(88vh - 130px)">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px 16px">
+            <div style="grid-column:1/-1">
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">合同标题</label>
+              <input v-model="editForm.title" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" placeholder="合同标题" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">合同类型</label>
+              <select v-model="editForm.contractType" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)">
+                <option value="SERVICE_PROCUREMENT">服务采购</option>
+                <option value="GOODS_PURCHASE">货物采购</option>
+                <option value="NDA">保密协议</option>
+                <option value="OTHER">其他</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">优先级</label>
+              <select v-model="editForm.priority" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)">
+                <option value="LOW">低</option>
+                <option value="MEDIUM">中</option>
+                <option value="HIGH">高</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">相对方</label>
+              <input v-model="editForm.counterparty" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" placeholder="对方公司名称" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">我方主体</label>
+              <select v-model="editForm.ourSide" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)">
+                <option value="">不指定</option>
+                <option value="A">甲方 (A)</option>
+                <option value="B">乙方 (B)</option>
+              </select>
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">金额</label>
+              <input v-model.number="editForm.amount" type="number" step="0.01" min="0" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" placeholder="0.00" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">币种</label>
+              <input v-model="editForm.currency" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" placeholder="CNY" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">部门</label>
+              <input v-model="editForm.department" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" placeholder="如：采购部" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">签订日期</label>
+              <input v-model="editForm.signedDate" type="date" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">生效日期</label>
+              <input v-model="editForm.effectiveDate" type="date" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" />
+            </div>
+            <div>
+              <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">到期日期</label>
+              <input v-model="editForm.expiryDate" type="date" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface)" />
+            </div>
+          </div>
+          <div style="margin-top:12px">
+            <label style="display:block;margin-bottom:3px;font-size:12px;font-weight:800;color:var(--atlas-text)">描述</label>
+            <textarea v-model="editForm.description" rows="3" style="width:100%;padding:6px 10px;border:1px solid var(--atlas-border);border-radius:4px;font-size:13px;background:var(--atlas-surface);resize:vertical" placeholder="合同描述"></textarea>
+          </div>
+        </div>
+        <div class="modal-foot" style="display:flex;justify-content:flex-end;gap:10px">
+          <button class="quiet-button" @click="editDialogOpen = false">取消</button>
+          <button class="primary-button" @click="doSaveEdit" :disabled="editSaving">
+            {{ editSaving ? '保存中...' : '保存' }}
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- Evidence link modal -->
     <div v-if="evidenceDialog.visible" class="modal-overlay" @click.self="closeEvidenceLinks">
       <div class="modal-content evidence-link-modal">
@@ -1296,7 +1383,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import api, { getContractMembers, getUserInfo } from '../api/index.js'
+import api, { getContractMembers, getUserInfo, updateContractCase } from '../api/index.js'
 import {
   deriveTimelineAction,
   resolveTimelineDate,
@@ -1334,6 +1421,14 @@ const evidenceDialog = reactive({
   node: null,
   available: [],
   selectedIds: [],
+})
+const editDialogOpen = ref(false)
+const editSaving = ref(false)
+const editForm = ref({
+  title: '', contractType: '', counterparty: '', ourSide: '',
+  amount: null, currency: 'CNY', department: '',
+  signedDate: '', effectiveDate: '', expiryDate: '',
+  priority: 'MEDIUM', description: ''
 })
 let caseRefreshTimer = null
 let caseRefreshInFlight = false
@@ -2048,6 +2143,42 @@ async function refreshCase() {
     checkPendingIntake()
   } finally {
     caseRefreshInFlight = false
+  }
+}
+
+function openEditCaseDialog() {
+  editForm.value = {
+    title: c.value.title || '',
+    contractType: c.value.contractType || '',
+    counterparty: c.value.counterparty || '',
+    ourSide: c.value.ourSide || '',
+    amount: c.value.amount != null ? c.value.amount : null,
+    currency: c.value.currency || 'CNY',
+    department: c.value.department || '',
+    signedDate: c.value.signedDate || '',
+    effectiveDate: c.value.effectiveDate || '',
+    expiryDate: c.value.expiryDate || '',
+    priority: c.value.priority || 'MEDIUM',
+    description: c.value.description || ''
+  }
+  editDialogOpen.value = true
+}
+
+async function doSaveEdit() {
+  editSaving.value = true
+  try {
+    const payload = {}
+    for (const [k, v] of Object.entries(editForm.value)) {
+      if (v !== '' && v !== null && v !== undefined) payload[k] = v
+    }
+    await updateContractCase(c.value.id, payload)
+    message.success('案件信息已更新')
+    editDialogOpen.value = false
+    refreshCase()
+  } catch (e) {
+    message.error(e.response?.data?.message || '保存失败')
+  } finally {
+    editSaving.value = false
   }
 }
 

@@ -181,6 +181,7 @@ export function getContractWorkQueue(type) { return api.get('/api/workspace/cont
 export function listContracts(params) { return api.get('/api/workspace/contracts', { params }) }
 export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
 export function createContractCase(data) { return api.post('/api/workspace/contracts', data) }
+export function updateContractCase(id, data) { return api.put(`/api/workspace/contracts/${id}`, data) }
 export function startContractRun(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/runs`, data) }
 export function getContractRun(runId) { return api.get(`/api/workspace/contracts/runs/${runId}`) }
 export function updateContractFinding(findingId, data) { return api.patch(`/api/workspace/contracts/findings/${findingId}`, data) }

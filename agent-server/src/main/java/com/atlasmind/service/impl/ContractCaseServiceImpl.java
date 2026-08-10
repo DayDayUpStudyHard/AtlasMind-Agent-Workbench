@@ -938,6 +938,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         for (String f : numFields) {
             if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
         }
+        if (request.containsKey("contractType")) { sets.add("contract_type=?"); params.add(str(request, "contractType")); }
+        if (request.containsKey("currency")) { sets.add("currency=?"); params.add(str(request, "currency")); }
         if (request.containsKey("signedDate")) { sets.add("signed_date=?"); params.add(dateOrNull(request.get("signedDate"), "签订日期")); }
         if (request.containsKey("effectiveDate")) { sets.add("effective_date=?"); params.add(dateOrNull(request.get("effectiveDate"), "生效日期")); }
         if (request.containsKey("expiryDate")) { sets.add("expiry_date=?"); params.add(dateOrNull(request.get("expiryDate"), "到期日期")); }
