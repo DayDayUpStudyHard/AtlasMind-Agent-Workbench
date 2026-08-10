@@ -200,11 +200,23 @@
               </div>
 
               <div v-if="contractElementSections.length" class="fact-groups">
-                <section v-for="group in contractElementSections" :key="group.key" class="fact-group">
+                <section v-for="group in contractElementSections" :key="group.key" class="fact-group" :class="{ expanded: group.expanded }">
                   <div class="fact-group-head">
-                    <strong>{{ group.label }}</strong>
-                    <span>{{ group.items.length }} 项</span>
+                    <div class="fact-group-copy">
+                      <strong>{{ group.label }}</strong>
+                      <small v-if="group.expanded">已展开 {{ group.items.length }} 项</small>
+                      <small v-else>预览 {{ group.previewItems.length }} 项，剩余 {{ group.hiddenCount }} 项</small>
+                    </div>
+                    <button
+                      v-if="group.hiddenCount > 0"
+                      type="button"
+                      class="fact-group-toggle"
+                      @click="toggleElementGroup(group.key)"
+                    >
+                      {{ group.expanded ? '收起' : `展开剩余 ${group.hiddenCount} 项` }}
+                    </button>
                   </div>
+                  <p v-if="!group.expanded && group.previewSummary" class="fact-group-summary">{{ group.previewSummary }}</p>
                   <div v-if="group.paymentRows.length" class="fact-payment-table">
                     <button
                       v-for="element in group.paymentRows"
@@ -225,7 +237,7 @@
                   </div>
                   <div v-else class="fact-card-grid">
                     <button
-                      v-for="element in group.items"
+                      v-for="element in group.visibleItems"
                       :key="elementIdentity(element)"
                       type="button"
                       class="fact-card"
@@ -1301,6 +1313,7 @@ import {
 const route = useRoute(); const router = useRouter(); const message = useMessage()
 const c = ref({}); const loading = ref(true); const loadError = ref(''); const running = ref(false)
 const expandedFindings = reactive(new Set())
+const expandedElementGroupKeys = reactive(new Set())
 const selectedElementKey = ref('')
 const showUpload = ref(false)
 const uploading = ref(false)
@@ -1682,14 +1695,35 @@ const profileFactGroups = computed(() => {
 })
 
 const displayContractElements = computed(() => contractElementGroups.value.flatMap(group => group.items || []))
-const contractElementSections = computed(() => contractElementGroups.value.map(group => ({
-  ...group,
-  paymentRows: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'PAYMENT'),
-  processItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'PROCESS'),
-  liabilityItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'LIABILITY'),
-  terminationItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'TERMINATION'),
-  factItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'FACT'),
-})))
+const ELEMENT_GROUP_PREVIEW_LIMIT = 2
+const contractElementSections = computed(() => contractElementGroups.value.map(group => {
+  const items = (group.items || []).map(item => ({
+    ...item,
+    presentation: buildElementPresentation(item),
+  }))
+  const expanded = isElementGroupExpanded(group.key)
+  const previewItems = items.slice(0, ELEMENT_GROUP_PREVIEW_LIMIT)
+  const visibleItems = expanded ? items : previewItems
+  const visiblePaymentRows = visibleItems.filter(item => item.presentation.displayMode === 'PAYMENT')
+  const visibleProcessItems = visibleItems.filter(item => item.presentation.displayMode === 'PROCESS')
+  const visibleLiabilityItems = visibleItems.filter(item => item.presentation.displayMode === 'LIABILITY')
+  const visibleTerminationItems = visibleItems.filter(item => item.presentation.displayMode === 'TERMINATION')
+  const visibleFactItems = visibleItems.filter(item => item.presentation.displayMode === 'FACT')
+  return {
+    ...group,
+    items,
+    expanded,
+    previewItems,
+    visibleItems,
+    hiddenCount: Math.max(0, items.length - previewItems.length),
+    previewSummary: previewItems.map(item => item.presentation.headline).filter(Boolean).slice(0, 3).join(' · '),
+    paymentRows: visiblePaymentRows,
+    processItems: visibleProcessItems,
+    liabilityItems: visibleLiabilityItems,
+    terminationItems: visibleTerminationItems,
+    factItems: visibleFactItems,
+  }
+}))
 const contractElementEmptyText = computed(() => {
   if (extractionRunActive.value) return '\u0041\u0067\u0065\u006e\u0074 \u6b63\u5728\u6574\u7406\u5408\u540c\u8981\u7d20\uff0c\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u663e\u793a\u5728\u8fd9\u91cc\u3002'
   if (extractionSnapshot.value?.id && contractElements.value.length) return '\u4e8b\u5b9e\u5feb\u7167\u5df2\u751f\u6210\uff0c\u4f46\u5408\u540c\u753b\u50cf\u5b57\u6bb5\u6682\u4e0d\u53ef\u7528\uff1b\u5df2\u4fdd\u7559\u53ef\u5f15\u7528\u7684\u7ed3\u6784\u5316\u8981\u7d20\uff0c\u8bf7\u91cd\u65b0\u5237\u65b0\u9875\u9762\u3002'
@@ -3005,6 +3039,30 @@ function elementIdentity(element) {
   if (element?.id != null) return `element-${element.id}`
   return `${element?.elementKey || 'element'}-${element?.occurrenceNo || 1}`
 }
+function normalizeElementGroupKey(groupKey) {
+  return String(groupKey || '').trim().toUpperCase()
+}
+function elementGroupKeyFor(element) {
+  const selectedIdentity = elementIdentity(element)
+  const group = contractElementGroups.value.find(candidate =>
+    (candidate.items || []).some(item => elementIdentity(item) === selectedIdentity))
+  return group ? normalizeElementGroupKey(group.key) : ''
+}
+function isElementGroupExpanded(groupKey) {
+  const key = normalizeElementGroupKey(groupKey)
+  if (!key) return false
+  return expandedElementGroupKeys.has(key)
+}
+function toggleElementGroup(groupKey) {
+  const key = normalizeElementGroupKey(groupKey)
+  if (!key) return
+  if (expandedElementGroupKeys.has(key)) expandedElementGroupKeys.delete(key)
+  else expandedElementGroupKeys.add(key)
+}
+function expandElementGroupForElement(element) {
+  const key = elementGroupKeyFor(element)
+  if (key) expandedElementGroupKeys.add(key)
+}
 function ensureSelectedContractElement() {
   const selected = displayContractElements.value.find(element => elementIdentity(element) === selectedElementKey.value)
   if (!selected) {
@@ -3018,6 +3076,7 @@ function selectContractElement(element) {
 function selectSummaryField(field) {
   if (field?.element) {
     switchWorkbenchTab('elements')
+    expandElementGroupForElement(field.element)
     selectContractElement(field.element)
   }
 }
@@ -3336,7 +3395,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fact-lane{min-width:0;padding:0 16px 16px;border-right:1px solid var(--atlas-border);background:var(--atlas-surface)}
 .fact-lane-head,.insight-section-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:16px 0 12px}.fact-lane-head>div,.insight-section-head>div{min-width:0}.fact-lane-head span,.insight-section-head span{display:block;margin-bottom:3px;color:var(--atlas-primary);font-size:10px;font-weight:900;letter-spacing:.04em;text-transform:uppercase}.fact-lane-head h4,.insight-section-head h4{margin:0;color:var(--atlas-text);font-size:15px;line-height:1.35}.fact-lane-head .small{min-height:32px;padding:0 10px;font-size:11px}
 .fact-mode-note{display:flex;align-items:flex-start;gap:10px;margin:0 0 12px;padding:9px 10px;border:1px solid #cfe4d7;border-radius:6px;background:#f4fbf6;color:#2f6847;font-size:11px;line-height:1.55}.fact-mode-note strong{flex:0 0 auto;color:#24593a}.fact-mode-note span{min-width:0}.fact-mode-note.legacy{border-color:#ead2a4;background:#fff9ed;color:#816126}.fact-mode-note.legacy strong{color:#6c4c14}
-.fact-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fact-group{min-width:0;border-top:1px solid var(--atlas-border)}.fact-group-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:9px 0 8px}.fact-group-head strong{color:var(--atlas-text);font-size:11px}.fact-group-head span{color:var(--atlas-subtle);font-size:10px;font-weight:800}.fact-payment-table,.fact-card-grid{display:grid;gap:8px;border-top:1px solid var(--atlas-border)}
+.fact-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.fact-group{min-width:0;border-top:1px solid var(--atlas-border)}.fact-group-head{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;padding:9px 0 6px}.fact-group-copy{min-width:0;display:flex;flex-direction:column;gap:2px}.fact-group-copy strong{color:var(--atlas-text);font-size:11px}.fact-group-copy small{color:var(--atlas-subtle);font-size:10px;font-weight:800;line-height:1.4}.fact-group-toggle{flex:0 0 auto;padding:0;color:var(--atlas-primary);background:transparent;border:0;font-size:10px;font-weight:900;cursor:pointer}.fact-group-toggle:hover{text-decoration:underline}.fact-group-summary{margin:0 0 8px;color:var(--atlas-subtle);font-size:10px;line-height:1.5;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.fact-payment-table,.fact-card-grid{display:grid;gap:8px;border-top:1px solid var(--atlas-border)}
 .fact-payment-row{display:grid;grid-template-columns:minmax(84px,.8fr) minmax(0,1.3fr) minmax(96px,.72fr) auto;gap:8px;align-items:center;width:100%;min-height:56px;padding:9px 0;color:var(--atlas-text);background:transparent;border:0;border-bottom:1px solid var(--atlas-border);font:inherit;text-align:left;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease}
 .fact-card{padding:10px 10px 11px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;color:var(--atlas-text);text-align:left;cursor:pointer;transition:background-color .18s ease,box-shadow .18s ease,border-color .18s ease}
 .fact-card:hover,.fact-payment-row:hover{background:#f5f9f7}

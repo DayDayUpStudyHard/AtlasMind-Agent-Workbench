@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import AdminLayout from '../components/AdminLayout.vue'
-import { getAccessToken, setAccessToken, clearAccessToken, refreshAccessToken } from '../api/index.js'
+import { getAccessToken, setAccessToken, clearAccessToken, refreshAccessToken, getUserInfo } from '../api/index.js'
 
 const routes = [
   { path: '/login', name: 'Login', component: () => import('../views/LoginView.vue'), meta: { noAuth: true } },
@@ -21,7 +21,8 @@ const routes = [
       { path: 'eval', name: 'EvalCenter', component: () => import('../views/EvalCenter.vue') },
       { path: 'users', name: 'Users', component: () => import('../views/Users.vue') },
       { path: 'departments', name: 'Departments', component: () => import('../views/Departments.vue') },
-      { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue') }
+      { path: 'settings', name: 'Settings', component: () => import('../views/Settings.vue'), meta: { requiresAdmin: true } },
+      { path: 'account', name: 'MyAccount', component: () => import('../views/MyAccount.vue') }
     ]
   }
 ]
@@ -37,6 +38,19 @@ router.beforeEach(async (to, from, next) => {
   // Already have a token in memory
   if (getAccessToken()) {
     if (to.path === '/login') return next('/')
+
+    // Admin-only routes: verify role before letting through
+    if (to.meta.requiresAdmin) {
+      try {
+        const res = await getUserInfo()
+        if (res.data?.data?.role !== 'ADMIN') {
+          return next('/')
+        }
+      } catch {
+        return next('/')
+      }
+    }
+
     return next()
   }
 
@@ -46,6 +60,19 @@ router.beforeEach(async (to, from, next) => {
     if (token) {
       setAccessToken(token)
       if (to.path === '/login') return next('/')
+
+      // Admin-only routes (after refresh)
+      if (to.meta.requiresAdmin) {
+        try {
+          const res = await getUserInfo()
+          if (res.data?.data?.role !== 'ADMIN') {
+            return next('/')
+          }
+        } catch {
+          return next('/')
+        }
+      }
+
       return next()
     }
   } catch {

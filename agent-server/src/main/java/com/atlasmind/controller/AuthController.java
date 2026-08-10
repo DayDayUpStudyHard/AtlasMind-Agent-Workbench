@@ -129,6 +129,7 @@ public class AuthController {
         return Result.ok(userService.getById(userId));
     }
 
+    @com.atlasmind.annotation.OperationLog(value = "修改自己的密码", type = "UPDATE")
     @PutMapping("/password")
     public Result<?> updatePassword(@Valid @RequestBody PasswordDto dto) {
         long userId = StpUtil.getLoginIdAsLong();

@@ -1,27 +1,31 @@
 <template>
-  <div class="log-page">
-    <div class="page-head">
-      <h2 class="page-title">操作日志</h2>
-      <p class="page-desc">记录所有后台管理操作，用于审计追溯</p>
-    </div>
+  <div class="page">
+    <section class="page-head">
+      <div>
+        <span class="eyebrow">Audit Trail</span>
+        <h2>操作日志</h2>
+        <p>记录所有后台管理操作，用于审计追溯</p>
+      </div>
+      <el-button @click="fetchData">刷新</el-button>
+    </section>
 
-    <div class="filter-bar">
-      <el-radio-group v-model="filterType" @change="fetchData" size="small">
+    <section class="toolbar">
+      <el-radio-group v-model="filterType" @change="onFilterChange" size="small">
         <el-radio-button :value="null">全部</el-radio-button>
         <el-radio-button value="CREATE">新增</el-radio-button>
         <el-radio-button value="UPDATE">修改</el-radio-button>
         <el-radio-button value="DELETE">删除</el-radio-button>
         <el-radio-button value="OTHER">其他</el-radio-button>
       </el-radio-group>
-    </div>
+    </section>
 
-    <el-table :data="logs" v-loading="loading" stripe class="log-table">
+    <el-table :data="logs" v-loading="loading" stripe>
       <el-table-column prop="id" label="ID" width="60" align="center" />
       <el-table-column prop="username" label="操作人" width="100" />
       <el-table-column prop="ip" label="IP" width="130" />
       <el-table-column label="操作类型" width="90" align="center">
         <template #default="{ row }">
-          <span :class="['type-tag', row.type]">{{ typeText(row.type) }}</span>
+          <el-tag :type="typeTagType(row.type)" effect="plain" size="small">{{ typeText(row.type) }}</el-tag>
         </template>
       </el-table-column>
       <el-table-column prop="operation" label="操作描述" min-width="140" show-overflow-tooltip />
@@ -39,12 +43,13 @@
       </el-table-column>
     </el-table>
 
-    <div class="pagination-wrap" v-if="total > 0">
+    <div class="pagination-row" v-if="total > 0">
+      <span>共 {{ total }} 条</span>
       <el-pagination
         v-model:current-page="page"
         :page-size="pageSize"
         :total="total"
-        layout="total, prev, pager, next"
+        layout="prev, pager, next"
         @current-change="fetchData"
       />
     </div>
@@ -67,11 +72,21 @@ function typeText(t) {
   return map[t] || t
 }
 
+function typeTagType(t) {
+  const map = { CREATE: 'success', UPDATE: 'primary', DELETE: 'danger', OTHER: 'info' }
+  return map[t] || 'info'
+}
+
 function timeClass(ms) {
   if (ms == null) return ''
   if (ms < 100) return 'time-fast'
   if (ms < 500) return 'time-normal'
   return 'time-slow'
+}
+
+function onFilterChange() {
+  page.value = 1
+  fetchData()
 }
 
 async function fetchData() {
@@ -91,26 +106,15 @@ onMounted(() => fetchData())
 </script>
 
 <style scoped>
-.log-page { max-width: 1200px; }
-
-.page-head { margin-bottom: 20px; }
-.page-title { font-size: 20px; font-weight: 600; color: #303133; margin: 0 0 6px; }
-.page-desc { font-size: 13px; color: #909399; margin: 0; }
-
-.filter-bar { margin-bottom: 16px; }
-
-.type-tag {
-  display: inline-block; padding: 2px 8px; border-radius: 4px;
-  font-size: 12px; font-weight: 500;
-}
-.type-tag.CREATE { background: #e6f7e6; color: #10b981; }
-.type-tag.UPDATE { background: #ecf5ff; color: #426fa6; }
-.type-tag.DELETE { background: #fef0f0; color: #f56c6c; }
-.type-tag.OTHER { background: #f5f7fa; color: #909399; }
+.page { display: flex; flex-direction: column; gap: 18px; }
+.page-head { display: flex; align-items: center; justify-content: space-between; gap: 18px; }
+.eyebrow { color: #426fa6; font-size: 12px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
+.page-head h2 { margin: 6px 0 8px; color: #1f2d3d; font-size: 24px; }
+.page-head p { max-width: 820px; margin: 0; color: #607184; line-height: 1.7; }
+.toolbar { display: flex; align-items: center; gap: 12px; padding: 14px; background: #fff; border: 1px solid #dce4ee; border-radius: 4px; }
+.pagination-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; color: #607184; }
 
 .time-fast { color: #10b981; font-weight: 500; }
 .time-normal { color: #e6a23c; font-weight: 500; }
 .time-slow { color: #f56c6c; font-weight: 500; }
-
-.pagination-wrap { margin-top: 20px; display: flex; justify-content: flex-end; }
 </style>

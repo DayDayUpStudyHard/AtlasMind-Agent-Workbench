@@ -1,5 +1,6 @@
 package com.atlasmind.controller;
 
+import com.atlasmind.annotation.OperationLog;
 import com.atlasmind.common.Result;
 import com.atlasmind.gateway.AiGateway;
 import com.atlasmind.service.ContractMemberService;
@@ -81,6 +82,7 @@ public class ContractAdminController {
         return Result.ok(caseDeleteImpact(id));
     }
 
+    @OperationLog(value = "删除合同案件", type = "DELETE")
     @DeleteMapping("/cases/{id}")
     @Transactional
     public Result<Map<String, Object>> softDeleteCase(@PathVariable Long id) {
@@ -91,6 +93,7 @@ public class ContractAdminController {
         return Result.ok(impact);
     }
 
+    @OperationLog(value = "恢复合同案件", type = "UPDATE")
     @PostMapping("/cases/{id}/restore")
     public Result<Map<String, Object>> restoreCase(@PathVariable Long id) {
         int updated = jdbc.update("UPDATE contract_case SET deleted=0 WHERE id=? AND deleted=1", id);
@@ -146,6 +149,7 @@ public class ContractAdminController {
             "SELECT id, rule_key AS ruleKey, rule_set AS ruleSet, clause_type AS clauseType, title, description, check_type AS checkType, check_config AS checkConfig, severity, weight, is_veto AS isVeto, is_active AS isActive, version, create_time AS createTime FROM contract_review_rule ORDER BY rule_set, clause_type, id"));
     }
 
+    @OperationLog(value = "创建审查规则", type = "CREATE")
     @PostMapping("/rules")
     public Result<Map<String, Object>> createRule(@RequestBody Map<String, Object> r) {
         jdbc.update("INSERT INTO contract_review_rule (rule_key, rule_set, clause_type, title, description, check_type, check_config, severity, weight, is_veto, is_active, version)"
@@ -156,6 +160,7 @@ public class ContractAdminController {
         return Result.ok(Map.of("created", true));
     }
 
+    @OperationLog(value = "编辑审查规则", type = "UPDATE")
     @PutMapping("/rules/{id}")
     public Result<Map<String, Object>> updateRule(@PathVariable Long id, @RequestBody Map<String, Object> r) {
         java.util.List<String> sets = new java.util.ArrayList<>();
@@ -177,6 +182,7 @@ public class ContractAdminController {
         return Result.ok(Map.of("updated", updated > 0));
     }
 
+    @OperationLog(value = "删除审查规则", type = "DELETE")
     @DeleteMapping("/rules/{id}")
     public Result<Map<String, Object>> deleteRule(@PathVariable Long id) {
         jdbc.update("DELETE FROM contract_review_rule WHERE id=?", id);
@@ -191,6 +197,7 @@ public class ContractAdminController {
             "SELECT id, clause_type AS clauseType, title, content, semantic_elements AS semanticElements, is_mandatory AS isMandatory, negotiation_bottom_line AS negotiationBottomLine, version, is_active AS isActive, effective_from AS effectiveFrom, effective_to AS effectiveTo, create_time AS createTime FROM contract_standard_clause ORDER BY clause_type, id"));
     }
 
+    @OperationLog(value = "创建标准条款", type = "CREATE")
     @PostMapping("/clauses")
     public Result<Map<String, Object>> createClause(@RequestBody Map<String, Object> r) {
         jdbc.update("INSERT INTO contract_standard_clause (clause_type, title, content, semantic_elements, is_mandatory, negotiation_bottom_line, is_active, version)"
@@ -200,6 +207,7 @@ public class ContractAdminController {
         return Result.ok(Map.of("created", true));
     }
 
+    @OperationLog(value = "编辑标准条款", type = "UPDATE")
     @PutMapping("/clauses/{id}")
     public Result<Map<String, Object>> updateClause(@PathVariable Long id, @RequestBody Map<String, Object> r) {
         java.util.List<String> sets = new java.util.ArrayList<>();
@@ -224,6 +232,7 @@ public class ContractAdminController {
         return Result.ok(Map.of("updated", updated > 0));
     }
 
+    @OperationLog(value = "删除标准条款", type = "DELETE")
     @DeleteMapping("/clauses/{id}")
     public Result<Map<String, Object>> deleteClause(@PathVariable Long id) {
         jdbc.update("DELETE FROM contract_standard_clause WHERE id=?", id);
@@ -270,6 +279,7 @@ public class ContractAdminController {
     }
 
     /** Cancel a document parse job — set status to FAILED. */
+    @OperationLog(value = "取消文档解析", type = "UPDATE")
     @PutMapping("/documents/{id}/cancel")
     public Result<Map<String, Object>> cancelDocument(@PathVariable Long id) {
         int updated = jdbc.update(
@@ -278,6 +288,7 @@ public class ContractAdminController {
     }
 
     /** Delete a contract document. */
+    @OperationLog(value = "删除合同文档", type = "DELETE")
     @DeleteMapping("/documents/{id}")
     @Transactional
     public Result<Map<String, Object>> deleteDocument(@PathVariable Long id) {
@@ -295,6 +306,7 @@ public class ContractAdminController {
     }
 
     /** Retry parsing for a PENDING or FAILED document. */
+    @OperationLog(value = "重试文档解析", type = "UPDATE")
     @PostMapping("/documents/{id}/retry-parse")
     @Transactional
     public Result<Map<String, Object>> retryDocumentParse(@PathVariable Long id) {
@@ -326,6 +338,7 @@ public class ContractAdminController {
             """));
     }
 
+    @OperationLog(value = "删除合同报告", type = "DELETE")
     @DeleteMapping("/reports/{id}")
     public Result<Map<String, Object>> deleteReport(@PathVariable Long id) {
         int deleted = jdbc.update("""
@@ -355,6 +368,7 @@ public class ContractAdminController {
             """, statusFilter, statusFilter));
     }
 
+    @OperationLog(value = "删除合同动作", type = "DELETE")
     @DeleteMapping("/actions/{id}")
     @Transactional
     public Result<Map<String, Object>> deleteAction(@PathVariable Long id) {
@@ -375,6 +389,7 @@ public class ContractAdminController {
 
     /** Force-stop a running Agent run. Sets status to CANCELLED so the
      *  Python harness picks up the cancellation at its next check point. */
+    @OperationLog(value = "取消Agent运行", type = "UPDATE")
     @PutMapping("/runs/{id}/cancel")
     public Result<Map<String, Object>> cancelRun(@PathVariable Long id) {
         int updated = jdbc.update(
@@ -391,6 +406,7 @@ public class ContractAdminController {
     }
 
     /** Admin force-add a member to a contract case. */
+    @OperationLog(value = "强制添加合同成员", type = "UPDATE")
     @PostMapping("/cases/{id}/members/force-add")
     public Result<Map<String, Object>> forceAddMember(@PathVariable Long id,
                                                       @RequestBody Map<String, Object> body) {
@@ -404,6 +420,7 @@ public class ContractAdminController {
     }
 
     /** Admin force-set contract owner — bypasses OWNER check for recovery. */
+    @OperationLog(value = "强制设置合同负责人", type = "UPDATE")
     @PostMapping("/cases/{id}/owner/force-set")
     public Result<Map<String, Object>> forceSetOwner(@PathVariable Long id,
                                                      @RequestBody Map<String, Object> body) {
@@ -414,6 +431,7 @@ public class ContractAdminController {
     }
 
     /** Admin force-remove a member from a contract case. */
+    @OperationLog(value = "强制移除合同成员", type = "DELETE")
     @DeleteMapping("/cases/{caseId}/members/{userId}")
     public Result<Map<String, Object>> forceRemoveMember(@PathVariable Long caseId,
                                                          @PathVariable Long userId) {
@@ -425,6 +443,7 @@ public class ContractAdminController {
     }
 
     /** Delete an Agent run and its associated traces, tool calls, and report. */
+    @OperationLog(value = "删除Agent运行记录", type = "DELETE")
     @DeleteMapping("/runs/{id}")
     @Transactional
     public Result<Map<String, Object>> deleteRun(@PathVariable Long id) {

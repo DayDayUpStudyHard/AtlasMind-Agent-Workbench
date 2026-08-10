@@ -2,13 +2,13 @@ package com.atlasmind.aspect;
 
 import cn.dev33.satoken.stp.StpUtil;
 import com.atlasmind.annotation.OperationLog;
+import com.atlasmind.service.OperationLogService;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.aspectj.lang.ProceedingJoinPoint;
 import org.aspectj.lang.annotation.Around;
 import org.aspectj.lang.annotation.Aspect;
 import org.aspectj.lang.reflect.MethodSignature;
-import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.web.context.request.RequestContextHolder;
 import org.springframework.web.context.request.ServletRequestAttributes;
@@ -16,25 +16,19 @@ import org.springframework.web.context.request.ServletRequestAttributes;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
 import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.Map;
 
 /**
- * 操作日志切面 — 记录后台管理操作到日志文件和 Redis Stream。
+ * 操作日志切面 — 记录后台管理操作到日志文件和 MySQL。
  *
- * <h3>架构演进</h3>
+ * <h3>写入路径</h3>
  * <pre>
- *  旧: 切面 → OperationLogService.save() → @Async → MySQL 直接写入
- *  新: 切面 → Redis Stream (oplog:stream) → OperationLogConsumer → 批量写入 MySQL
+ *  Controller @OperationLog → 本切面 → OperationLogService.save() → @Async → MySQL
  * </pre>
  *
- * <h3>Stream 优势</h3>
- * <ul>
- *   <li><b>解耦</b>：请求线程只做 Stream 写入（轻量），不再依赖线程池</li>
- *   <li><b>削峰</b>：Stream 作为缓冲区，高并发时消息积压不丢失</li>
- *   <li><b>可重放</b>：消费者组 + ACK 机制，消息未确认可重新消费</li>
- *   <li><b>可扩展</b>：多实例部署时消费者组自动负载均衡</li>
- * </ul>
+ * <p>
+ * 不再依赖 Redis Stream（Windows Redis 3.x 不支持 Stream 5.0+ 命令）。
+ * 如需在生产环境（Linux Redis 7.x）启用 Stream 削峰，可通过配置开关切换
+ * 为 Stream → Consumer 路径，同时关闭直写 DB 以避免重复。
  *
  * <p>
  * 日志格式：{@code [操作类型] 操作描述 | 用户: xxx | IP: xxx | 参数: [...] | 耗时: xxxms}
@@ -44,12 +38,10 @@ import java.util.Map;
 @Component
 public class OperationLogAspect {
 
-    private static final String STREAM_KEY = "oplog:stream";
+    private final OperationLogService operationLogService;
 
-    private final StringRedisTemplate redisTemplate;
-
-    public OperationLogAspect(StringRedisTemplate redisTemplate) {
-        this.redisTemplate = redisTemplate;
+    public OperationLogAspect(OperationLogService operationLogService) {
+        this.operationLogService = operationLogService;
     }
 
     @Around("@annotation(com.atlasmind.annotation.OperationLog)")
@@ -85,24 +77,30 @@ public class OperationLogAspect {
         log.info("[{}] {} | 用户: {} | IP: {} | 参数: {} | 耗时: {}ms",
                 annotation.type(), annotation.value(), username, ip, args, elapsed);
 
-        // 推送到 Redis Stream（异步解耦，由 OperationLogConsumer 批量写入 DB）
-        try {
-            Map<String, String> fields = new LinkedHashMap<>();
-            fields.put("username", username);
-            fields.put("operatorId", String.valueOf(getLoginUserId()));
-            fields.put("ip", ip);
-            fields.put("operation", annotation.value());
-            fields.put("type", annotation.type());
-            fields.put("methodName", methodName);
-            fields.put("args", args);
-            fields.put("executionTime", String.valueOf(elapsed));
-            fields.put("createTime", LocalDateTime.now().toString());
-            redisTemplate.opsForStream().add(STREAM_KEY, fields);
-        } catch (Exception e) {
-            log.warn("[OpLog] Redis Stream 写入失败: {}", e.getMessage());
-        }
+        // 直写 DB（主路径，@Async 异步执行，不拖慢接口响应）
+        saveToDatabase(username, ip, annotation, methodName, args, elapsed);
 
         return result;
+    }
+
+    /** 构造实体并通过 @Async 写入 MySQL，确保审计日志落库。 */
+    private void saveToDatabase(String username, String ip, OperationLog annotation,
+                                String methodName, String args, long elapsed) {
+        try {
+            com.atlasmind.entity.OperationLog entry = new com.atlasmind.entity.OperationLog();
+            entry.setUsername(username);
+            entry.setIp(ip);
+            entry.setOperation(annotation.value());
+            entry.setType(annotation.type());
+            entry.setMethodName(methodName);
+            entry.setArgs(args);
+            entry.setExecutionTime(elapsed);
+            entry.setOperatorId(getLoginUserId());
+            entry.setCreateTime(LocalDateTime.now());
+            operationLogService.save(entry);
+        } catch (Exception ex) {
+            log.error("[OpLog] 异步写入失败: {}", ex.getMessage());
+        }
     }
 
     private String getLoginUsername() {
