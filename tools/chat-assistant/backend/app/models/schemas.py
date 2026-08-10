@@ -13,6 +13,8 @@ class ChatRequest(BaseModel):
     topK: int = Field(default=5, ge=1, le=20)
     sessionId: Optional[int] = None
     ownerToken: Optional[str] = None
+    scope: Optional[str] = None
+    caseId: Optional[int] = None
     projectId: Optional[int] = None
     spaceId: Optional[int] = None
     documentId: Optional[int] = None

@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.stereotype.Component;
 
 import java.net.URI;
@@ -25,6 +26,7 @@ public class HttpAiGateway implements AiGateway {
 
     private final ObjectMapper objectMapper;
     private final UserService userService;
+    private final Environment environment;
 
     private final HttpClient httpClient = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3))
@@ -32,9 +34,6 @@ public class HttpAiGateway implements AiGateway {
 
     @Value("${atlasmind.chat-assistant.url:http://localhost:18088}")
     private String baseUrl;
-
-    @Value("${atlasmind.chat-assistant.token:}")
-    private String internalToken;
 
     @Value("${atlasmind.chat-assistant.timeout-seconds:12}")
     private long timeoutSeconds;
@@ -144,6 +143,7 @@ public class HttpAiGateway implements AiGateway {
                     .uri(URI.create(normalizedBaseUrl + path))
                     .timeout(Duration.ofSeconds(Math.max(1, requestTimeoutSeconds)));
 
+            String internalToken = resolveInternalToken();
             if (internalToken != null && !internalToken.isBlank()) {
                 builder.header("X-Internal-Token", internalToken);
             }
@@ -189,5 +189,21 @@ public class HttpAiGateway implements AiGateway {
         } catch (Exception e) {
             throw new IllegalStateException("调用 Python AI 服务失败: " + e.getMessage(), e);
         }
+    }
+
+    private String resolveInternalToken() {
+        String token = environment.getProperty("atlasmind.chat-assistant.token");
+        if (token != null && !token.isBlank()) {
+            return token;
+        }
+        token = environment.getProperty("atlasmind.internal-token");
+        if (token != null && !token.isBlank()) {
+            return token;
+        }
+        token = environment.getProperty("CHAT_ASSISTANT_TOKEN");
+        if (token != null && !token.isBlank()) {
+            return token;
+        }
+        return "";
     }
 }

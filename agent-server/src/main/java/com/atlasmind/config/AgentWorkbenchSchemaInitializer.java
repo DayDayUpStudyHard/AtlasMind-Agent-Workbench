@@ -633,6 +633,16 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     UNIQUE KEY uk_idempotency (idempotency_key)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS private_upload (
+                    path VARCHAR(512) PRIMARY KEY,
+                    owner_id BIGINT NOT NULL,
+                    original_name VARCHAR(512) DEFAULT '',
+                    content_type VARCHAR(128) DEFAULT 'application/octet-stream',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_private_upload_owner (owner_id, create_time)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
         // contract_case extension
         addColumnIfMissing("contract_case", "visibility",
                 "VARCHAR(16) NOT NULL DEFAULT 'LEGACY_REVIEW' COMMENT 'LEGACY_REVIEW|DEPARTMENT|SPECIFIED|ALL'");
@@ -653,9 +663,55 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     INDEX idx_dept_contract (department_id, contract_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // contract_document extension — 文件物理状态与安全扫描
+        addColumnIfMissing("contract_document", "storage_status",
+                "VARCHAR(16) NOT NULL DEFAULT 'AVAILABLE' COMMENT 'AVAILABLE|QUARANTINED|DELETED'");
+        addColumnIfMissing("contract_document", "storage_key",
+                "VARCHAR(512) DEFAULT NULL COMMENT '内部存储 key，替代 file_path 作为安全边界'");
+        addColumnIfMissing("contract_document", "content_type",
+                "VARCHAR(128) DEFAULT NULL COMMENT 'MIME 类型'");
+        addColumnIfMissing("contract_document", "scan_status",
+                "VARCHAR(16) NOT NULL DEFAULT 'UNSCANNED' COMMENT 'UNSCANNED|CLEAN|INFECTED'");
+        // file_access_log — 文件下载审计
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS file_access_log (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    document_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    access_type VARCHAR(16) NOT NULL COMMENT 'DOWNLOAD|PREVIEW|THUMBNAIL',
+                    ip VARCHAR(45),
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    INDEX idx_document_time (document_id, create_time),
+                    INDEX idx_user_time (user_id, create_time),
+                    INDEX idx_case_time (case_id, create_time)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        // contract_member — 合同协作成员
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_member (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    role VARCHAR(16) NOT NULL DEFAULT 'VIEWER' COMMENT 'OWNER|EDITOR|REVIEWER|VIEWER',
+                    status VARCHAR(16) NOT NULL DEFAULT 'ACTIVE' COMMENT 'ACTIVE|INVITED|REMOVED',
+                    invited_by BIGINT COMMENT '邀请人 user_id',
+                    joined_at DATETIME COMMENT '接受邀请时间',
+                    removed_at DATETIME COMMENT '移除时间',
+                    create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_case_user (case_id, user_id),
+                    INDEX idx_user (user_id),
+                    INDEX idx_case_role (case_id, role)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
         // agent_run extension
         addColumnIfMissing("agent_run", "initiated_by",
                 "BIGINT DEFAULT NULL COMMENT '发起人 user_id（额度归属依据）'");
+        addColumnIfMissing("agent_run", "document_snapshot_json",
+                "LONGTEXT COMMENT '启动时的文件快照 [{documentId, version, contentHash, storageKey}]'");
+        addColumnIfMissing("kb_qa_session", "case_id",
+                "BIGINT DEFAULT NULL COMMENT '鍏宠仈鐨勫悎鍚屾浠?case_id'");
         // t_operation_log extension
         addColumnIfMissing("t_operation_log", "operator_id", "BIGINT DEFAULT NULL");
         addColumnIfMissing("t_operation_log", "target_type", "VARCHAR(64) DEFAULT NULL");

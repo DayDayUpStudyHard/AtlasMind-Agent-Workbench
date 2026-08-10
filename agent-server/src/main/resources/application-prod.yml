@@ -5,15 +5,15 @@
 spring:
   datasource:
     url: jdbc:mysql://${MYSQL_HOST:localhost}:${MYSQL_PORT:3306}/${MYSQL_DB:atlasmind_agent}?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai
-    username: ${MYSQL_USER:root}
-    password: ${MYSQL_PASSWORD:123456}
+    username: ${MYSQL_USER}
+    password: ${MYSQL_PASSWORD}
     driver-class-name: com.mysql.cj.jdbc.Driver
 
   data:
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
-      password: ${REDIS_PASSWORD:}
+      password: ${REDIS_PASSWORD}
       database: 0
       lettuce:
         pool:
@@ -25,10 +25,15 @@ spring:
     uris: ${ES_URIS:http://elasticsearch:9200}
 
 atlasmind:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS}
+  bootstrap-admin:
+    password: ${BOOTSTRAP_ADMIN_PASSWORD}
   upload-path: ${UPLOAD_PATH:upload/}
+  internal-token: ${INTERNAL_SERVICE_TOKEN}
   chat-assistant:
     url: ${CHAT_ASSISTANT_URL:http://ai-service:18088}
-    token: ${CHAT_ASSISTANT_TOKEN:}
+    token: ${CHAT_ASSISTANT_TOKEN}
   search:
     type: ${SEARCH_TYPE:elasticsearch}
   storage:

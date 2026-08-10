@@ -3,11 +3,13 @@ package com.atlasmind.controller;
 import com.atlasmind.common.Result;
 import com.atlasmind.entity.KbNotification;
 import com.atlasmind.gateway.AiGateway;
+import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.KnowledgeBaseService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +23,7 @@ public class WorkspaceStatusController {
     private final KnowledgeBaseService knowledgeBaseService;
     private final JdbcTemplate jdbcTemplate;
     private final AiGateway aiGateway;
+    private final ContractAccessPolicy accessPolicy;
 
     @GetMapping("/notifications")
     public Result<List<KbNotification>> notifications(
@@ -66,8 +69,24 @@ public class WorkspaceStatusController {
 
     @GetMapping("/runs/recent")
     public Result<List<Map<String, Object>>> recentRuns() {
-        return Result.ok(jdbcTemplate.queryForList(
-                "SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId,"
+        // Build visibility filter for CONTRACT_CASE runs; PROJECT runs are always visible
+        List<Object> visParams = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilter(visParams);
+        List<Object> allParams = new ArrayList<>();
+
+        StringBuilder where = new StringBuilder("WHERE ");
+        if (visFilter.isEmpty()) {
+            // Admin: all runs visible
+            where.append("1=1");
+        } else {
+            // Non-admin: PROJECT runs always visible; CONTRACT_CASE runs filtered by visibility
+            where.append("(r.subject_type='PROJECT'")
+                  .append(" OR (r.subject_type='CONTRACT_CASE' AND c.id IS NOT NULL ")
+                  .append(visFilter).append("))");
+            allParams.addAll(visParams);
+        }
+
+        String sql = "SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId,"
                 + " r.run_type AS runType, r.question, r.status, r.progress,"
                 + " r.current_step AS currentStep, r.error_message AS errorMessage,"
                 + " r.create_time AS createTime, r.update_time AS updateTime,"
@@ -79,7 +98,10 @@ public class WorkspaceStatusController {
                 + " FROM agent_run r"
                 + " LEFT JOIN contract_case c ON r.subject_type='CONTRACT_CASE' AND c.id=r.subject_id AND c.deleted=0"
                 + " LEFT JOIN agent_project p ON r.subject_type='PROJECT' AND p.id=r.project_id"
-                + " ORDER BY r.id DESC LIMIT 20"));
+                + " " + where
+                + " ORDER BY r.id DESC LIMIT 20";
+
+        return Result.ok(jdbcTemplate.queryForList(sql, allParams.toArray()));
     }
 
     private String safeMessage(Exception exception) {

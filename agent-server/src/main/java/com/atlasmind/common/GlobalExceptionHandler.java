@@ -5,6 +5,7 @@ import cn.dev33.satoken.exception.NotRoleException;
 import cn.dev33.satoken.exception.NotLoginException;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
+import com.atlasmind.service.QuotaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
@@ -110,6 +111,12 @@ public class GlobalExceptionHandler {
     @ExceptionHandler(IllegalStateException.class)
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Result<?> handleIllegalState(IllegalStateException e) {
+        return Result.fail(e.getMessage());
+    }
+
+    @ExceptionHandler(QuotaService.QuotaExceededException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public Result<?> handleQuotaExceeded(QuotaService.QuotaExceededException e) {
         return Result.fail(e.getMessage());
     }
 

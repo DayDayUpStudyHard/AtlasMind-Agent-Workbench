@@ -33,6 +33,11 @@ public class AiSessionServiceImpl implements AiSessionService {
         session.setOwnerToken(UUID.randomUUID().toString().replace("-", ""));
         session.setSpaceId(longValue(request.get("spaceId")));
         session.setDocumentId(longValue(request.get("documentId")));
+        Long caseId = longValue(request.get("caseId"));
+        if (caseId == null) {
+            caseId = longValue(request.get("projectId"));
+        }
+        session.setCaseId(caseId);
         sessionMapper.insert(session);
         return session;
     }

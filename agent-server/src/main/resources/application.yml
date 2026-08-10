@@ -59,7 +59,7 @@ atlasmind:
   search:
     type: ${SEARCH_TYPE:mysql}
   chat-assistant:
-    url: ${CHAT_ASSISTANT_URL:http://localhost:18088}
+    url: ${CHAT_ASSISTANT_URL:http://127.0.0.1:18088}
     token: ${CHAT_ASSISTANT_TOKEN:}
     timeout-seconds: ${CHAT_ASSISTANT_TIMEOUT_SECONDS:12}
   embedding:

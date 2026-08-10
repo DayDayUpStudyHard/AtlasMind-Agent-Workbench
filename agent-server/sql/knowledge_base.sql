@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS kb_qa_session (
     owner_token VARCHAR(64) NOT NULL,
     space_id BIGINT NULL,
     document_id BIGINT NULL,
+    case_id BIGINT NULL,
     create_time DATETIME DEFAULT CURRENT_TIMESTAMP
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 

@@ -5,10 +5,13 @@ import com.atlasmind.gateway.GitHubIssueGateway;
 import com.atlasmind.service.AgentActionExecutor;
 import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
+import com.atlasmind.service.ContractMemberService;
 import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.KnowledgeBaseService;
+import com.atlasmind.service.PrivateUploadService;
 import com.atlasmind.service.QuotaService;
 import com.atlasmind.service.UserService;
+import cn.dev33.satoken.stp.StpUtil;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -69,6 +72,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private final ContractAccessPolicy accessPolicy;
     private final QuotaService quotaService;
     private final UserService userService;
+    private final PrivateUploadService privateUploadService;
+    private final ContractMemberService memberService;
 
     // ── Portfolio ──────────────────────────────────────────────────
 
@@ -686,6 +691,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             jdbcTemplate.update("INSERT INTO contract_party (case_id, party_name, party_role) VALUES (?,?,'OUR_ENTITY')", id, ourEntity);
         }
 
+        // Auto-add creator as OWNER
+        memberService.addOwner(id, userId);
+
         return getCase(id);
     }
 
@@ -1010,6 +1018,54 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     }
 
     @Override
+    public PrivateUploadService.PrivateFile downloadDocument(Long documentId) {
+        // 1. 查询 document → 定位 case_id
+        Map<String, Object> doc = first(jdbcTemplate.queryForList(
+            "SELECT d.id, d.case_id AS caseId, d.file_path AS filePath, d.storage_key AS storageKey,"
+            + " d.storage_status AS storageStatus, d.file_name AS fileName,"
+            + " d.content_type AS contentType, COALESCE(d.deleted,0) AS deleted"
+            + " FROM contract_document d WHERE d.id=?", documentId));
+        if (doc == null) throw notFound("文件不存在");
+
+        // 2. 校验合同权限
+        accessPolicy.checkAccess(numberAsLong(doc.get("caseId")));
+
+        // 3. 校验文件状态
+        String storageStatus = str(doc, "storageStatus");
+        if ("DELETED".equals(storageStatus) || "QUARANTINED".equals(storageStatus)) {
+            throw notFound("文件不存在");
+        }
+        Object deleted = doc.get("deleted");
+        if (deleted instanceof Number && ((Number) deleted).intValue() == 1) {
+            throw notFound("文件不存在");
+        }
+
+        // 4. 定位物理文件(storage_key 优先，file_path 兼容历史)
+        String filePath = str(doc, "storageKey");
+        if (filePath.isBlank()) filePath = str(doc, "filePath");
+        if (filePath.isBlank()) throw notFound("文件不存在");
+
+        // 5. 记录访问日志
+        logFileAccess(numberAsLong(doc.get("caseId")), documentId,
+                StpUtil.getLoginIdAsLong(), "DOWNLOAD");
+
+        // 6. 返回文件流
+        return privateUploadService.streamFile(filePath,
+                str(doc, "fileName"), str(doc, "contentType"));
+    }
+
+    private void logFileAccess(Long caseId, Long documentId, Long userId, String accessType) {
+        jdbcTemplate.update(
+            "INSERT INTO file_access_log (case_id, document_id, user_id, access_type) VALUES (?,?,?,?)",
+            caseId, documentId, userId, accessType);
+    }
+
+    private org.springframework.web.server.ResponseStatusException notFound(String msg) {
+        return new org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.NOT_FOUND, msg);
+    }
+
+    @Override
     public List<Map<String, Object>> listDocuments(Long caseId) {
         List<Map<String, Object>> documents = jdbcTemplate.queryForList(
                 "SELECT id, document_type AS documentType, file_name AS fileName,"
@@ -1035,6 +1091,8 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
     @Override
     public List<Map<String, Object>> listRecentDocumentPipelines() {
+        List<Object> visParams = new ArrayList<>();
+        String visFilter = accessPolicy.buildVisibilityFilter(visParams);
         return jdbcTemplate.queryForList("""
                 SELECT j.id AS jobId, j.case_id AS caseId,
                        c.case_key AS caseKey, c.title AS caseTitle,
@@ -1051,9 +1109,11 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 FROM contract_document_job j
                 JOIN contract_case c ON c.id=j.case_id AND c.deleted=0
                 LEFT JOIN contract_document d ON d.id=j.document_id
+                WHERE 1=1 """
+                + visFilter + """
                 ORDER BY j.id DESC
                 LIMIT 12
-                """);
+                """, visParams.toArray());
     }
 
     // ── Agent Run delegation ───────────────────────────────────────
@@ -1137,16 +1197,29 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             inputJson.put("analysisWorkflow", analysisWorkflow);
         }
 
+        // Capture document snapshot for audit trail and reproducibility
+        List<Map<String, Object>> docSnapshots = jdbcTemplate.queryForList(
+            "SELECT d.id AS documentId, d.document_type AS documentType,"
+            + " d.version, d.file_name AS fileName,"
+            + " d.storage_key AS storageKey, d.file_path AS filePath"
+            + " FROM contract_document d"
+            + " WHERE d.case_id=? AND COALESCE(d.deleted,0)=0 AND d.storage_status='AVAILABLE'"
+            + " ORDER BY d.version DESC", caseId);
+        String docSnapshotJson = null;
+        if (!docSnapshots.isEmpty()) {
+            try { docSnapshotJson = objectMapper.writeValueAsString(docSnapshots); } catch (Exception ignored) {}
+        }
+
         Long runId = insert("""
                 INSERT INTO agent_run
                     (subject_type, subject_id, project_id, run_type, trigger_type, question,
                      input_json, workflow_id, workflow_stage, evidence_snapshot_hash,
-                     initiated_by, status, progress, current_step)
-                VALUES (?,?,0,?,?,?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
+                     document_snapshot_json, initiated_by, status, progress, current_step)
+                VALUES (?,?,0,?,?,?,?,?,?,?,?,?,'CREATED',0,'等待 Agent 调度')
                 """, SUBJECT_TYPE, caseId, taskType,
                 str(request, "triggerType"), str(request, "question"),
                 json(inputJson), workflowId, workflowStage, evidenceSnapshotHash,
-                userId);
+                docSnapshotJson, userId);
 
         // Pre-reserve quota
         try {
@@ -1674,6 +1747,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     }
 
     private void dispatchToPython(Long runId, Long caseId, String taskType) {
+        Long workflowId = null;
         try {
             Map<String, Object> c = first(jdbcTemplate.queryForList(
                     "SELECT id, case_key AS caseKey, title, contract_type AS contractType FROM contract_case WHERE id=?", caseId));
@@ -1695,14 +1769,40 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             payload.put("actor", "java-service");
             payload.put("taskInput", taskInput);
             if (run != null) {
-                payload.put("workflowId", run.get("workflowId"));
+                workflowId = numberAsLongOrNull(run.get("workflowId"));
+                payload.put("workflowId", workflowId);
                 payload.put("workflowStage", run.get("workflowStage"));
                 payload.put("evidenceSnapshotHash", run.get("evidenceSnapshotHash"));
             }
             payload.put("options", Map.of());
             aiGateway.startAgentRun(payload);
         } catch (Exception e) {
-            jdbcTemplate.update("UPDATE agent_run SET status='FAILED', progress=0, current_step='Agent 服务不可用', error_message=? WHERE id=?", e.getMessage(), runId);
+            String errorMessage = e.getMessage() == null || e.getMessage().isBlank()
+                    ? "调用 Python AI 服务失败"
+                    : e.getMessage();
+            jdbcTemplate.update("""
+                    UPDATE agent_run
+                    SET status='FAILED', progress=0, current_step='Agent 服务不可用', error_message=?
+                    WHERE id=?
+                    """, errorMessage, runId);
+            if (workflowId != null) {
+                if ("CONTRACT_ELEMENT_EXTRACTION".equals(taskType)) {
+                    jdbcTemplate.update("""
+                            UPDATE contract_analysis_workflow
+                            SET extraction_status='FAILED',
+                                status=CASE WHEN status='REVIEWING' THEN 'READY_FOR_REVIEW' ELSE status END,
+                                current_stage=CASE WHEN current_stage='FACT_EXTRACTION' THEN 'RISK_REVIEW' ELSE current_stage END,
+                                last_error=?
+                            WHERE id=?
+                            """, errorMessage, workflowId);
+                } else if ("CONTRACT_REVIEW".equals(taskType)) {
+                    jdbcTemplate.update("""
+                            UPDATE contract_analysis_workflow
+                            SET last_error=?
+                            WHERE id=?
+                            """, errorMessage, workflowId);
+                }
+            }
         }
     }
 
@@ -1763,6 +1863,29 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         Map<String, Object> evidenceRequest = new HashMap<>(request);
         evidenceRequest.put("documentType", "FULFILLMENT_EVIDENCE");
         return uploadDocument(caseId, evidenceRequest);
+    }
+
+    @Override
+    @Transactional
+    public void transitionStatus(Long caseId, String fromStatus, String toStatus, String reason, Long userId) {
+        var rows = jdbcTemplate.queryForList(
+                "SELECT id, status FROM contract_case WHERE id=? AND deleted=0 FOR UPDATE", caseId);
+        if (rows.isEmpty()) throw new IllegalArgumentException("合同不存在");
+        String current = String.valueOf(rows.get(0).get("status"));
+        if (!fromStatus.equals(current)) {
+            throw new IllegalArgumentException(
+                    "当前状态 " + current + " 不允许变更为 " + toStatus + "（要求当前为 " + fromStatus + "）");
+        }
+        jdbcTemplate.update("UPDATE contract_case SET status=? WHERE id=?", toStatus, caseId);
+        // 记录状态变更审计
+        try {
+            jdbcTemplate.update(
+                    "INSERT INTO t_operation_log (operator_id, target_type, target_id, target_label, action, old_value_json, new_value_json) VALUES (?,?,?,?,?,?,?)",
+                    userId, "CONTRACT_CASE", caseId, "status-transition", "STATUS_CHANGE",
+                    "{\"status\":\"" + current + "\"}", "{\"status\":\"" + toStatus + "\",\"reason\":\"" + (reason != null ? reason : "") + "\"}");
+        } catch (Exception ignored) {
+            // 审计日志写入失败不阻塞主流程
+        }
     }
 
     @Override

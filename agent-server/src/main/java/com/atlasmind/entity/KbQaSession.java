@@ -18,6 +18,7 @@ public class KbQaSession {
     private String ownerToken;
     private Long spaceId;
     private Long documentId;
+    private Long caseId;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
 }

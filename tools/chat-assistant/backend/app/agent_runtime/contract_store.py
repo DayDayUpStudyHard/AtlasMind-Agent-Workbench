@@ -22,6 +22,170 @@ _CONTRACT_SEARCH_TERMS = (
     "到期", "通知", "逾期", "违约", "赔偿", "保密", "个人信息", "数据",
 )
 
+_CONTRACT_FACT_QUERY_TERMS = (
+    "总价", "总金额", "总额", "金额", "价款", "合同价", "合同金额", "多少钱",
+    "付款", "发票", "币种", "生效", "到期", "期限", "签订日期", "合同名称",
+    "主体", "相对方", "甲方", "乙方",
+)
+
+
+def _format_contract_value(value: Any, value_type: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value_type.upper() == "MONEY":
+            if float(value).is_integer():
+                return f"{int(value):,}"
+            return f"{float(value):,}"
+        if float(value).is_integer():
+            return str(int(value))
+        return str(value)
+    if isinstance(value, dict):
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return str(value)
+    if isinstance(value, list):
+        try:
+            return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        except Exception:
+            return str(value)
+    return str(value).strip()
+
+
+def _summarize_contract_value(value: Any, value_type: str = "", label: str = "", key: str = "") -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value_type.upper() == "MONEY":
+            return f"{_format_contract_value(value, value_type)} 元"
+        return _format_contract_value(value, value_type)
+    if isinstance(value, list):
+        if value_type.upper() == "STRUCTURED" and value and all(isinstance(item, dict) for item in value):
+            parts = []
+            total_amount = 0.0
+            amount_count = 0
+            for item in value[:6]:
+                if not isinstance(item, dict):
+                    continue
+                percentage = str(item.get("percentage") or item.get("ratio") or "").strip()
+                amount = item.get("amount")
+                condition = str(item.get("condition") or item.get("timing") or "").strip()
+                piece = " / ".join(part for part in [percentage, _format_contract_value(amount, "MONEY") if amount not in (None, "") else "", condition] if part)
+                if piece:
+                    parts.append(piece)
+                try:
+                    if amount not in (None, ""):
+                        total_amount += float(amount)
+                        amount_count += 1
+                except Exception:
+                    pass
+            if parts:
+                prefix = "分期" if any("期" in str(item.get("occurrenceNo") or "") for item in value[:6]) else "结构化条款"
+                if amount_count and total_amount:
+                    return f"{prefix}：{len(parts)}项，合计 {_format_contract_value(total_amount, 'MONEY')} 元"
+                return f"{prefix}：{len(parts)}项，{parts[0]}"
+        text = ", ".join(_format_contract_value(item) for item in value[:4] if item not in (None, ""))
+        return text if text else f"共 {len(value)} 项"
+    if isinstance(value, dict):
+        for money_key in ("amount", "totalAmount", "contractAmount", "value"):
+            money = value.get(money_key)
+            if money not in (None, "") and isinstance(money, (int, float, str)):
+                try:
+                    numeric = float(str(money).replace(",", ""))
+                    return f"{_format_contract_value(numeric, 'MONEY')} 元"
+                except Exception:
+                    pass
+        if any(k in value for k in ("percentage", "condition", "invoice", "taxRate")):
+            pieces = []
+            for field_key in ("percentage", "condition", "amount", "currency", "invoice"):
+                field_value = value.get(field_key)
+                if field_value in (None, ""):
+                    continue
+                if field_key == "amount":
+                    pieces.append(f"金额 {_format_contract_value(field_value, 'MONEY')} 元")
+                else:
+                    pieces.append(f"{field_key}={_format_contract_value(field_value)}")
+            if pieces:
+                return "；".join(pieces[:4])
+        keys = list(value.keys())
+        return f"{label or key or '结构化事实'}：{len(keys)}个字段"
+    text = _format_contract_value(value, value_type)
+    if len(text) > 120:
+        return text[:120] + "…"
+    return text
+
+
+def _contract_fact_query_terms(query: str) -> list[str]:
+    text = str(query or "")
+    return [term for term in _CONTRACT_FACT_QUERY_TERMS if term in text]
+
+
+def _contract_fact_relevance(field: dict, query_terms: list[str]) -> float:
+    label = str(field.get("label") or field.get("key") or "")
+    key = str(field.get("key") or "")
+    value_text = _format_contract_value(field.get("value"), str(field.get("valueType") or ""))
+    haystack = " ".join([label, key, value_text])
+    score = 0.0
+    for term in query_terms:
+        if term in haystack:
+            score += 3.0
+        elif any(part in key for part in ("amount", "price", "payment", "date", "party", "title")) and term in _CONTRACT_FACT_QUERY_TERMS:
+            score += 1.0
+    importance = str(field.get("importance") or "").upper()
+    if importance == "CORE":
+        score += 2.0
+    elif importance == "SUPPORTING":
+        score += 1.0
+    try:
+        score += float(field.get("confidence") or 0) * 0.5
+    except Exception:
+        pass
+    return score
+
+
+def _contract_profile_source(snapshot_id: int, field: dict, group_label: str = "", source_id: int | None = None) -> dict:
+    label = str(field.get("label") or field.get("key") or "合同画像事实")
+    key = str(field.get("key") or label)
+    value = field.get("value")
+    value_type = str(field.get("valueType") or "")
+    status = str(field.get("status") or "")
+    confidence = field.get("confidence")
+    citations = field.get("citations") if isinstance(field.get("citations"), list) else []
+    citation = citations[0] if citations else {}
+    quote = citation.get("quote") or ""
+    page = citation.get("pageNumber") or citation.get("page") or None
+    title_prefix = f"{group_label}·" if group_label else ""
+    display_value = _format_contract_value(value, value_type)
+    summary_value = _summarize_contract_value(value, value_type, label, key)
+    parts = [
+        f"{label}：{display_value}" if display_value else f"{label}：待补充",
+        f"状态：{status or 'UNKNOWN'}",
+    ]
+    if confidence not in (None, ""):
+        try:
+            parts.append(f"置信度：{float(confidence):.2f}")
+        except Exception:
+            parts.append(f"置信度：{confidence}")
+    if quote:
+        parts.append(f"原文依据：{quote}")
+    content = "\n".join(parts)
+    return {
+        "sourceType": "CONTRACT_PROFILE",
+        "sourceId": source_id if source_id is not None else snapshot_id,
+        "id": source_id if source_id is not None else snapshot_id,
+        "chunkId": None,
+        "title": f"{title_prefix}{label}",
+        "content": content,
+        "snippet": f"{label}：{summary_value or display_value or '待补充'}",
+        "page": page,
+        "score": float(confidence or 0),
+        "retrievalType": "CONTRACT_PROFILE",
+        "fieldKey": key,
+        "fieldStatus": status,
+        "fieldValueType": value_type,
+    }
+
 
 def _evidence_terms(text: str) -> list[str]:
     terms: list[str] = []
@@ -236,6 +400,92 @@ class ContractStore:
                         (case_id,),
                     )
                     return _normalize_value(cur.fetchone() or {})
+        return await _run_sync(_get)
+
+    async def get_contract_profile_sources(self, case_id: int, query: str = "", limit: int = 8) -> dict:
+        query_terms = _contract_fact_query_terms(query)
+
+        def _get():
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """SELECT id, document_id AS documentId, document_version AS documentVersion,
+                                  status, profile_schema_version AS profileSchemaVersion,
+                                  profile_json AS profileJson, profile_status AS profileStatus,
+                                  snapshot_hash AS snapshotHash, content_hash AS contentHash,
+                                  create_time AS createTime, update_time AS updateTime
+                           FROM contract_extraction_snapshot
+                           WHERE case_id=%s
+                             AND status IN ('READY_FOR_CONFIRMATION','CONFIRMED')
+                           ORDER BY (status='CONFIRMED') DESC, id DESC
+                           LIMIT 1""",
+                        (case_id,),
+                    )
+                    snapshot = _normalize_value(cur.fetchone() or {})
+                    if not snapshot:
+                        return {"snapshot": {}, "profile": {}, "sources": [], "summary": ""}
+
+                    profile_json = snapshot.get("profileJson")
+                    profile = {}
+                    if isinstance(profile_json, str) and profile_json.strip():
+                        try:
+                            profile = json.loads(profile_json)
+                        except Exception:
+                            profile = {}
+                    elif isinstance(profile_json, dict):
+                        profile = profile_json
+
+                    sources: list[dict] = []
+                    summary_lines: list[str] = []
+                    base_fields = profile.get("baseFields") if isinstance(profile, dict) else []
+                    if isinstance(base_fields, list):
+                        ranked_fields = []
+                        for index, field in enumerate(base_fields):
+                            if not isinstance(field, dict):
+                                continue
+                            ranked_fields.append(( -_contract_fact_relevance(field, query_terms), index, field))
+                        ranked_fields.sort(key=lambda item: item[0])
+                        selected_fields = [item for item in ranked_fields[:max(1, limit)]]
+                        for score, index, field in selected_fields:
+                            source_id = int(snapshot.get("id") or 0) * 1000 + index + 1
+                            source = _contract_profile_source(snapshot.get("id"), field, source_id=source_id)
+                            sources.append(source)
+                            summary_lines.append(f"- {source['title']}: {source['snippet'].split('：', 1)[-1]}")
+
+                    groups = profile.get("groups") if isinstance(profile, dict) else []
+                    if isinstance(groups, list) and len(sources) < limit:
+                        for group_index, group in enumerate(groups):
+                            if not isinstance(group, dict):
+                                continue
+                            group_label = str(group.get("label") or group.get("groupKey") or "合同画像")
+                            fields = group.get("fields") if isinstance(group.get("fields"), list) else []
+                            if not fields:
+                                continue
+                            top_field = next((f for f in fields if isinstance(f, dict)), None)
+                            if not top_field:
+                                continue
+                            source_id = int(snapshot.get("id") or 0) * 1000 + 500 + group_index + 1
+                            source = _contract_profile_source(snapshot.get("id"), top_field, group_label, source_id=source_id)
+                            source["sourceType"] = "CONTRACT_PROFILE"
+                            source["sourceId"] = source_id
+                            source["id"] = source_id
+                            source["title"] = f"{group_label}"
+                            source["content"] = "\n".join([
+                                f"{group_label}：{str(group.get('reason') or '').strip() or '合同画像分组'}",
+                                source["content"],
+                            ])
+                            sources.append(source)
+                            summary_lines.append(f"- {group_label}: {str(group.get('reason') or '').strip() or source['snippet']}")
+                            if len(sources) >= limit:
+                                break
+
+                    return {
+                        "snapshot": snapshot,
+                        "profile": profile,
+                        "sources": sources[:limit],
+                        "summary": "合同画像事实（优先证据）:\n" + "\n".join(summary_lines[:limit]) if summary_lines else "",
+                    }
+
         return await _run_sync(_get)
 
     async def get_parties(self, case_id: int) -> list[dict]:

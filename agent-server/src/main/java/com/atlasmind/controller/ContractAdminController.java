@@ -2,6 +2,7 @@ package com.atlasmind.controller;
 
 import com.atlasmind.common.Result;
 import com.atlasmind.gateway.AiGateway;
+import com.atlasmind.service.ContractMemberService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.annotation.Transactional;
@@ -18,6 +19,7 @@ public class ContractAdminController {
 
     private final JdbcTemplate jdbc;
     private final AiGateway aiGateway;
+    private final ContractMemberService memberService;
 
     // ── Contract case management ──────────────────────────────────
 
@@ -237,10 +239,34 @@ public class ContractAdminController {
             "SELECT d.id, d.case_id AS caseId, c.case_key AS caseKey, c.title AS caseTitle,"
             + " d.document_type AS documentType, d.file_name AS fileName, d.file_size AS fileSize,"
             + " d.version, d.parse_status AS parseStatus, d.parse_error AS parseError,"
+            + " d.storage_status AS storageStatus, d.scan_status AS scanStatus,"
             + " d.page_count AS pageCount, d.content_text IS NOT NULL AS hasInlineText,"
             + " CHAR_LENGTH(d.content_text) AS textLength, d.create_time AS createTime"
             + " FROM contract_document d JOIN contract_case c ON c.id=d.case_id"
             + " WHERE c.deleted=0 ORDER BY d.create_time DESC LIMIT 100"));
+    }
+
+    /** File access audit log for a specific document. */
+    @GetMapping("/documents/{id}/access-log")
+    public Result<List<Map<String, Object>>> documentAccessLog(@PathVariable Long id) {
+        return Result.ok(jdbc.queryForList(
+            "SELECT l.id, l.user_id AS userId, u.username, u.nickname,"
+            + " l.access_type AS accessType, l.ip, l.create_time AS createTime"
+            + " FROM file_access_log l LEFT JOIN t_user u ON u.id=l.user_id"
+            + " WHERE l.document_id=? ORDER BY l.create_time DESC LIMIT 100", id));
+    }
+
+    /** Global file access audit log (admin view across all documents). */
+    @GetMapping("/documents/access-log")
+    public Result<List<Map<String, Object>>> allAccessLog(
+            @RequestParam(defaultValue = "50") int limit) {
+        int safeLimit = Math.max(1, Math.min(limit, 200));
+        return Result.ok(jdbc.queryForList(
+            "SELECT l.id, l.case_id AS caseId, l.document_id AS documentId,"
+            + " l.user_id AS userId, u.username, u.nickname,"
+            + " l.access_type AS accessType, l.ip, l.create_time AS createTime"
+            + " FROM file_access_log l LEFT JOIN t_user u ON u.id=l.user_id"
+            + " ORDER BY l.create_time DESC LIMIT ?", safeLimit));
     }
 
     /** Cancel a document parse job — set status to FAILED. */
@@ -356,6 +382,48 @@ public class ContractAdminController {
         return Result.ok(Map.of("cancelled", updated > 0, "runId", id));
     }
 
+    // ── Member management (admin) ──────────────────────────────────
+
+    /** List members of a contract case (admin bypass). */
+    @GetMapping("/cases/{id}/members")
+    public Result<List<Map<String, Object>>> caseMembers(@PathVariable Long id) {
+        return Result.ok(memberService.listMembers(id));
+    }
+
+    /** Admin force-add a member to a contract case. */
+    @PostMapping("/cases/{id}/members/force-add")
+    public Result<Map<String, Object>> forceAddMember(@PathVariable Long id,
+                                                      @RequestBody Map<String, Object> body) {
+        Long userId = toLong(body.get("userId"));
+        String role = String.valueOf(body.getOrDefault("role", "VIEWER"));
+        memberService.addOwner(id, userId); // addOwner 幂等，非 OWNER 后面会覆盖
+        if (!"OWNER".equals(role)) {
+            memberService.updateMemberRole(id, userId, role, userId);
+        }
+        return Result.ok(Map.of("added", true));
+    }
+
+    /** Admin force-set contract owner — bypasses OWNER check for recovery. */
+    @PostMapping("/cases/{id}/owner/force-set")
+    public Result<Map<String, Object>> forceSetOwner(@PathVariable Long id,
+                                                     @RequestBody Map<String, Object> body) {
+        Long userId = toLong(body.get("userId"));
+        if (userId == null) throw new IllegalArgumentException("userId 不能为空");
+        memberService.forceSetOwner(id, userId);
+        return Result.ok(Map.of("transferred", true, "caseId", id, "newOwnerId", userId));
+    }
+
+    /** Admin force-remove a member from a contract case. */
+    @DeleteMapping("/cases/{caseId}/members/{userId}")
+    public Result<Map<String, Object>> forceRemoveMember(@PathVariable Long caseId,
+                                                         @PathVariable Long userId) {
+        // Admin bypass: directly soft-remove without ownership check
+        int updated = jdbc.update(
+            "UPDATE contract_member SET status='REMOVED', removed_at=NOW(), update_time=NOW() WHERE case_id=? AND user_id=? AND status='ACTIVE'",
+            caseId, userId);
+        return Result.ok(Map.of("removed", updated > 0));
+    }
+
     /** Delete an Agent run and its associated traces, tool calls, and report. */
     @DeleteMapping("/runs/{id}")
     @Transactional
@@ -371,5 +439,13 @@ public class ContractAdminController {
         jdbc.update("DELETE FROM agent_action WHERE run_id=?", id);
         jdbc.update("DELETE FROM agent_run WHERE id=?", id);
         return Result.ok(Map.of("deleted", true, "runId", id));
+    }
+
+    private Long toLong(Object val) {
+        if (val instanceof Number n) return n.longValue();
+        if (val instanceof String s && !s.isBlank()) {
+            try { return Long.parseLong(s); } catch (NumberFormatException e) { return null; }
+        }
+        return null;
     }
 }

@@ -3,6 +3,8 @@ package com.atlasmind.controller;
 import com.atlasmind.common.Result;
 import com.atlasmind.dto.StoreResult;
 import com.atlasmind.service.FileStorageService;
+import com.atlasmind.service.PrivateUploadService;
+import cn.dev33.satoken.stp.StpUtil;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -22,10 +24,16 @@ import java.util.Map;
 public class UploadController {
 
     private final FileStorageService storageService;
+    private final PrivateUploadService privateUploadService;
 
     @PostMapping
     public Result<Map<String, String>> upload(@RequestParam("file") MultipartFile file) throws IOException {
         StoreResult result = storageService.store(file);
+        long userId = StpUtil.getLoginIdAsLong();
+        privateUploadService.register(result.getUrl(), userId,
+                file.getOriginalFilename(), file.getContentType());
+        privateUploadService.register(result.getThumbUrl(), userId,
+                file.getOriginalFilename(), file.getContentType());
         Map<String, String> data = new LinkedHashMap<>();
         data.put("url", result.getUrl());
         if (result.getThumbUrl() != null) {

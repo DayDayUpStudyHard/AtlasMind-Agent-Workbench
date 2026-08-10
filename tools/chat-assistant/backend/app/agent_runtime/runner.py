@@ -24,6 +24,9 @@ from typing import Any
 
 import redis
 
+import aiohttp
+
+from app.config import settings
 from .api_models import AgentTaskContext, StartRunRequest
 
 
@@ -1302,10 +1305,12 @@ class RunDispatcher:
             )
             await self._publish_progress(run_id, "COMPLETED", 100,
                                          "COMPLETED", "产物已生成")
+            await self._settle_quota(run_id, "COMPLETED")
         except RunCancelled:
             await self._publish_progress(run_id, "CANCELLED", 0,
                                          "CANCELLED", "任务已取消")
             logger.info("Harness run %s cancelled by external request", run_id)
+            await self._settle_quota(run_id, "CANCELLED")
         except Exception as exc:
             logger.exception("Harness run %s failed", run_id)
             await self.run_store.update_run(
@@ -1314,12 +1319,32 @@ class RunDispatcher:
             )
             await self._publish_progress(run_id, "FAILED", 0,
                                          "FAILED", f"执行失败: {str(exc)[:100]}")
+            await self._settle_quota(run_id, "FAILED")
         finally:
             heartbeat_task.cancel()
             try:
                 await heartbeat_task
             except asyncio.CancelledError:
                 pass
+
+    async def _settle_quota(self, run_id: int, status: str) -> None:
+        """Callback to Java quota service on run terminal state."""
+        try:
+            endpoint = "confirm" if status == "COMPLETED" else "refund"
+            url = f"{settings.java_backend_url}/api/internal/quota/{endpoint}/{run_id}"
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers={"X-Internal-Token": settings.internal_token},
+                ) as resp:
+                    if resp.status != 200:
+                        logger.warning(
+                            "Quota %s for run %s returned %s", endpoint, run_id, resp.status
+                        )
+        except Exception:
+            logger.error(
+                "Quota callback failed for run %s (status=%s)", run_id, status, exc_info=True
+            )
 
     async def _heartbeat_loop(self, run_id: int) -> None:
         while True:

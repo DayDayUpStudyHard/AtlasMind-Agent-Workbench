@@ -3,6 +3,7 @@ package com.atlasmind.service;
 import cn.dev33.satoken.stp.StpUtil;
 import com.atlasmind.entity.User;
 import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Component;
@@ -13,8 +14,9 @@ import java.util.List;
 /**
  * 统一合同访问策略 — 所有合同资源读写的安全入口。
  * <p>
- * ADMIN 全局通行；USER 按 visibility 模式过滤：
+ * ADMIN 全局通行；成员优先于 visibility 规则；非成员按 visibility 模式过滤：
  * <ul>
+ *   <li>活跃成员 — 任何角色均可读取合同</li>
  *   <li>{@code ALL} — 全公司可见，所有用户可访问</li>
  *   <li>{@code LEGACY_REVIEW} — 过渡期等价于 ALL</li>
  *   <li>{@code DEPARTMENT} — 仅同部门用户可访问</li>
@@ -23,20 +25,60 @@ import java.util.List;
  * 不可见的合同始终返回 404 以隐藏其存在。
  */
 @Component
-@RequiredArgsConstructor
 public class ContractAccessPolicy {
 
     private final JdbcTemplate jdbc;
     private final UserService userService;
 
+    @Autowired(required = false)
+    private ContractMemberService memberService;
+
+    public ContractAccessPolicy(JdbcTemplate jdbc, UserService userService) {
+        this.jdbc = jdbc;
+        this.userService = userService;
+    }
+
     /**
      * 检查当前用户是否可以访问指定合同。
+     * <p>优先级：ADMIN → 活跃成员（任何角色） → visibility 规则。
      * @throws RuntimeException 如果不可访问（始终返回 404 语义）
      */
     public void checkAccess(Long caseId) {
         long userId = StpUtil.getLoginIdAsLong();
         if (isAdmin(userId)) return;
 
+        // 成员优先 — 任何活跃成员均可访问
+        if (memberService != null && memberService.isMember(caseId, userId)) return;
+
+        // Visibility fallback（兼容旧合同 / 非成员）
+        checkVisibility(caseId, userId);
+    }
+
+    /** 检查写权限 — ADMIN / OWNER / EDITOR 可通过。 */
+    public void checkWriteAccess(Long caseId) {
+        long userId = StpUtil.getLoginIdAsLong();
+        if (isAdmin(userId)) return;
+        if (memberService != null && memberService.canWrite(caseId, userId)) return;
+        throw notFound("合同不存在");
+    }
+
+    /** 检查审核权限 — ADMIN / OWNER / EDITOR / REVIEWER 可通过。 */
+    public void checkReviewAccess(Long caseId) {
+        long userId = StpUtil.getLoginIdAsLong();
+        if (isAdmin(userId)) return;
+        if (memberService != null && memberService.canReview(caseId, userId)) return;
+        throw notFound("合同不存在");
+    }
+
+    /** 检查成员管理权限 — 仅 ADMIN / OWNER 可通过。 */
+    public void checkManageMembersAccess(Long caseId) {
+        long userId = StpUtil.getLoginIdAsLong();
+        if (isAdmin(userId)) return;
+        if (memberService != null && memberService.canManageMembers(caseId, userId)) return;
+        throw notFound("合同不存在");
+    }
+
+    private void checkVisibility(Long caseId, long userId) {
         var contracts = jdbc.queryForList(
             "SELECT id, visibility, department_id FROM contract_case WHERE id=? AND deleted=0",
             caseId);
@@ -65,6 +107,7 @@ public class ContractAccessPolicy {
 
     /**
      * 构建前台合同查询的可见性 WHERE 子句。
+     * <p>优先顺序：ADMIN（无限制）→ contract_member（任何活跃角色）→ visibility 规则。
      * @return SQL 片段（可能为空字符串，表示无限制），参数追加到 params
      */
     public String buildVisibilityFilter(List<Object> params) {
@@ -74,6 +117,7 @@ public class ContractAccessPolicy {
         Long userDeptId = getCurrentUserDepartmentId(userId);
         params.add(userDeptId);
         params.add(userDeptId);
+        params.add(userId);
         return """
             AND (
               c.visibility IN ('ALL','LEGACY_REVIEW')
@@ -81,6 +125,8 @@ public class ContractAccessPolicy {
               OR (c.visibility = 'SPECIFIED'
                   AND EXISTS (SELECT 1 FROM contract_department_visibility cdv
                               WHERE cdv.contract_id = c.id AND cdv.department_id = ?))
+              OR EXISTS (SELECT 1 FROM contract_member cm
+                         WHERE cm.case_id = c.id AND cm.user_id = ? AND cm.status = 'ACTIVE')
             )
             """;
     }
@@ -93,6 +139,7 @@ public class ContractAccessPolicy {
         Long userDeptId = getCurrentUserDepartmentId(userId);
         params.add(userDeptId);
         params.add(userDeptId);
+        params.add(userId);
         return """
             AND (
               visibility IN ('ALL','LEGACY_REVIEW')
@@ -100,6 +147,8 @@ public class ContractAccessPolicy {
               OR (visibility = 'SPECIFIED'
                   AND EXISTS (SELECT 1 FROM contract_department_visibility cdv
                               WHERE cdv.contract_id = id AND cdv.department_id = ?))
+              OR EXISTS (SELECT 1 FROM contract_member cm
+                         WHERE cm.case_id = id AND cm.user_id = ? AND cm.status = 'ACTIVE')
             )
             """;
     }

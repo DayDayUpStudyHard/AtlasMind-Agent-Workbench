@@ -106,9 +106,12 @@ public class AdminUserController {
         if (nickname.isBlank()) nickname = username;
         String role = str(body, "role");
         if (role.isBlank()) role = "USER";
+        role = normalizeRole(role);
         String email = str(body, "email");
         Long deptId = toLongOrNull(body.get("departmentId"));
         int initialQuota = body.get("initialQuota") instanceof Number n ? n.intValue() : 100;
+        if (initialQuota < 0) throw new IllegalArgumentException("初始额度不能为负数");
+        validateDepartment(deptId);
 
         jdbc.update("""
                 INSERT INTO t_user (username, password, nickname, email, role, department_id, status, bio, social_links)
@@ -139,19 +142,26 @@ public class AdminUserController {
     }
 
     @PutMapping("/{id}")
+    @Transactional
     @OperationLog(value = "编辑用户", type = "UPDATE")
     public Result<Map<String, Object>> update(@PathVariable Long id, @RequestBody Map<String, Object> body) {
+        if (body.containsKey("status")) {
+            throw new IllegalArgumentException("用户状态只能通过启用/禁用接口修改");
+        }
+        var users = jdbc.queryForList(
+                "SELECT role, status FROM t_user WHERE id=? FOR UPDATE", id);
+        if (users.isEmpty()) throw new IllegalArgumentException("用户不存在");
+        var currentUser = users.get(0);
+
         // Last admin protection
         String newRole = str(body, "role");
-        if (!newRole.isBlank() && !"ADMIN".equals(newRole)) {
-            String currentRole = jdbc.queryForObject(
-                    "SELECT role FROM t_user WHERE id=?", String.class, id);
-            if ("ADMIN".equals(currentRole)) {
-                Integer adminCount = jdbc.queryForObject(
-                        "SELECT COUNT(*) FROM t_user WHERE role='ADMIN' AND status='ACTIVE'", Integer.class);
-                if (adminCount != null && adminCount <= 1) {
-                    throw new IllegalStateException("不能降级最后一个管理员");
-                }
+        if (!newRole.isBlank()) {
+            newRole = normalizeRole(newRole);
+            if ("ADMIN".equals(currentUser.get("role"))
+                    && "ACTIVE".equals(currentUser.get("status"))
+                    && !"ADMIN".equals(newRole)
+                    && lockActiveAdminIds().size() <= 1) {
+                throw new IllegalStateException("不能降级最后一个管理员");
             }
         }
 
@@ -159,12 +169,12 @@ public class AdminUserController {
         List<Object> params = new ArrayList<>();
         if (!newRole.isBlank()) { sets.add("role=?"); params.add(newRole.toUpperCase()); }
         if (body.containsKey("departmentId")) {
-            sets.add("department_id=?"); params.add(toLongOrNull(body.get("departmentId")));
+            Long departmentId = toLongOrNull(body.get("departmentId"));
+            validateDepartment(departmentId);
+            sets.add("department_id=?"); params.add(departmentId);
         }
         if (body.containsKey("nickname")) { sets.add("nickname=?"); params.add(str(body, "nickname")); }
         if (body.containsKey("email")) { sets.add("email=?"); params.add(str(body, "email")); }
-        if (body.containsKey("status")) { sets.add("status=?"); params.add(str(body, "status").toUpperCase()); }
-
         if (sets.isEmpty()) return Result.ok(Map.of("updated", false));
         params.add(id);
         jdbc.update("UPDATE t_user SET " + String.join(",", sets) + " WHERE id=?", params.toArray());
@@ -172,17 +182,18 @@ public class AdminUserController {
     }
 
     @PostMapping("/{id}/disable")
+    @Transactional
     @OperationLog(value = "禁用用户", type = "UPDATE")
     public Result<?> disable(@PathVariable Long id) {
-        // Last admin protection: can't disable the last active admin
-        String role = jdbc.queryForObject(
-                "SELECT role FROM t_user WHERE id=?", String.class, id);
-        if ("ADMIN".equals(role)) {
-            Integer adminCount = jdbc.queryForObject(
-                    "SELECT COUNT(*) FROM t_user WHERE role='ADMIN' AND status='ACTIVE'", Integer.class);
-            if (adminCount != null && adminCount <= 1) {
-                throw new IllegalStateException("不能禁用最后一个管理员");
-            }
+        var users = jdbc.queryForList(
+                "SELECT role, status FROM t_user WHERE id=? FOR UPDATE", id);
+        if (users.isEmpty()) throw new IllegalArgumentException("用户不存在");
+        var user = users.get(0);
+        if ("DISABLED".equals(user.get("status"))) {
+            return Result.ok(Map.of("disabled", true));
+        }
+        if ("ADMIN".equals(user.get("role")) && lockActiveAdminIds().size() <= 1) {
+            throw new IllegalStateException("不能禁用最后一个管理员");
         }
 
         jdbc.update("UPDATE t_user SET status='DISABLED' WHERE id=?", id);
@@ -230,5 +241,26 @@ public class AdminUserController {
             try { return Long.parseLong(s); } catch (NumberFormatException e) { return null; }
         }
         return null;
+    }
+
+    private String normalizeRole(String role) {
+        String normalized = role == null ? "" : role.trim().toUpperCase(Locale.ROOT);
+        if (!Set.of("ADMIN", "USER").contains(normalized)) {
+            throw new IllegalArgumentException("角色只能是 ADMIN 或 USER");
+        }
+        return normalized;
+    }
+
+    private void validateDepartment(Long departmentId) {
+        if (departmentId == null) return;
+        Integer exists = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM department WHERE id=? AND deleted=0", Integer.class, departmentId);
+        if (exists == null || exists == 0) throw new IllegalArgumentException("部门不存在");
+    }
+
+    private List<Long> lockActiveAdminIds() {
+        return jdbc.queryForList(
+                "SELECT id FROM t_user WHERE role='ADMIN' AND status='ACTIVE' ORDER BY id FOR UPDATE",
+                Long.class);
     }
 }

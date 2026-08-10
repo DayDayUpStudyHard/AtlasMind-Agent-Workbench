@@ -379,7 +379,18 @@ class LLMService:
         parts = []
         for i, a in enumerate(sources, 1):
             source_type = a.get("sourceType", "ARTICLE")
-            label = "文档" if source_type == "DOCUMENT" else "文章"
+            if source_type in {"DOCUMENT", "KB_DOCUMENT"}:
+                label = "文档"
+            elif source_type in {"CONTRACT_CLAUSE", "CONTRACT_TIMELINE"}:
+                label = "合同"
+            elif source_type in {"CONTRACT_PROFILE", "CONTRACT_FACT"}:
+                label = "合同画像"
+            elif source_type in {"POLICY_KNOWLEDGE", "CONTRACT_STANDARD_CLAUSE"}:
+                label = "标准条款"
+            elif source_type == "CONTRACT_HISTORY":
+                label = "历史记录"
+            else:
+                label = "文章"
             page = f" 第{a.get('page')}页" if a.get("page") else ""
             parts.append(
                 f"[{label}{i}] 标题: {a['title']}{page}\n内容: {a['content'][:3000]}\n"
@@ -665,23 +676,14 @@ class LLMService:
             "deterministicRuleFindings": rule_findings[:10],
             "extractedFacts": (extracted_facts or [])[:40],
         }
-        response = self._call_llm_with_retry(
-            lambda: self.analysis_client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": template},
-                    {"role": "user", "content": json.dumps(payload, ensure_ascii=False, default=str)},
-                ],
-                temperature=temperature,
-                max_tokens=max(8192, settings.chat_max_tokens),
-                response_format={"type": "json_object"},
-                stream=False,
-            ),
-            max_retries=2,
-            backoff_base=1.5,
+        return self._structured_completion(
+            template,
+            payload,
+            temperature=0.0 if temperature is None else min(float(temperature), 0.1),
+            timeout_seconds=max(15.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
+            required_key="findings",
+            max_tokens=max(8192, settings.chat_max_tokens),
         )
-        content = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(content or "")
 
     def contract_intake(self, case: dict, run_id: int = 0) -> dict:
         """Generate material checklist, template recommendation, and approval route."""

@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 import time
 from pathlib import Path
 
@@ -399,6 +400,31 @@ def _sse(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+async def _stream_sync_tokens(sync_iter_factory):
+    """Bridge a blocking token iterator into the async SSE response."""
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue[tuple[str, object]] = asyncio.Queue()
+
+    def _worker() -> None:
+        try:
+            for token in sync_iter_factory():
+                loop.call_soon_threadsafe(queue.put_nowait, ("token", token))
+        except BaseException as exc:
+            loop.call_soon_threadsafe(queue.put_nowait, ("error", exc))
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, ("done", None))
+
+    threading.Thread(target=_worker, name="llm-chat-stream", daemon=True).start()
+
+    while True:
+        kind, payload = await queue.get()
+        if kind == "done":
+            break
+        if kind == "error":
+            raise payload
+        yield str(payload)
+
+
 def _citation_payload(hit: dict, retrieval_type: str) -> dict:
     source_id = hit.get("sourceId") or hit.get("id")
     return {
@@ -413,6 +439,256 @@ def _citation_payload(hit: dict, retrieval_type: str) -> dict:
         "rank": hit.get("rank"),
         "retrievalType": hit.get("retrievalType", retrieval_type),
     }
+
+
+def _safe_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        result = int(value)
+        return result if result > 0 else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _chat_case_id(request: ChatRequest) -> int | None:
+    return _safe_int(getattr(request, "caseId", None)) or _safe_int(getattr(request, "projectId", None))
+
+
+def _chat_scope(request: ChatRequest) -> str:
+    scope = str(getattr(request, "scope", "") or "").strip().upper()
+    if scope:
+        return scope
+    return "CONTRACT_CASE" if _chat_case_id(request) else "GLOBAL"
+
+
+def _compact_contract_case(case: dict) -> dict:
+    keys = (
+        "id", "caseKey", "title", "contractType", "status", "ourEntity",
+        "counterparty", "ourSide", "amount", "currency", "department",
+        "signedDate", "effectiveDate", "expiryDate",
+    )
+    return {key: case.get(key) for key in keys if case.get(key) not in (None, "")}
+
+
+def _timeline_source(item: dict) -> dict:
+    citation = item.get("citationJson") if isinstance(item.get("citationJson"), dict) else {}
+    quote = citation.get("quote") or citation.get("sourceQuote") or ""
+    parts = [
+        f"节点: {item.get('label') or item.get('nodeType') or '合同时间节点'}",
+        f"日期/条件: {item.get('nodeDate') or item.get('conditionText') or '待确认'}",
+        f"业务含义: {item.get('businessMeaning') or ''}",
+        f"责任方: {item.get('responsibleParty') or '待确认'}",
+        f"原文依据: {quote}",
+    ]
+    content = "\n".join(part for part in parts if part and not part.endswith(": "))
+    return {
+        "sourceType": "CONTRACT_TIMELINE",
+        "sourceId": item.get("id"),
+        "id": item.get("id"),
+        "chunkId": item.get("clauseId"),
+        "title": item.get("label") or item.get("clauseTitle") or "合同时间节点",
+        "content": content,
+        "snippet": quote or item.get("businessMeaning") or item.get("conditionText") or "",
+        "page": item.get("pageNumber") or item.get("page"),
+        "score": item.get("score") or item.get("confidence") or 0,
+        "retrievalType": "CONTRACT_TIMELINE",
+    }
+
+
+def _contract_source(item: dict) -> dict:
+    content = item.get("clauseText") or item.get("content") or item.get("snippet") or ""
+    title = item.get("title") or item.get("clauseNumber") or "合同条款"
+    return {
+        **item,
+        "sourceType": item.get("sourceType") or "CONTRACT_CLAUSE",
+        "sourceId": item.get("sourceId") or item.get("clauseId") or item.get("id"),
+        "id": item.get("sourceId") or item.get("clauseId") or item.get("id"),
+        "chunkId": item.get("chunkId") or item.get("clauseId"),
+        "title": title,
+        "content": content,
+        "snippet": item.get("snippet") or content[:220],
+        "page": item.get("page") or item.get("pageNumber"),
+    }
+
+
+def _contract_profile_source(item: dict) -> dict:
+    content = item.get("content") or item.get("snippet") or ""
+    return {
+        **item,
+        "sourceType": item.get("sourceType") or "CONTRACT_PROFILE",
+        "sourceId": item.get("sourceId") or item.get("id"),
+        "id": item.get("sourceId") or item.get("id"),
+        "chunkId": item.get("chunkId"),
+        "title": item.get("title") or "合同画像",
+        "content": content,
+        "snippet": item.get("snippet") or content[:220],
+        "page": item.get("page") or item.get("pageNumber"),
+    }
+
+
+def _looks_like_amount_question(message: str) -> bool:
+    text = str(message or "")
+    return any(term in text for term in ("总价", "总金额", "总额", "金额", "价款", "合同金额", "多少钱"))
+
+
+def _amount_source_score(item: dict) -> int:
+    source_type = str(item.get("sourceType") or "")
+    title = str(item.get("title") or "")
+    snippet = str(item.get("snippet") or "")
+    content = str(item.get("content") or "")
+    text = title + "\n" + snippet + "\n" + content
+    score = 0
+    if source_type == "CONTRACT_CASE":
+        score += 60
+    if source_type == "CONTRACT_PROFILE":
+        score += 10
+    if any(term in title for term in ("合同金额", "合同总价", "总价款", "合同价款", "币种")):
+        score += 40
+    if any(term in text for term in ("本合同总价款为", "合同总价款为", "合同金额", "合同总价为", "总价款为")):
+        score += 35
+    if re.search(r"(¥|￥|人民币|CNY)\s*[\d,]+|[\d,]+(?:\.\d+)?\s*(?:万元|元)", text):
+        score += 25
+    if any(term in text for term in ("赔偿责任累计不超过合同总价", "合同份数", "总体设计院")):
+        score -= 40
+    if title.strip() in {"合同内容", "合同依据", "合同价格与支付", "合同价款支付", "合同价款与调整"}:
+        score -= 25
+    return score
+
+
+def _select_amount_sources(sources: list[dict], limit: int = 3) -> list[dict]:
+    if not sources:
+        return []
+    case_sources = sorted(
+        [item for item in sources if str(item.get("sourceType") or "") == "CONTRACT_CASE" and _amount_source_score(item) > 50],
+        key=_amount_source_score,
+        reverse=True,
+    )
+    amount_profile = sorted(
+        [item for item in sources if str(item.get("sourceType") or "") == "CONTRACT_PROFILE" and _amount_source_score(item) > 40],
+        key=_amount_source_score,
+        reverse=True,
+    )
+    amount_clauses = sorted(
+        [item for item in sources if str(item.get("sourceType") or "") == "CONTRACT_CLAUSE" and _amount_source_score(item) > 40],
+        key=_amount_source_score,
+        reverse=True,
+    )
+    selected: list[dict] = []
+    for group in (case_sources[:1], amount_profile[:1], amount_clauses[:1], amount_profile[1:2]):
+        for item in group:
+            if item not in selected:
+                selected.append(item)
+            if len(selected) >= limit:
+                return selected
+    return selected
+
+
+def _extract_amount_fact(profile_bundle: dict, contract_case: dict) -> dict | None:
+    profile = profile_bundle.get("profile") if isinstance(profile_bundle, dict) else {}
+    base_fields = profile.get("baseFields") if isinstance(profile, dict) else []
+    groups = profile.get("groups") if isinstance(profile, dict) else []
+
+    candidates = []
+    if isinstance(base_fields, list):
+        candidates.extend(base_fields)
+    if isinstance(groups, list):
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            fields = group.get("fields")
+            if isinstance(fields, list):
+                candidates.extend(fields)
+
+    for field in candidates:
+        if not isinstance(field, dict):
+            continue
+        key = str(field.get("key") or "").lower()
+        label = str(field.get("label") or "")
+        if not any(term in (key + label).lower() for term in ("amount", "金额", "价款", "总额", "总价")):
+            continue
+        value = field.get("value")
+        if value in (None, "", []):
+            normalized = field.get("normalizedValue") if isinstance(field.get("normalizedValue"), dict) else {}
+            value = normalized.get("amount") if isinstance(normalized, dict) else value
+        if value in (None, "", []):
+            continue
+        currency = contract_case.get("currency") or ""
+        normalized = field.get("normalizedValue") if isinstance(field.get("normalizedValue"), dict) else {}
+        if isinstance(normalized, dict):
+            currency = normalized.get("currency") or currency
+        citations = field.get("citations") if isinstance(field.get("citations"), list) else []
+        quote = ""
+        if citations:
+            quote = str(citations[0].get("quote") or "").strip()
+        return {
+            "label": str(field.get("label") or field.get("key") or "合同金额"),
+            "value": value,
+            "currency": currency or "CNY",
+            "quote": quote,
+            "status": str(field.get("status") or ""),
+            "confidence": field.get("confidence"),
+            "source": "合同画像",
+        }
+    amount = contract_case.get("amount")
+    if amount not in (None, "", 0, "0"):
+        return {
+            "label": "合同金额",
+            "value": amount,
+            "currency": contract_case.get("currency") or "CNY",
+            "quote": "",
+            "status": "CONTRACT_CASE",
+            "confidence": None,
+            "source": "合同基本信息",
+        }
+    return None
+
+
+def _policy_source(item: dict) -> dict:
+    content = item.get("content") or item.get("snippet") or ""
+    return {
+        **item,
+        "sourceType": item.get("sourceType") or "POLICY_KNOWLEDGE",
+        "sourceId": item.get("sourceId") or item.get("id") or item.get("chunkId"),
+        "id": item.get("sourceId") or item.get("id") or item.get("chunkId"),
+        "chunkId": item.get("chunkId"),
+        "title": item.get("title") or item.get("sectionTitle") or "知识库依据",
+        "content": content,
+        "snippet": item.get("snippet") or content[:220],
+        "page": item.get("page") or item.get("sourcePage"),
+    }
+
+
+def _historical_source(item: dict) -> dict:
+    content = json.dumps(item, ensure_ascii=False, default=str)
+    return {
+        "sourceType": "CONTRACT_HISTORY",
+        "sourceId": item.get("id"),
+        "id": item.get("id"),
+        "title": item.get("title") or "历史风险/处理记录",
+        "content": content,
+        "snippet": item.get("summary") or item.get("title") or "",
+        "score": item.get("score") or 0,
+        "retrievalType": "CONTRACT_HISTORY",
+    }
+
+
+def _dedupe_sources(items: list[dict], limit: int) -> list[dict]:
+    seen: set[str] = set()
+    result: list[dict] = []
+    for item in items:
+        key = "%s:%s:%s" % (
+            item.get("sourceType") or "",
+            item.get("sourceId") or item.get("id") or "",
+            item.get("chunkId") or "",
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(item)
+        if len(result) >= limit:
+            break
+    return result
 
 
 @router.post("/send")
@@ -460,12 +736,20 @@ async def chat_send(request: ChatRequest):
 
             top_k = max(1, min(request.topK, 20))
             store = get_kb().store
-            project_context = store.get_project_context(request.projectId)
+            chat_scope = _chat_scope(request)
+            case_id = _chat_case_id(request)
+            contract_context_prefix = ""
+            direct_answer = None
+            project_context = None if chat_scope == "CONTRACT_CASE" else store.get_project_context(request.projectId)
             if request.sessionId:
                 session = store.get_session(request.sessionId, request.ownerToken)
                 if not session:
                     yield _sse("error", {"error": "AI session is invalid or expired"})
                     return
+                if not case_id:
+                    case_id = _safe_int(session.get("case_id"))
+                if chat_scope == "GLOBAL" and case_id:
+                    chat_scope = "CONTRACT_CASE"
                 history_dicts = store.list_session_messages(request.sessionId, 10)
                 user_message_id = store.append_qa_message(request.sessionId, "user", request.message)
             else:
@@ -478,7 +762,182 @@ async def chat_send(request: ChatRequest):
             retrieval_type = "NONE"
             fallback_reason = ""
 
-            if emb.configured:
+            if chat_scope == "CONTRACT_CASE" and case_id:
+                retrieval_type = "CONTRACT_CASE"
+                from app.agent_runtime.contract_store import ContractStore
+
+                contract_store = ContractStore()
+                step_started = time.perf_counter()
+                try:
+                    contract_case = await contract_store.get_case(case_id)
+                    remember_tool(
+                        "getContractCase",
+                        step_started,
+                        "DONE" if contract_case else "EMPTY",
+                        f"caseId={case_id}",
+                        json.dumps(_compact_contract_case(contract_case), ensure_ascii=False, default=str),
+                    )
+                except Exception as exc:
+                    remember_tool("getContractCase", step_started, "FAILED", f"caseId={case_id}", error_message=str(exc))
+                    contract_case = {}
+
+                if not contract_case:
+                    yield _sse("error", {"error": "当前合同案件不存在，或合同资料还没有完成入库。"})
+                    return
+
+                contract_context_prefix = (
+                    "当前对话绑定在一个合同案件内。回答时只能把当前合同的结构化事实、合同原文条款、"
+                    "本合同可用知识库、Agent 风险/履约历史作为证据；不要跨全部合同全文检索。"
+                    "如果信息未人工确认、证据不足或只来自 AI 推断，需要明确说明。\n"
+                    "当前合同基本信息：\n"
+                    + json.dumps(_compact_contract_case(contract_case), ensure_ascii=False, default=str)
+                    + "\n\n"
+                )
+                direct_answer = None
+
+                step_started = time.perf_counter()
+                try:
+                    contract_profile_bundle = await contract_store.get_contract_profile_sources(
+                        case_id,
+                        request.message,
+                        limit=min(max(top_k * 2, 8), 12),
+                    )
+                    profile_sources = [
+                        _contract_profile_source(hit)
+                        for hit in (contract_profile_bundle.get("sources") or [])
+                    ]
+                    if profile_sources:
+                        sources.extend(profile_sources)
+                    profile_summary = str(contract_profile_bundle.get("summary") or "").strip()
+                    if profile_summary:
+                        contract_context_prefix = profile_summary + "\n\n" + contract_context_prefix
+                    if any(term in request.message for term in ("总价", "总金额", "总额", "金额", "价款", "合同金额", "多少钱")):
+                        contract_context_prefix = (
+                            "用户正在询问合同总价或金额，请优先使用合同画像中的金额字段和原文依据作答，"
+                            "再用条款中的付款明细或金额条款补充说明，不要回答“未获取”除非画像和原文都没有金额。\n\n"
+                            + contract_context_prefix
+                        )
+                    direct_amount_fact = _extract_amount_fact(contract_profile_bundle, contract_case)
+                    direct_answer = None
+                    if direct_amount_fact and _looks_like_amount_question(request.message):
+                        amount_value = direct_amount_fact.get("value")
+                        amount_currency = str(direct_amount_fact.get("currency") or contract_case.get("currency") or "CNY")
+                        amount_label = str(direct_amount_fact.get("label") or "合同金额")
+                        amount_quote = str(direct_amount_fact.get("quote") or "").strip()
+                        amount_status = str(direct_amount_fact.get("status") or "").strip()
+                        if isinstance(amount_value, (int, float)):
+                            amount_display = f"{amount_value:,.0f}" if float(amount_value).is_integer() else f"{amount_value:,}"
+                        else:
+                            amount_display = str(amount_value)
+                        direct_answer = f"{amount_label}：{amount_display} 元（{amount_currency}）"
+                        if amount_quote:
+                            direct_answer += f"\n原文依据：{amount_quote}"
+                        if amount_status and amount_status not in {"CONFIRMED", "CONTRACT_CASE"}:
+                            direct_answer += f"\n当前状态：{amount_status}"
+                        direct_answer += f"\n[来源: {direct_amount_fact.get('source') or '合同画像'}]"
+                        sources.insert(0, {
+                            "sourceType": "CONTRACT_CASE",
+                            "sourceId": case_id,
+                            "id": case_id,
+                            "title": direct_amount_fact.get("source") or "合同基本信息",
+                            "content": direct_answer,
+                            "snippet": f"{amount_label}：{amount_display} 元（{amount_currency}）",
+                            "score": 1.0,
+                            "retrievalType": "CONTRACT_CASE",
+                        })
+                    remember_tool(
+                        "getContractProfile",
+                        step_started,
+                        "DONE" if profile_sources else "EMPTY",
+                        f"caseId={case_id}",
+                        f"sources={len(profile_sources)}",
+                    )
+                except Exception as exc:
+                    remember_tool(
+                        "getContractProfile",
+                        step_started,
+                        "FAILED",
+                        f"caseId={case_id}",
+                        error_message=str(exc),
+                    )
+
+                step_started = time.perf_counter()
+                try:
+                    clause_hits = await contract_store.search_contract_clause(
+                        case_id,
+                        {"query": request.message, "topK": max(top_k * 2, 8)},
+                    )
+                    sources.extend(_contract_source(hit) for hit in clause_hits)
+                    remember_tool(
+                        "searchContractClause",
+                        step_started,
+                        "DONE",
+                        f"caseId={case_id}, topK={max(top_k * 2, 8)}",
+                        f"hits={len(clause_hits)}",
+                    )
+                except Exception as exc:
+                    remember_tool("searchContractClause", step_started, "FAILED", request.message, error_message=str(exc))
+
+                step_started = time.perf_counter()
+                try:
+                    timeline_hits = await contract_store.search_timeline(
+                        case_id,
+                        {"query": request.message, "limit": min(max(top_k * 2, 8), 20)},
+                    )
+                    if not timeline_hits and any(term in request.message for term in ("时间", "节点", "日程", "履约", "付款", "验收", "期限", "到期")):
+                        timeline_hits = await contract_store.list_timeline(
+                            case_id,
+                            {"limit": min(max(top_k * 2, 8), 20)},
+                        )
+                    sources.extend(_timeline_source(hit) for hit in timeline_hits)
+                    remember_tool(
+                        "searchContractTimeline",
+                        step_started,
+                        "DONE",
+                        f"caseId={case_id}",
+                        f"hits={len(timeline_hits)}",
+                    )
+                except Exception as exc:
+                    remember_tool("searchContractTimeline", step_started, "FAILED", request.message, error_message=str(exc))
+
+                step_started = time.perf_counter()
+                try:
+                    policy_hits = await contract_store.search_policy(
+                        case_id,
+                        {"query": request.message, "limit": min(max(top_k, 4), 8)},
+                    )
+                    sources.extend(_policy_source(hit) for hit in policy_hits)
+                    remember_tool(
+                        "searchPolicyKnowledge",
+                        step_started,
+                        "DONE",
+                        f"caseId={case_id}",
+                        f"hits={len(policy_hits)}",
+                    )
+                except Exception as exc:
+                    remember_tool("searchPolicyKnowledge", step_started, "FAILED", request.message, error_message=str(exc))
+
+                step_started = time.perf_counter()
+                try:
+                    history_hits = await contract_store.search_historical(
+                        case_id,
+                        {"query": request.message, "limit": 3},
+                    )
+                    sources.extend(_historical_source(hit) for hit in history_hits)
+                    remember_tool(
+                        "searchHistoricalDecisions",
+                        step_started,
+                        "DONE",
+                        f"caseId={case_id}",
+                        f"hits={len(history_hits)}",
+                    )
+                except Exception as exc:
+                    remember_tool("searchHistoricalDecisions", step_started, "FAILED", request.message, error_message=str(exc))
+
+                if not sources:
+                    fallback_reason = "contract_no_hits"
+
+            elif emb.configured:
                 query_vec = None
                 step_started = time.perf_counter()
                 try:
@@ -572,7 +1031,12 @@ async def chat_send(request: ChatRequest):
                 except Exception as exc:
                     remember_tool("searchKbByKeyword", step_started, "FAILED", f"topK={top_k}", error_message=str(exc))
 
-            sources = sorted(sources, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
+            if chat_scope == "CONTRACT_CASE" and case_id:
+                sources = _dedupe_sources(sources, min(max(top_k * 3, 10), 18))
+                if _looks_like_amount_question(request.message):
+                    sources = _select_amount_sources(sources, limit=3)
+            else:
+                sources = sorted(sources, key=lambda x: x.get("score", 0), reverse=True)[:top_k]
             normalized_sources = []
             for rank, item in enumerate(sources, 1):
                 normalized_sources.append(
@@ -601,6 +1065,8 @@ async def chat_send(request: ChatRequest):
                     store.create_tool_call(trace_id, **call)
 
             contexts = llm.build_context(sources)
+            if contract_context_prefix:
+                contexts = contract_context_prefix + "已检索到的合同/知识库证据：\n" + contexts
             if project_context:
                 contexts = (
                     "当前对话绑定的项目上下文（只能基于这些事实回答，不要补造未知信息）：\n"
@@ -611,10 +1077,22 @@ async def chat_send(request: ChatRequest):
             citations = [_citation_payload(hit, retrieval_type) for hit in sources]
 
             yield _sse("status", {"status": "thinking"})
+            if direct_answer:
+                full = direct_answer
+                if trace_id:
+                    store.create_tool_call(trace_id, "direct_contract_amount_answer", "DONE", 0, f"caseId={case_id}", "contract_profile")
+                if session:
+                    store.append_qa_message(request.sessionId, "assistant", full, model="deterministic-contract-profile", latency_ms=0)
+                yield _sse("chunk", {"content": full})
+                yield _sse("sources", {"sources": citations, "traceId": trace_id})
+                yield _sse("done", {"content": full, "traceId": trace_id})
+                return
             full = ""
             try:
                 llm_started_at = time.perf_counter()
-                for token in llm.chat_stream(request.message, contexts, history_dicts):
+                async for token in _stream_sync_tokens(
+                    lambda: llm.chat_stream(request.message, contexts, history_dicts)
+                ):
                     full += token
                     yield _sse("chunk", {"content": token})
                 llm_latency_ms = int((time.perf_counter() - llm_started_at) * 1000)

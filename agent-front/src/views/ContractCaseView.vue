@@ -8,9 +8,12 @@
         <span class="case-status" :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span>
         <h1>{{ c.title }}</h1>
         <p>{{ c.description || '没有补充说明' }}</p>
-        <div class="case-attribution" v-if="c.creatorName || c.maintainerName">
+        <div class="case-attribution" v-if="c.creatorName || c.maintainerName || memberRole">
           <span v-if="c.creatorName">上传：{{ c.creatorName }}</span>
           <span v-if="c.maintainerName">维护：{{ c.maintainerName }}</span>
+          <span v-if="memberRole" class="role-badge" :class="'role-'+memberRole.toLowerCase()">
+            {{ { OWNER: '负责人', EDITOR: '编辑', REVIEWER: '审核员', VIEWER: '只读' }[memberRole] || memberRole }}
+          </span>
         </div>
       </div>
       <div class="case-actions">
@@ -143,10 +146,12 @@
           <p>顶部只保留主体、金额和关键日期；下方通过 Tab 切换查看要素、节点、风险、证据和 Agent 运行。重点信息默认收拢，展开后再看完整细节。</p>
         </div>
         <div class="workbench-snapshot">
-          <strong v-if="extractionSnapshot.id">事实快照 #{{ extractionSnapshot.id }}</strong>
-          <strong v-else>尚未生成事实快照</strong>
-          <small v-if="extractionSnapshot.id">文档 v{{ extractionSnapshot.documentVersion || '-' }} · {{ extractionWorkflowStatusLabel(extractionSnapshot.status) }}</small>
-          <small v-else>先完成要素提取，后续审查与核验会复用结果</small>
+          <strong v-if="extractionSnapshot.id">&#20107;&#23454;&#24555;&#29031; #{{ extractionSnapshot.id }}</strong>
+          <strong v-else-if="extractionRunActive">&#20107;&#23454;&#24555;&#29031;&#29983;&#25104;&#20013;</strong>
+          <strong v-else>&#23578;&#26410;&#29983;&#25104;&#20107;&#23454;&#24555;&#29031;</strong>
+          <small v-if="extractionSnapshot.id">&#25991;&#26723; v{{ extractionSnapshot.documentVersion || '-' }} &middot; {{ extractionWorkflowStatusLabel(extractionSnapshot.status) }}</small>
+          <small v-else-if="extractionRunActive">Agent &#27491;&#22312;&#25972;&#29702;&#21512;&#21516;&#35201;&#32032;&#65292;&#23436;&#25104;&#21518;&#20250;&#33258;&#21160;&#20889;&#20837;&#20107;&#23454;&#24555;&#29031;</small>
+          <small v-else>&#20808;&#23436;&#25104;&#35201;&#32032;&#25552;&#21462;&#65292;&#21518;&#32493;&#23457;&#26597;&#19982;&#26680;&#39564;&#20250;&#22797;&#29992;&#32467;&#26524;</small>
         </div>
       </header>
 
@@ -241,15 +246,15 @@
                 </section>
               </div>
               <div v-else class="fact-empty">
-                {{ extractionRunActive ? 'Agent 正在整理合同要素，完成后会自动显示在这里。' : '尚未生成合同要素快照。' }}
+                {{ contractElementEmptyText }}
               </div>
             </section>
 
-            <aside class="workbench-elements-lane" aria-label="原文证据与知识">
+            <aside class="workbench-elements-lane" aria-label="合同原文与知识">
               <section class="workbench-insight-section">
                 <header class="insight-section-head">
                   <div>
-                    <span>原文证据</span>
+                    <span>合同原文</span>
                     <h4>当前字段与复核线索</h4>
                   </div>
                   <strong>{{ selectedElementEvidence.length }} 条</strong>
@@ -443,8 +448,11 @@
               </div>
             </div>
           </section>
+      <div v-if="!findingGroups.length" class="fact-empty risk-empty-state">
+        {{ riskReviewEmptyText }}
+      </div>
 
-          <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
+      <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
             <div class="risk-domain-head">
               <div>
                 <span>{{ group.items.length }} 项发现</span>
@@ -553,7 +561,7 @@
         <section v-else-if="activeWorkbenchTab === 'evidence'" class="workbench-tab-panel" data-section="evidence">
           <header class="tab-panel-head">
             <div>
-              <span class="section-kicker">原文证据</span>
+              <span class="section-kicker">合同原文</span>
               <h3>字段引用、页面定位与全文摘录</h3>
               <p>在这里查看当前字段的完整引用、原始 PDF 页面对照和文档版本信息。切回“合同要素”可继续换字段。</p>
             </div>
@@ -571,7 +579,7 @@
                 <div v-else>
                   <span>当前字段</span>
                   <h4>请选择左侧要素</h4>
-                  <p>切换到“合同要素”后点击任意字段，再回到这里查看完整原文证据。</p>
+                  <p>切换到“合同要素”后点击任意字段，再回到这里查看完整合同原文。</p>
                 </div>
               </header>
 
@@ -597,6 +605,7 @@
                       :href="evidencePreviewUrl(link)"
                       target="_blank"
                       rel="noopener noreferrer"
+                      @click.prevent="openEvidencePreview(link)"
                     >打开原始 PDF 页面对照</a>
                   </details>
                 </article>
@@ -715,10 +724,38 @@
           </div>
           <div v-else class="fact-empty">暂无 Agent 运行记录。</div>
         </section>
+
+        <section v-else-if="activeWorkbenchTab === 'members'" class="workbench-tab-panel" data-section="members">
+          <header class="tab-panel-head">
+            <div>
+              <span class="section-kicker">协作成员</span>
+              <h3>团队成员与权限</h3>
+              <p>按角色分配读写权限。负责人可邀请成员、调整角色或转移所有权。</p>
+            </div>
+            <strong>{{ displayMembers.length }} 位成员</strong>
+          </header>
+          <div v-if="displayMembers.length" class="member-list">
+            <div v-for="member in displayMembers" :key="member.id" class="member-row">
+              <div class="member-info">
+                <span class="member-avatar">{{ (member.nickname || member.username || '?')[0] }}</span>
+                <div>
+                  <strong>{{ member.nickname || member.username }}</strong>
+                  <small v-if="member.nickname !== member.username">{{ member.username }}</small>
+                  <small v-if="member.self" class="member-self-badge">本人</small>
+                </div>
+              </div>
+              <span class="member-role-tag" :class="'role-'+member.role.toLowerCase()">
+                {{ { OWNER: '负责人', EDITOR: '编辑', REVIEWER: '审核员', VIEWER: '只读' }[member.role] || member.role }}
+              </span>
+              <small class="member-joined">{{ formatDate(member.joinedAt || member.createTime) }} 加入</small>
+            </div>
+          </div>
+          <div v-else class="fact-empty">暂无非管理员成员。合同创建者自动成为负责人。</div>
+        </section>
       </div>
     </section>
 
-    <section v-if="c.findings?.length" class="risk-workbench" data-section="risks">
+    <section v-if="showRiskWorkbench" class="risk-workbench" data-section="risks">
       <header class="risk-workbench-head">
         <div>
           <span class="section-kicker">风险研判</span>
@@ -749,6 +786,10 @@
           </div>
         </div>
       </section>
+
+      <div v-if="!findingGroups.length" class="fact-empty risk-empty-state">
+        {{ riskReviewEmptyText }}
+      </div>
 
       <section v-for="group in findingGroups" :key="group.key" class="risk-domain-group">
         <div class="risk-domain-head">
@@ -1243,7 +1284,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import api from '../api/index.js'
+import api, { getContractMembers, getUserInfo } from '../api/index.js'
 import {
   deriveTimelineAction,
   resolveTimelineDate,
@@ -1283,19 +1324,95 @@ const evidenceDialog = reactive({
 })
 let caseRefreshTimer = null
 let caseRefreshInFlight = false
+const members = ref([])
+const currentUser = ref(null)
+const loadCurrentUser = async () => {
+  try {
+    const res = await getUserInfo()
+    currentUser.value = res.data?.data || null
+  } catch {
+    currentUser.value = null
+  }
+}
+const currentUserId = computed(() => {
+  const user = currentUser.value || {}
+  return Number(user.id || user.userId || 0) || null
+})
+const currentUserName = computed(() => {
+  const user = currentUser.value || {}
+  return String(user.nickname || user.username || user.realName || user.name || '').trim()
+})
+const displayMembers = computed(() => {
+  if (members.value.length) return members.value
+  if (!currentUserId.value) return []
+  const ownerId = Number(c.value.ownerId || 0) || null
+  const name = currentUserName.value || `user:${currentUserId.value}`
+  return [{
+    id: `self-${currentUserId.value}`,
+    userId: currentUserId.value,
+    username: name,
+    nickname: name,
+    avatar: currentUser.value?.avatar || '',
+    role: ownerId && ownerId === currentUserId.value ? 'OWNER' : 'VIEWER',
+    status: 'ACTIVE',
+    joinedAt: currentUser.value?.createTime || currentUser.value?.create_time || null,
+    createTime: currentUser.value?.createTime || currentUser.value?.create_time || null,
+    self: true,
+  }]
+})
+const memberRole = computed(() => {
+  const uid = currentUserId.value
+  if (!uid || !displayMembers.value.length) return null
+  const member = displayMembers.value.find(m => Number(m.userId) === Number(uid))
+  return member ? member.role : null
+})
+const canWrite = computed(() => memberRole.value === 'OWNER' || memberRole.value === 'EDITOR')
+const canReview = computed(() => canWrite.value || memberRole.value === 'REVIEWER')
+const canManageMembers = computed(() => memberRole.value === 'OWNER')
+async function loadMembers(caseId) {
+  try {
+    const res = await getContractMembers(caseId)
+    members.value = res.data?.data || []
+  } catch (e) {
+    members.value = []
+  }
+}
 const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? c.value.timelineNodes : [])
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 const activeWorkbenchTab = ref('elements')
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
 const extractionSnapshot = computed(() => c.value.extractionSnapshot || {})
-const contractProfile = computed(() => (c.value.contractProfile && typeof c.value.contractProfile === 'object')
-  ? c.value.contractProfile
-  : {})
+function profileObject(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value)
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+    } catch {
+      return {}
+    }
+  }
+  return {}
+}
+function profileList(value) {
+  if (Array.isArray(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    try {
+      const parsed = JSON.parse(value)
+      return Array.isArray(parsed) ? parsed : []
+    } catch {
+      return []
+    }
+  }
+  return []
+}
+const contractProfile = computed(() => profileObject(c.value.contractProfile))
 const hasDynamicContractProfile = computed(() => {
   const profile = contractProfile.value || {}
   return Boolean(
-    (Array.isArray(profile.baseFields) && profile.baseFields.length)
-    || (Array.isArray(profile.groups) && profile.groups.length)
+    profileList(profile.baseFields).some(field => field && typeof field === 'object')
+    || profileList(profile.groups).some(group =>
+      group && typeof group === 'object' && profileList(group.fields).some(field => field && typeof field === 'object'))
   )
 })
 const contractElements = computed(() => (Array.isArray(c.value.contractElements) ? c.value.contractElements : [])
@@ -1368,8 +1485,9 @@ const evidenceLinkCount = computed(() => displayContractElements.value.reduce((c
 const workbenchTabs = computed(() => [
   { key: 'elements', label: '合同要素', count: displayContractElements.value.length },
   { key: 'timeline', label: '履约日程', count: caseTimelineNodes.value.length },
-  { key: 'evidence', label: '原文证据', count: evidenceLinkCount.value || selectedElementEvidence.value.length },
+  { key: 'evidence', label: '合同原文', count: evidenceLinkCount.value || selectedElementEvidence.value.length },
   { key: 'runs', label: 'Agent 运行', count: Array.isArray(c.value.runs) ? c.value.runs.length : 0 },
+  { key: 'members', label: '协作成员', count: displayMembers.value.length },
 ])
 const latestMainDocument = computed(() => (Array.isArray(c.value.documents) ? c.value.documents : [])
   .filter(document => String(document?.documentType || '').toUpperCase() === 'MAIN'
@@ -1502,7 +1620,7 @@ function normalizeProfileField(field, groupMeta = {}) {
   if (!field || typeof field !== 'object') return null
   const key = String(field.key || field.fieldKey || field.name || '').trim()
   if (!key) return null
-  const citations = Array.isArray(field.citations) ? field.citations : []
+  const citations = profileList(field.citations)
   const evidence = citations
     .map(citation => normalizeProfileCitation(citation, `profile-${groupMeta.groupKey || 'base'}-${key}`))
     .filter(Boolean)
@@ -1532,7 +1650,7 @@ function normalizeProfileField(field, groupMeta = {}) {
 const profileFactGroups = computed(() => {
   const profile = contractProfile.value || {}
   const groups = []
-  const baseFields = Array.isArray(profile.baseFields) ? profile.baseFields : []
+  const baseFields = profileList(profile.baseFields)
   const normalizedBaseFields = baseFields
     .map((field, index) => normalizeProfileField(field, {
       groupKey: 'base',
@@ -1544,21 +1662,20 @@ const profileFactGroups = computed(() => {
   if (normalizedBaseFields.length) {
     groups.push({ key: 'PROFILE_BASE', label: '基础合同事实', items: normalizedBaseFields })
   }
-  const profileGroups = Array.isArray(profile.groups) ? profile.groups : []
+  const profileGroups = profileList(profile.groups)
   for (const [index, group] of profileGroups.entries()) {
+    if (!group || typeof group !== 'object') continue
     const groupKey = String(group?.groupKey || `group_${index + 1}`)
     const groupLabel = String(group?.label || '合同专属要素').trim() || '合同专属要素'
     const groupReason = String(group?.reason || '').trim()
-    const items = Array.isArray(group?.fields)
-      ? group.fields
-        .map((field, fieldIndex) => normalizeProfileField(field, {
-          groupKey,
-          groupLabel,
-          reason: groupReason,
-          index: fieldIndex,
-        }))
-        .filter(Boolean)
-      : []
+    const items = profileList(group.fields)
+      .map((field, fieldIndex) => normalizeProfileField(field, {
+        groupKey,
+        groupLabel,
+        reason: groupReason,
+        index: fieldIndex,
+      }))
+      .filter(Boolean)
     if (items.length) groups.push({ key: groupKey, label: groupLabel, items })
   }
   return groups
@@ -1573,6 +1690,13 @@ const contractElementSections = computed(() => contractElementGroups.value.map(g
   terminationItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'TERMINATION'),
   factItems: (group.items || []).filter(item => buildElementPresentation(item).displayMode === 'FACT'),
 })))
+const contractElementEmptyText = computed(() => {
+  if (extractionRunActive.value) return '\u0041\u0067\u0065\u006e\u0074 \u6b63\u5728\u6574\u7406\u5408\u540c\u8981\u7d20\uff0c\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u663e\u793a\u5728\u8fd9\u91cc\u3002'
+  if (extractionSnapshot.value?.id && contractElements.value.length) return '\u4e8b\u5b9e\u5feb\u7167\u5df2\u751f\u6210\uff0c\u4f46\u5408\u540c\u753b\u50cf\u5b57\u6bb5\u6682\u4e0d\u53ef\u7528\uff1b\u5df2\u4fdd\u7559\u53ef\u5f15\u7528\u7684\u7ed3\u6784\u5316\u8981\u7d20\uff0c\u8bf7\u91cd\u65b0\u5237\u65b0\u9875\u9762\u3002'
+  if (extractionSnapshot.value?.id) return '\u4e8b\u5b9e\u5feb\u7167\u5df2\u751f\u6210\uff0c\u4f46\u5f53\u524d\u753b\u50cf\u6ca1\u6709\u53ef\u5c55\u793a\u5b57\u6bb5\u3002\u8bf7\u67e5\u770b \u0041\u0067\u0065\u006e\u0074 \u8fd0\u884c\u8bb0\u5f55\uff0c\u6216\u91cd\u65b0\u63d0\u53d6\u5408\u540c\u8981\u7d20\u3002'
+  if (hasDynamicContractProfile.value) return '\u5408\u540c\u753b\u50cf\u5df2\u751f\u6210\uff0c\u4f46\u5f53\u524d\u6ca1\u6709\u53ef\u5c55\u793a\u5b57\u6bb5\u3002\u8bf7\u91cd\u65b0\u63d0\u53d6\u5408\u540c\u8981\u7d20\u3002'
+  return '\u5c1a\u672a\u751f\u6210\u5408\u540c\u8981\u7d20\u5feb\u7167\u3002'
+})
 const contractSummaryFields = computed(() => {
   const elementFor = key => contractElements.value.find(element => String(element?.elementKey || '') === key) || null
   const useVerified = element => element && elementStatusLabel(element) === '原文已验证'
@@ -1655,7 +1779,10 @@ const contractElementGroups = computed(() => {
     ['RISK_TERMS', { key: 'RISK_TERMS', label: '责任、知识产权与合规', items: [] }],
     ['OTHER', { key: 'OTHER', label: '其他合同要素', items: [] }],
   ])
-  for (const element of visibleContractElements.value) {
+  const fallbackElements = visibleContractElements.value.length
+    ? visibleContractElements.value
+    : contractElements.value
+  for (const element of fallbackElements) {
     const category = elementCategory(element)
     if (!groups.has(category)) groups.set(category, { key: category, label: elementCategoryLabel(category), items: [] })
     groups.get(category).items.push(element)
@@ -1669,9 +1796,17 @@ const reviewSummaryView = computed(() => {
     ['CONTRACT_REVIEW_REPORT', 'CONTRACT_REVIEW'].includes(String(report?.reportType || '').toUpperCase())
   ) || {}
 })
+const hasRiskFindings = computed(() => Array.isArray(c.value.findings) && c.value.findings.length > 0)
 const hasContractReviewResult = computed(() =>
-  Boolean(reviewSummaryView.value?.id)
-  || (Array.isArray(c.value.findings) && c.value.findings.length > 0)
+  Boolean(reviewSummaryView.value?.id) || hasRiskFindings.value
+)
+const showRiskWorkbench = computed(() =>
+  hasContractReviewResult.value || riskReviewRunActive.value
+)
+const riskReviewEmptyText = computed(() =>
+  riskReviewRunActive.value
+    ? '\u98ce\u9669\u5ba1\u67e5\u6b63\u5728\u751f\u6210\uff0c\u5b8c\u6210\u540e\u4f1a\u81ea\u52a8\u663e\u793a\u62a5\u544a\u548c\u53d1\u73b0\u3002'
+    : '\u98ce\u9669\u5ba1\u67e5\u5df2\u5b8c\u6210\uff0c\u4f46\u672c\u6b21\u6ca1\u6709\u8fd4\u56de\u53ef\u5c55\u793a\u7684\u98ce\u9669\u53d1\u73b0\u3002\u8bf7\u5728 \u0041\u0067\u0065\u006e\u0074 \u8fd0\u884c\u4e2d\u67e5\u770b\u62a5\u544a\u6458\u8981\uff0c\u6216\u91cd\u65b0\u53d1\u8d77\u5ba1\u67e5\u3002'
 )
 const hasVersionReviewResult = computed(() => hasReportOfTypes(['VERSION_REVIEW_REPORT', 'VERSION_REVIEW']))
 const hasApprovalDecisionResult = computed(() => hasReportOfTypes(['APPROVAL_DECISION_REPORT', 'APPROVAL_DECISION']))
@@ -1775,9 +1910,10 @@ const intakeOurSideLabel = computed(() => {
 })
 
 onMounted(() => {
+  loadCurrentUser()
   loadCase()
   caseRefreshTimer = window.setInterval(() => {
-    if (documentPipelineActive.value && !caseRefreshInFlight) refreshCase().catch(() => {})
+    if ((documentPipelineActive.value || hasActiveRun.value) && !caseRefreshInFlight) refreshCase().catch(() => {})
   }, 3500)
 })
 onBeforeUnmount(() => {
@@ -1792,6 +1928,7 @@ async function loadCase() {
     c.value = r.data.data
     ensureSelectedContractElement()
     checkPendingIntake()
+    loadMembers(r.data.data.id)
   } catch (e) {
     loadError.value = uploadErrorMessage(e, '加载合同失败')
     message.error(loadError.value)
@@ -1868,6 +2005,7 @@ async function refreshCase() {
     const r = await api.get(`/api/workspace/contracts/${route.params.id}`)
     c.value = r.data.data
     ensureSelectedContractElement()
+    loadMembers(r.data.data.id)
     if (selectedTimelineNode.value) {
       selectedTimelineNode.value = caseTimelineNodes.value.find(node =>
         String(node.sourceId || node.id) === String(selectedTimelineNode.value.sourceId || selectedTimelineNode.value.id)
@@ -2039,9 +2177,46 @@ async function startRun(taskType) {
     } else {
       message.success('Agent 任务已创建')
     }
-    setTimeout(refreshCase, 2000)
+    await refreshCase()
+    followTaskVisibility(taskType)
   } catch (e) { message.error(e.response?.data?.message || e.message || '启动失败') }
   finally { running.value = false }
+}
+
+function delay(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms))
+}
+
+function taskResultVisible(taskType) {
+  const type = String(taskType || '').toUpperCase()
+  if (type === 'CONTRACT_ELEMENT_EXTRACTION') {
+    return Boolean(extractionSnapshot.value?.id) && !extractionRunActive.value
+  }
+  if (type === 'CONTRACT_REVIEW') {
+    return showRiskWorkbench.value && !riskReviewRunActive.value
+  }
+  return hasCompletedRun(type)
+}
+
+async function revealTaskResult(taskType) {
+  const type = String(taskType || '').toUpperCase()
+  if (type === 'CONTRACT_ELEMENT_EXTRACTION') {
+    await scrollToSection('elements')
+  } else if (type === 'CONTRACT_REVIEW') {
+    await scrollToSection('risks')
+  }
+}
+
+async function followTaskVisibility(taskType) {
+  for (let i = 0; i < 50; i += 1) {
+    await delay(i === 0 ? 1500 : 3000)
+    if (!caseRefreshInFlight) await refreshCase()
+    if (taskResultVisible(taskType)) {
+      await revealTaskResult(taskType)
+      return
+    }
+    if (!hasActiveRun.value && i > 3) return
+  }
 }
 
 function taskInputFor(taskType) {
@@ -2955,6 +3130,23 @@ function evidencePreviewUrl(link) {
   const page = Number(link?.pageNumber)
   return Number.isInteger(page) && page > 0 ? `${value}#page=${page}` : value
 }
+async function openEvidencePreview(link) {
+  const sourceUrl = String(link?.documentPreviewUrl || '')
+  if (!sourceUrl.startsWith('/upload/')) return
+  const previewWindow = window.open('', '_blank', 'noopener,noreferrer')
+  try {
+    const response = await api.get(sourceUrl, { responseType: 'blob' })
+    const objectUrl = URL.createObjectURL(response.data)
+    const page = Number(link?.pageNumber)
+    const targetUrl = Number.isInteger(page) && page > 0 ? `${objectUrl}#page=${page}` : objectUrl
+    if (previewWindow) previewWindow.location.href = targetUrl
+    else window.open(targetUrl, '_blank', 'noopener,noreferrer')
+    window.setTimeout(() => URL.revokeObjectURL(objectUrl), 300000)
+  } catch (error) {
+    if (previewWindow) previewWindow.close()
+    message.error(error?.response?.data?.message || '无法打开合同原文')
+  }
+}
 function isPdfEvidence(link) {
   return Boolean(evidencePreviewUrl(link))
     && /\.pdf(?:$|[?#])/i.test(String(link?.documentPreviewUrl || link?.documentFileName || ''))
@@ -3647,6 +3839,25 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fulfillment-summary-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .fulfillment-summary-row>strong{color:var(--atlas-text);font-size:17px}
 
+/* ── Member styles ────────────────────────────────────────────── */
+.role-badge{display:inline-flex;align-items:center;padding:1px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.02em}
+.role-badge.role-owner{color:#7a5a0a;background:#fef3cd}
+.role-badge.role-editor{color:#246744;background:#eaf6ef}
+.role-badge.role-reviewer{color:#355c88;background:#eaf2fa}
+.role-badge.role-viewer{color:var(--atlas-muted);background:#f0f1f4}
+.member-list{display:flex;flex-direction:column;gap:8px;padding:10px 0}
+.member-row{display:flex;align-items:center;gap:14px;padding:10px 14px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:6px}
+.member-info{display:flex;align-items:center;gap:10px;flex:1;min-width:0}
+.member-info strong{color:var(--atlas-text);font-size:13px;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.member-info small{color:var(--atlas-subtle);font-size:11px}
+.member-avatar{display:inline-flex;align-items:center;justify-content:center;width:32px;height:32px;border-radius:50%;background:#eaf2fa;color:#355c88;font-size:13px;font-weight:900;flex-shrink:0}
+.member-role-tag{display:inline-flex;align-items:center;padding:2px 10px;border-radius:999px;font-size:11px;font-weight:900;letter-spacing:.02em}
+.member-role-tag.role-owner{color:#7a5a0a;background:#fef3cd}
+.member-role-tag.role-editor{color:#246744;background:#eaf6ef}
+.member-role-tag.role-reviewer{color:#355c88;background:#eaf2fa}
+.member-role-tag.role-viewer{color:var(--atlas-muted);background:#f0f1f4}
+.member-joined{color:var(--atlas-subtle);font-size:11px;margin-left:auto}
+
 @media(max-width:700px){
   .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-item:nth-child(2n){border-right:0}.meta-item-wide{grid-column:span 2}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}.workbench-tabs{padding:12px 14px 0}.workbench-tab{min-height:36px;padding:0 10px;font-size:11px}.workbench-tab strong{min-width:20px}.workbench-tab-panel{padding:0 14px 14px}.workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}.evidence-workbench-body{grid-template-columns:1fr}.evidence-browser-head{flex-direction:column}.evidence-doc-card{flex-direction:column}.contract-end-condition{grid-template-columns:1fr}.contract-end-condition li:before{margin-right:6px}.review-panel-flat{grid-template-columns:1fr}.run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
   .contract-workbench-head{align-items:flex-start;flex-direction:column;padding:17px 15px}.workbench-snapshot{width:100%;padding:11px 0 0;border-top:1px solid var(--atlas-border);border-left:0}.contract-workbench-body{display:block}.fact-lane{padding:0 14px 14px}.fact-groups{grid-template-columns:1fr}.fact-row{grid-template-columns:92px minmax(0,1fr);gap:7px}.fact-row>em{grid-column:2;justify-self:start}.workbench-insight-section{padding:0 14px 14px;border-right:0;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.workbench-timeline-main{grid-template-columns:74px minmax(0,1fr)}.workbench-node-action{margin-right:2px}.workbench-runtime{align-items:flex-start;flex-direction:column;padding:10px 15px}.workbench-runtime small{max-width:100%;white-space:normal}.text-button{margin-left:0}
@@ -3655,4 +3866,4 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .detail-timeline-node{grid-template-columns:1fr;gap:11px;padding:15px}.timeline-date-column{padding:0 0 10px;border-right:0;border-bottom:1px solid var(--atlas-border)}.timeline-row-actions{display:grid;grid-template-columns:1fr 1fr}.timeline-detail-modal{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.timeline-detail-header{padding:18px}.timeline-detail-header h3{font-size:19px}.timeline-detail-body{max-height:calc(100vh - 122px);padding:0 18px 24px}.detail-date-band{grid-template-columns:1fr;margin:0 -18px;padding:16px 18px}.base-date-editor{padding:14px 0 0;border-left:0;border-top:1px solid #c4d9cd}.consequence-split{grid-template-columns:1fr}.evidence-upload-zone{grid-template-columns:1fr}.fulfillment-summary-row{align-items:flex-start;flex-direction:column}.review-coverage-grid,.review-risk-detail-grid,.fact-decision-list{grid-template-columns:1fr}.review-risk-meta,.review-risk-card details{margin-left:0}.fulfillment-audit-summary{flex-direction:column;align-items:flex-start}
 }
 @media(prefers-reduced-motion:reduce){.finding-expand{transition:none}}
-</style>
+.member-self-badge{display:inline-flex;align-items:center;align-self:flex-start;margin-top:3px;padding:1px 6px;border-radius:999px;background:#edf7f0;color:#347254;font-size:9px;font-weight:900;line-height:1.6}</style>

@@ -177,6 +177,7 @@ CREATE TABLE `kb_qa_session` (
   `owner_token` VARCHAR(64) NOT NULL,
   `space_id` BIGINT DEFAULT NULL,
   `document_id` BIGINT DEFAULT NULL,
+  `case_id` BIGINT DEFAULT NULL,
   `create_time` DATETIME DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

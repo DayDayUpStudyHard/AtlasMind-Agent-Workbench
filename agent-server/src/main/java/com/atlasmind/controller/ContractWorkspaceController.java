@@ -7,12 +7,18 @@ import com.atlasmind.dto.StoreResult;
 import com.atlasmind.entity.User;
 import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
+import com.atlasmind.service.ContractMemberService;
 import com.atlasmind.service.FileStorageService;
+import com.atlasmind.service.PrivateUploadService;
 import com.atlasmind.service.UserService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.data.redis.connection.RedisConnection;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.http.CacheControl;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
@@ -38,10 +44,12 @@ public class ContractWorkspaceController {
 
     private final ContractCaseService contractCaseService;
     private final ContractAccessPolicy accessPolicy;
+    private final ContractMemberService contractMemberService;
     private final FileStorageService fileStorageService;
     private final UserService userService;
     private final StringRedisTemplate redisTemplate;
     private final JdbcTemplate jdbcTemplate;
+    private final PrivateUploadService privateUploadService;
 
     private final ExecutorService sseExecutor = Executors.newCachedThreadPool(
             r -> new Thread(r, "sse-contract-progress"));
@@ -85,6 +93,10 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> createFileIntake(@RequestParam("file") MultipartFile file)
             throws IOException {
         StoreResult stored = fileStorageService.store(file);
+        privateUploadService.register(stored.getUrl(), StpUtil.getLoginIdAsLong(),
+                file.getOriginalFilename(), file.getContentType());
+        privateUploadService.register(stored.getThumbUrl(), StpUtil.getLoginIdAsLong(),
+                file.getOriginalFilename(), file.getContentType());
         return Result.ok(contractCaseService.createFileIntake(Map.of(
                 "fileName", file.getOriginalFilename() == null ? "" : file.getOriginalFilename(),
                 "filePath", stored.getUrl(),
@@ -117,13 +129,13 @@ public class ContractWorkspaceController {
 
     @PutMapping("/{caseId}")
     public Result<Map<String, Object>> update(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.updateCase(caseId, request));
     }
 
     @PostMapping("/{caseId}/documents")
     public Result<Map<String, Object>> uploadDocument(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.uploadDocument(caseId, request));
     }
 
@@ -140,9 +152,41 @@ public class ContractWorkspaceController {
         return Result.ok(contractCaseService.getDocumentContent(caseId, documentId));
     }
 
+    /**
+     * 鉴权文件下载 — 所有文件访问的规范入口。
+     * 流程：定位文件 → 定位合同 → 校验合同权限 → 校验文件状态 → 记录访问日志 → 返回流。
+     * 读不到和无权限统一返回 404。
+     */
+    @GetMapping("/documents/{documentId}/download")
+    public ResponseEntity<org.springframework.core.io.Resource> downloadDocument(
+            @PathVariable Long documentId) {
+        PrivateUploadService.PrivateFile file = contractCaseService.downloadDocument(documentId);
+        MediaType mediaType;
+        try {
+            mediaType = file.contentType() == null
+                    ? MediaType.APPLICATION_OCTET_STREAM
+                    : MediaType.parseMediaType(file.contentType());
+        } catch (Exception ignored) {
+            mediaType = MediaType.APPLICATION_OCTET_STREAM;
+        }
+        boolean inline = MediaType.APPLICATION_PDF.includes(mediaType)
+                || "image".equalsIgnoreCase(mediaType.getType());
+        ContentDisposition disposition = (inline
+                ? ContentDisposition.inline()
+                : ContentDisposition.attachment())
+                .filename(file.fileName(), StandardCharsets.UTF_8)
+                .build();
+        return ResponseEntity.ok()
+                .cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.CONTENT_DISPOSITION, disposition.toString())
+                .header("X-Content-Type-Options", "nosniff")
+                .contentType(mediaType)
+                .body(file.resource());
+    }
+
     @PostMapping("/{caseId}/runs")
     public Result<Map<String, Object>> startRun(@PathVariable Long caseId, @RequestBody(required = false) Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.startRun(caseId, request == null ? Map.of() : request));
     }
 
@@ -168,7 +212,7 @@ public class ContractWorkspaceController {
         // Resolve case ID from finding and check access
         Long caseId = jdbcTemplate.queryForObject(
             "SELECT case_id FROM contract_review_finding WHERE id=?", Long.class, findingId);
-        if (caseId != null) accessPolicy.checkAccess(caseId);
+        if (caseId != null) accessPolicy.checkReviewAccess(caseId);
         return Result.ok(contractCaseService.updateFinding(
                 findingId, request == null ? Map.of() : request));
     }
@@ -179,7 +223,7 @@ public class ContractWorkspaceController {
             @PathVariable Long caseId,
             @PathVariable Long elementId,
             @RequestBody(required = false) Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkReviewAccess(caseId);
         return Result.ok(contractCaseService.reviewContractElement(
                 caseId, elementId, request == null ? Map.of() : request, currentActor()));
     }
@@ -189,7 +233,7 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> reviewContractFact(
             @PathVariable Long caseId,
             @RequestBody(required = false) Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkReviewAccess(caseId);
         return Result.ok(contractCaseService.reviewContractFact(
                 caseId, request == null ? Map.of() : request, currentActor()));
     }
@@ -200,7 +244,7 @@ public class ContractWorkspaceController {
             @RequestBody(required = false) Map<String, Object> request) {
         Map<String, Object> run = contractCaseService.getRun(runId);
         if (run != null && run.get("subjectId") instanceof Number sid) {
-            accessPolicy.checkAccess(sid.longValue());
+            accessPolicy.checkReviewAccess(sid.longValue());
         }
         return Result.ok(contractCaseService.approveAction(runId, actionId,
                 request == null ? Map.of() : request, currentActor()));
@@ -210,7 +254,7 @@ public class ContractWorkspaceController {
     @OperationLog(value = "发起合同履约核验", type = "CREATE")
     public Result<Map<String, Object>> startTimelineFulfillmentCheck(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.startTimelineFulfillmentCheck(caseId, timelineNodeId));
     }
 
@@ -220,7 +264,7 @@ public class ContractWorkspaceController {
             @PathVariable Long caseId,
             @PathVariable Long timelineNodeId,
             @RequestBody(required = false) Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkReviewAccess(caseId);
         return Result.ok(contractCaseService.reviewTimelineNode(
                 caseId, timelineNodeId, request == null ? Map.of() : request, currentActor()));
     }
@@ -249,7 +293,7 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> saveTimelineEvidenceLinks(
             @PathVariable Long caseId, @PathVariable Long timelineNodeId,
             @RequestBody(required = false) Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.saveTimelineEvidenceLinks(
                 caseId, timelineNodeId, request == null ? Map.of() : request));
     }
@@ -263,7 +307,7 @@ public class ContractWorkspaceController {
 
     @PostMapping("/{caseId}/obligations")
     public Result<Map<String, Object>> createObligation(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.createObligation(caseId, request));
     }
 
@@ -271,15 +315,94 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> updateObligation(@PathVariable Long obligationId, @RequestBody Map<String, Object> request) {
         Long caseId = jdbcTemplate.queryForObject(
             "SELECT case_id FROM contract_obligation WHERE id=?", Long.class, obligationId);
-        if (caseId != null) accessPolicy.checkAccess(caseId);
+        if (caseId != null) accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.updateObligation(obligationId, request));
     }
 
     @PostMapping("/{caseId}/fulfillment-evidence")
     @OperationLog(value = "上传合同履约证据", type = "CREATE")
     public Result<Map<String, Object>> uploadFulfillmentEvidence(@PathVariable Long caseId, @RequestBody Map<String, Object> request) {
-        accessPolicy.checkAccess(caseId);
+        accessPolicy.checkWriteAccess(caseId);
         return Result.ok(contractCaseService.uploadFulfillmentEvidence(caseId, request));
+    }
+
+    // ── 状态转换 ──────────────────────────────────────────────────
+
+    @PostMapping("/{caseId}/submit-review")
+    @OperationLog(value = "提交审核", type = "UPDATE")
+    public Result<Map<String, Object>> submitReview(@PathVariable Long caseId) {
+        accessPolicy.checkWriteAccess(caseId);
+        contractCaseService.transitionStatus(caseId, "READY_FOR_REVIEW", "REVIEWING", null,
+                StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("status", "REVIEWING"));
+    }
+
+    @PostMapping("/{caseId}/approve")
+    @OperationLog(value = "审批通过", type = "UPDATE")
+    public Result<Map<String, Object>> approve(@PathVariable Long caseId) {
+        accessPolicy.checkReviewAccess(caseId);
+        contractCaseService.transitionStatus(caseId, "PENDING_APPROVAL", "APPROVED", null,
+                StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("status", "APPROVED"));
+    }
+
+    @PostMapping("/{caseId}/request-revision")
+    @OperationLog(value = "要求修订", type = "UPDATE")
+    public Result<Map<String, Object>> requestRevision(@PathVariable Long caseId,
+                                                       @RequestBody Map<String, Object> body) {
+        accessPolicy.checkReviewAccess(caseId);
+        String reason = str(body, "reason");
+        contractCaseService.transitionStatus(caseId, "PENDING_APPROVAL", "NEEDS_REVISION", reason,
+                StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("status", "NEEDS_REVISION"));
+    }
+
+    // ── 成员管理 ──────────────────────────────────────────────────
+
+    @GetMapping("/{caseId}/members")
+    public Result<List<Map<String, Object>>> listMembers(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
+        return Result.ok(contractMemberService.listMembers(caseId));
+    }
+
+    @PostMapping("/{caseId}/members/invite")
+    @OperationLog(value = "邀请合同成员", type = "CREATE")
+    public Result<Map<String, Object>> inviteMember(@PathVariable Long caseId,
+                                                    @RequestBody Map<String, Object> body) {
+        accessPolicy.checkManageMembersAccess(caseId);
+        Long userId = toLong(body.get("userId"));
+        String role = str(body, "role");
+        contractMemberService.inviteMember(caseId, userId, role, StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("invited", true));
+    }
+
+    @PatchMapping("/{caseId}/members/{userId}")
+    @OperationLog(value = "更新合同成员角色", type = "UPDATE")
+    public Result<Map<String, Object>> updateMemberRole(@PathVariable Long caseId,
+                                                        @PathVariable Long userId,
+                                                        @RequestBody Map<String, Object> body) {
+        accessPolicy.checkManageMembersAccess(caseId);
+        String role = str(body, "role");
+        contractMemberService.updateMemberRole(caseId, userId, role, StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("updated", true));
+    }
+
+    @DeleteMapping("/{caseId}/members/{userId}")
+    @OperationLog(value = "移除合同成员", type = "DELETE")
+    public Result<Map<String, Object>> removeMember(@PathVariable Long caseId,
+                                                    @PathVariable Long userId) {
+        accessPolicy.checkManageMembersAccess(caseId);
+        contractMemberService.removeMember(caseId, userId, StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("removed", true));
+    }
+
+    @PostMapping("/{caseId}/owner/transfer")
+    @OperationLog(value = "转移合同负责人", type = "UPDATE")
+    public Result<Map<String, Object>> transferOwnership(@PathVariable Long caseId,
+                                                         @RequestBody Map<String, Object> body) {
+        Long newOwnerId = toLong(body.get("userId"));
+        contractMemberService.transferOwnership(caseId, newOwnerId, StpUtil.getLoginIdAsLong());
+        return Result.ok(Map.of("transferred", true));
     }
 
     @GetMapping("/reminders")
@@ -337,5 +460,18 @@ public class ContractWorkspaceController {
         User user = userService.getById(userId);
         if (user == null) return "user:" + userId;
         return user.getUsername() == null || user.getUsername().isBlank() ? "user:" + userId : user.getUsername();
+    }
+
+    private String str(Map<String, Object> m, String k) {
+        Object v = m == null ? null : m.get(k);
+        return v == null ? "" : String.valueOf(v);
+    }
+
+    private Long toLong(Object val) {
+        if (val instanceof Number n) return n.longValue();
+        if (val instanceof String s && !s.isBlank()) {
+            try { return Long.parseLong(s); } catch (NumberFormatException e) { return null; }
+        }
+        return null;
     }
 }

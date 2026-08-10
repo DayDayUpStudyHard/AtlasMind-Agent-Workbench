@@ -186,6 +186,23 @@ export function getContractRun(runId) { return api.get(`/api/workspace/contracts
 export function updateContractFinding(findingId, data) { return api.patch(`/api/workspace/contracts/findings/${findingId}`, data) }
 export function approveContractAction(runId, actionId, data) { return api.post(`/api/workspace/contracts/runs/${runId}/actions/${actionId}/approval`, data) }
 
+// ── Contract file download ──────────────────────────────────────
+export function downloadContractDocument(documentId) {
+  return api.get(`/api/workspace/contracts/documents/${documentId}/download`, { responseType: 'blob' })
+}
+
+// ── Contract members ────────────────────────────────────────────
+export function getContractMembers(caseId) { return api.get(`/api/workspace/contracts/${caseId}/members`) }
+export function inviteContractMember(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/members/invite`, data) }
+export function updateContractMemberRole(caseId, userId, data) { return api.patch(`/api/workspace/contracts/${caseId}/members/${userId}`, data) }
+export function removeContractMember(caseId, userId) { return api.delete(`/api/workspace/contracts/${caseId}/members/${userId}`) }
+export function transferContractOwnership(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/owner/transfer`, data) }
+
+// ── Contract status transitions ─────────────────────────────────
+export function submitContractReview(caseId) { return api.post(`/api/workspace/contracts/${caseId}/submit-review`) }
+export function approveContract(caseId) { return api.post(`/api/workspace/contracts/${caseId}/approve`) }
+export function requestContractRevision(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/request-revision`, data) }
+
 export function createAiSession(data = {}) {
   return api.post('/api/ai/sessions', data)
 }

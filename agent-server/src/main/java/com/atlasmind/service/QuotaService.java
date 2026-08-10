@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Map;
+import java.util.Set;
 
 /**
  * 合同分析额度服务 — 两阶段预扣机制。
@@ -31,6 +32,10 @@ public class QuotaService {
     public void reserve(Long userId, Long runId) {
         String idempotencyKey = "run:" + runId + ":RESERVE";
 
+        lockAndValidateRun(userId, runId, Set.of(
+                "CREATED", "CONTEXT_BUILDING", "PLANNING", "ANALYZING",
+                "VERIFYING", "WAITING_HUMAN", "WAITING_APPROVAL"));
+
         var rows = jdbc.queryForList(
             "SELECT total_quota, used_count, reserved_count FROM user_quota WHERE user_id=? FOR UPDATE",
             userId);
@@ -53,7 +58,6 @@ public class QuotaService {
         jdbc.update("""
             INSERT INTO quota_transaction (user_id, amount, type, balance_after, run_id, idempotency_key)
             VALUES (?, -1, 'RESERVE', ?, ?, ?)
-            ON DUPLICATE KEY UPDATE amount=VALUES(amount)
             """, userId, balanceAfter, runId, idempotencyKey);
     }
 
@@ -64,13 +68,19 @@ public class QuotaService {
     public void confirm(Long userId, Long runId) {
         String idempotencyKey = "run:" + runId + ":CONFIRM";
 
-        jdbc.queryForList(
-            "SELECT reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
+        lockAndValidateRun(userId, runId, Set.of("COMPLETED"));
 
-        if (hasIdempotencyKey(idempotencyKey)) return;
+        var quotaRows = jdbc.queryForList(
+            "SELECT reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
+        if (quotaRows.isEmpty()) throw new IllegalStateException("用户无额度记录");
+
+        if (hasSettlement(runId)) return;
+        requireReservation(userId, runId);
+        int reservedCount = ((Number) quotaRows.get(0).get("reserved_count")).intValue();
+        if (reservedCount <= 0) throw new IllegalStateException("额度预扣状态不一致");
 
         jdbc.update(
-            "UPDATE user_quota SET reserved_count = GREATEST(reserved_count - 1, 0), used_count = used_count + 1 WHERE user_id=?",
+            "UPDATE user_quota SET reserved_count = reserved_count - 1, used_count = used_count + 1 WHERE user_id=?",
             userId);
 
         var updated = jdbc.queryForList(
@@ -83,7 +93,6 @@ public class QuotaService {
             jdbc.update("""
                 INSERT INTO quota_transaction (user_id, amount, type, balance_after, run_id, idempotency_key)
                 VALUES (?, 0, 'CONFIRM', ?, ?, ?)
-                ON DUPLICATE KEY UPDATE amount=VALUES(amount)
                 """, userId, total - used - reserved, runId, idempotencyKey);
         }
     }
@@ -95,13 +104,19 @@ public class QuotaService {
     public void refund(Long userId, Long runId) {
         String idempotencyKey = "run:" + runId + ":REFUND";
 
-        jdbc.queryForList(
-            "SELECT reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
+        lockAndValidateRun(userId, runId, Set.of("FAILED", "CANCELLED"));
 
-        if (hasIdempotencyKey(idempotencyKey)) return;
+        var quotaRows = jdbc.queryForList(
+            "SELECT reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
+        if (quotaRows.isEmpty()) throw new IllegalStateException("用户无额度记录");
+
+        if (hasSettlement(runId)) return;
+        requireReservation(userId, runId);
+        int reservedCount = ((Number) quotaRows.get(0).get("reserved_count")).intValue();
+        if (reservedCount <= 0) throw new IllegalStateException("额度预扣状态不一致");
 
         jdbc.update(
-            "UPDATE user_quota SET reserved_count = GREATEST(reserved_count - 1, 0) WHERE user_id=?",
+            "UPDATE user_quota SET reserved_count = reserved_count - 1 WHERE user_id=?",
             userId);
 
         var updated = jdbc.queryForList(
@@ -114,7 +129,6 @@ public class QuotaService {
             jdbc.update("""
                 INSERT INTO quota_transaction (user_id, amount, type, balance_after, run_id, idempotency_key)
                 VALUES (?, 1, 'REFUND', ?, ?, ?)
-                ON DUPLICATE KEY UPDATE amount=VALUES(amount)
                 """, userId, total - used - reserved, runId, idempotencyKey);
         }
     }
@@ -125,14 +139,15 @@ public class QuotaService {
     @Transactional
     public void adjust(Long userId, int delta, Long operatorId, String remark) {
         var rows = jdbc.queryForList(
-            "SELECT total_quota, used_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
+            "SELECT total_quota, used_count, reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);
         if (rows.isEmpty()) throw new IllegalArgumentException("用户无额度记录");
 
         var row = rows.get(0);
         int total = ((Number) row.get("total_quota")).intValue();
         int used = ((Number) row.get("used_count")).intValue();
-        if (total + delta < used) {
-            throw new IllegalArgumentException("不能扣减到低于已用量");
+        int reserved = ((Number) row.get("reserved_count")).intValue();
+        if (total + delta < used + reserved) {
+            throw new IllegalArgumentException("不能扣减到低于已用量和预扣量之和");
         }
 
         jdbc.update("UPDATE user_quota SET total_quota = total_quota + ? WHERE user_id=?", delta, userId);
@@ -190,6 +205,37 @@ public class QuotaService {
             Integer.class,
             idempotencyKey);
         return existing != null && existing > 0;
+    }
+
+    private void lockAndValidateRun(Long userId, Long runId, Set<String> allowedStatuses) {
+        var runs = jdbc.queryForList(
+                "SELECT initiated_by, status FROM agent_run WHERE id=? FOR UPDATE", runId);
+        if (runs.isEmpty()) throw new IllegalArgumentException("Agent Run 不存在");
+        var run = runs.get(0);
+        Long initiatedBy = run.get("initiated_by") instanceof Number n ? n.longValue() : null;
+        if (!userId.equals(initiatedBy)) throw new IllegalStateException("额度用户与 Run 发起人不一致");
+        String status = String.valueOf(run.get("status"));
+        if (!allowedStatuses.contains(status)) {
+            throw new IllegalStateException("Run 状态不允许额度变更: " + status);
+        }
+    }
+
+    private void requireReservation(Long userId, Long runId) {
+        Integer reserved = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM quota_transaction
+                WHERE user_id=? AND run_id=? AND type='RESERVE'
+                """, Integer.class, userId, runId);
+        if (reserved == null || reserved == 0) {
+            throw new IllegalStateException("Run 没有对应的额度预扣记录");
+        }
+    }
+
+    private boolean hasSettlement(Long runId) {
+        Integer settled = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM quota_transaction
+                WHERE run_id=? AND type IN ('CONFIRM','REFUND')
+                """, Integer.class, runId);
+        return settled != null && settled > 0;
     }
 
     /** Exception thrown when quota is exhausted. */

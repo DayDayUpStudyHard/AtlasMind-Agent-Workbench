@@ -29,7 +29,12 @@ spring:
           min-idle: 0
 
 atlasmind:
+  cors:
+    allowed-origins: ${CORS_ALLOWED_ORIGINS:http://localhost:15173,http://localhost:15174,http://localhost:5173,http://localhost:5174}
+  bootstrap-admin:
+    password: ${BOOTSTRAP_ADMIN_PASSWORD:admin123}
   upload-path: upload/
+  internal-token: ${INTERNAL_SERVICE_TOKEN:atlasmind-internal-dev-token}
   storage:
     type: local
     s3:

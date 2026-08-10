@@ -28,3 +28,21 @@ WHERE owner_token IS NULL OR owner_token = '';
 
 ALTER TABLE kb_qa_session
     MODIFY COLUMN owner_token VARCHAR(64) NOT NULL;
+
+SET @case_id_exists := (
+    SELECT COUNT(*)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'kb_qa_session'
+      AND COLUMN_NAME = 'case_id'
+);
+
+SET @case_id_ddl := IF(
+    @case_id_exists = 0,
+    'ALTER TABLE kb_qa_session ADD COLUMN case_id BIGINT NULL AFTER document_id',
+    'SELECT 1'
+);
+
+PREPARE case_id_stmt FROM @case_id_ddl;
+EXECUTE case_id_stmt;
+DEALLOCATE PREPARE case_id_stmt;

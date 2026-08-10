@@ -55,6 +55,7 @@ class Settings:
     contract_timeline_llm_batch_size: int = int(os.getenv("CONTRACT_TIMELINE_LLM_BATCH_SIZE", "8"))
     retrieval_top_k: int = int(os.getenv("RETRIEVAL_TOP_K", "5"))
     internal_token: str = os.getenv("CHAT_ASSISTANT_TOKEN", "")
+    java_backend_url: str = os.getenv("JAVA_BACKEND_URL", "http://localhost:18080")
     kb_chunk_insert_batch_size: int = int(os.getenv("KB_CHUNK_INSERT_BATCH_SIZE", "200"))
     kb_embedding_batch_size: int = int(os.getenv("KB_EMBEDDING_BATCH_SIZE", "16"))
 

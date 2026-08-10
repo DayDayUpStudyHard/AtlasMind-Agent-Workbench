@@ -37,6 +37,8 @@ public interface ContractCaseService {
 
     Map<String, Object> getDocumentContent(Long caseId, Long documentId);
 
+    PrivateUploadService.PrivateFile downloadDocument(Long documentId);
+
     List<Map<String, Object>> listDocuments(Long caseId);
 
     List<Map<String, Object>> listRecentDocumentPipelines();
@@ -73,4 +75,7 @@ public interface ContractCaseService {
     Map<String, Object> updateObligation(Long obligationId, Map<String, Object> request);
     Map<String, Object> uploadFulfillmentEvidence(Long caseId, Map<String, Object> request);
     List<Map<String, Object>> listReminders();
+
+    /** Semantically validate and execute a contract status transition. */
+    void transitionStatus(Long caseId, String fromStatus, String toStatus, String reason, Long userId);
 }

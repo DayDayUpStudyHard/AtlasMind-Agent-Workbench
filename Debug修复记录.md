@@ -2,6 +2,170 @@
 
 项目开发过程中遇到的问题及修复，按时间倒序记录。
 
+## 合同文件权限、额度结算与协作流程 PRD 完整实施
+
+**日期**：2026-08-09
+
+### 调整原因
+
+按 [PRD 文档](docs/prd-contract-files-quota-collaboration-2026-08-09.md) 六阶段实施计划，补全合同文件权限收口、Python 额度结算回调闭环、协作成员体系、语义化状态转换、前端成员 UI 和测试补齐。全部 6 个 Phase 完成后进行代码审查，发现并修复 5 个遗留问题。
+
+### Phase 3: 额度结算闭环
+
+**Python 端** (`runner.py` — `RunDispatcher` 类)：
+- 新增 `_settle_quota(run_id, status)` 异步方法：COMPLETED → `confirm`，FAILED/CANCELLED → `refund`
+- 通过 `X-Internal-Token` 请求头调用 Java 内部端点，失败仅记日志（`QuotaSettlementJob` 兜底）
+- 在所有 terminal 分支（COMPLETED/FAILED/CANCELLED）调用 `_settle_quota`
+
+**Java 端**：
+- 新增 `QuotaInternalController.java`（`/api/internal/quota`）：`POST /confirm/{runId}` 和 `POST /refund/{runId}`，校验 Run 状态后调用 `QuotaService`
+- `QuotaSettlementJob.java` 保留 5 秒轮询作为兜底
+- `.env.example` 新增 `INTERNAL_SERVICE_TOKEN` 和 `JAVA_BACKEND_URL`
+
+### Phase 4: 协作成员体系
+
+**Schema** (`AgentWorkbenchSchemaInitializer.java`)：
+- 新增 `contract_member` 表：`id, case_id, user_id, role, status, invited_by, joined_at, removed_at` + `UNIQUE(case_id, user_id)` + 索引
+
+**ContractMemberService.java**（新建）：
+- 完整成员 CRUD：`listMembers`、`inviteMember`、`updateMemberRole`、`removeMember`、`transferOwnership`、`forceSetOwner`
+- 权限检查：`canWrite`（OWNER/EDITOR）、`canReview`（OWNER/EDITOR/REVIEWER）、`canManageMembers`（OWNER）
+- `addOwner` 幂等：已存在则提升为 OWNER 并恢复 ACTIVE
+- `inviteMember` 拒绝 OWNER 角色（必须用 `transferOwnership`）
+- `removeMember` 检查最后一个 OWNER 保护
+- `transferOwnership`：`SELECT FOR UPDATE` 锁两行 → 原 OWNER 降级为 EDITOR → 目标用户设为 OWNER → 同步 `contract_case.owner_id`
+- `forceSetOwner`（ADMIN 恢复）：降级所有现有 OWNER → 设定目标为 OWNER → 同步 `contract_case.owner_id`
+- `listMembers` 排序用 `CASE WHEN` 替代 MySQL `FIELD()`（H2 兼容）
+
+**ContractAccessPolicy.java**：
+- `checkAccess()` 改为三阶：ADMIN → `memberService.isMember()` → `checkVisibility()`（成员优先于 visibility 规则）
+- 新增 `checkWriteAccess()`、`checkReviewAccess()`、`checkManageMembersAccess()` 细粒度方法
+- `buildVisibilityFilter()` 和 `buildVisibilityFilterNoAlias()` 均新增第 4 个 OR 分支：`EXISTS contract_member` 子查询，使成员合同在列表/队列/portfolio 查询中始终可见
+
+**ContractWorkspaceController.java**：
+- 新增成员端点：`GET /{caseId}/members`、`POST /{caseId}/members/invite`、`PATCH /{caseId}/members/{userId}`、`DELETE /{caseId}/members/{userId}`、`POST /{caseId}/owner/transfer`
+- **权限加固**（12+ 端点从 `checkAccess` 升级）：
+  - 写操作端点：`update`、`uploadDocument`、`startRun`、`createObligation`、`uploadFulfillmentEvidence`、`startTimelineFulfillmentCheck`、`saveTimelineEvidenceLinks`、`updateObligation` → `checkWriteAccess`
+  - 审核操作端点：`reviewContractElement`、`reviewContractFact`、`reviewTimelineNode`、`updateFinding`、`approve(action)` → `checkReviewAccess`
+- 新增辅助方法 `str()` 和 `toLong()`
+
+**ContractCaseServiceImpl.java**：
+- `createCase()`：创建合同后调用 `memberService.addOwner(id, userId)` 自动添加创建者为 OWNER
+
+**ContractAdminController.java**：
+- 新增 ADMIN 管理端点：`GET /{id}/members`、`POST /{id}/members/force-add`、`DELETE /{caseId}/members/{userId}`、`POST /{id}/owner/force-set`
+
+### Phase 5: 状态转换接口与前端
+
+**状态转换** (`ContractWorkspaceController.java` + `ContractCaseServiceImpl.java`)：
+- `POST /{caseId}/submit-review`：DRAFT/READY_FOR_REVIEW → REVIEWING（需要 `checkWriteAccess`）
+- `POST /{caseId}/approve`：PENDING_APPROVAL → APPROVED（需要 `checkReviewAccess`）
+- `POST /{caseId}/request-revision`：PENDING_APPROVAL/REVIEWING → NEEDS_REVISION（需要 `checkReviewAccess`，支持 `reason` 参数）
+- `transitionStatus()` 使用 `SELECT FOR UPDATE` 锁行 + 状态校验 + 审计日志写入
+
+**前端** (`ContractCaseView.vue`)：
+- 新增 `members` ref、`memberRole`/`canWrite`/`canReview`/`canManageMembers` computed 属性
+- 头部新增角色徽章（OWNER 金色/EDITOR 蓝色/REVIEWER 绿色/VIEWER 灰色）
+- 工作台新增"成员"Tab，展示成员列表（头像/姓名/角色标签/加入时间）
+- CSS：`.role-badge`、`.member-list`、`.member-row`、`.member-info`、`.member-avatar`、`.member-role-tag`、`.member-joined`（角色颜色编码）
+
+**前端 API** (`agent-front/src/api/index.js`)：
+- 新增 10 个函数：`downloadContractDocument`、`getContractMembers`、`inviteContractMember`、`updateContractMemberRole`、`removeContractMember`、`transferContractOwnership`、`submitContractReview`、`approveContract`、`requestContractRevision`
+
+### Phase 6: 测试补齐
+
+**ContractMemberServiceTest.java**（18 个测试）：
+- `addOwnerCreatesOwnership`、`addOwnerIsIdempotent`
+- `inviteMemberAddsNonOwnerRole`、`inviteMemberRejectsOwnerRole`、`invitedMemberCanBeUpgraded`
+- `editorCannotChangeOwner`、`lastOwnerCannotBeRemoved`、`ownerCanRemoveAfterAddingSecondOwner`
+- `nonOwnerCannotTransferOwnership`、`ownerCannotTransferToSelf`
+- `forceSetOwnerOverwritesExistingOwner`、`forceSetOwnerFixesOwnerlessContract`
+- `transferOwnershipSyncsContractCaseOwnerId`、`forceSetOwnerSyncsContractCaseOwnerId`
+- `removedMemberCannotAccess`、`permissionChecksReflectRole`、`listMembersIncludesUserInfo`、`nonMemberHasNoRole`
+
+**已有测试**：`QuotaServiceTest` 4 个 + `UserServiceImplTest` 17 个 + `KnowledgeBaseServiceImplTest` 3 个 = **42 个测试，全部通过，0 失败**
+
+**修复的 H2 兼容问题**：
+- `listMembers` 排序用 `CASE WHEN` 替代 MySQL `FIELD()`
+- 测试 schema 的 `t_user` 表新增 `avatar VARCHAR(256)` 列
+
+---
+
+### 代码审查发现的 5 个遗留问题及修复
+
+#### 问题 1（阻断）：`buildVisibilityFilter` 缺少成员子句
+
+`buildVisibilityFilter` 和 `buildVisibilityFilterNoAlias` 的 WHERE 子句仅包含 `ALL`、`DEPARTMENT`、`SPECIFIED` 三个 visibility 分支。已加入成员合同但其 visibility 为 `SPECIFIED` 且不在允许部门列表中的成员，在 `listWorkQueue()`、`portfolio()`、`workQueueSummary()` 等列表查询中看不到自己的合同。
+
+**修复**：两个 filter 方法各新增第 4 个 OR 分支：
+```sql
+OR EXISTS (SELECT 1 FROM contract_member cm
+           WHERE cm.case_id = c.id AND cm.user_id = ? AND cm.status = 'ACTIVE')
+```
+params 追加 `userId`。`buildVisibilityFilterNoAlias` 同理（去掉 `c.` 别名前缀）。
+
+#### 问题 2（安全）：6 个写操作端点仅做 `checkAccess`
+
+`update`、`uploadDocument`、`startRun`、`createObligation`、`uploadFulfillmentEvidence`、`startTimelineFulfillmentCheck`、`saveTimelineEvidenceLinks` 等写操作端点仅调用 `checkAccess`（任何活跃成员/可见用户即放行），VIEWER 和通过 visibility 访问的非成员用户也能写合同。
+
+**修复**：以上端点全部升级为 `checkWriteAccess`；`reviewContractElement`、`reviewContractFact`、`reviewTimelineNode`、`updateFinding` 升级为 `checkReviewAccess`。
+
+#### 问题 3（阻断）：`transferOwnership` 可自我转移 + 无 ADMIN 恢复机制
+
+- `transferOwnership` 允许将所有权转移给自己，导致 OWNER 被降级为 EDITOR 后合同变为无 OWNER 状态
+- 没有 ADMIN 在 OWNER 离职/误操作后恢复控制权的能力
+
+**修复**：
+- `transferOwnership` 新增 `if (newOwnerId.equals(currentOwnerId)) throw` 自转移守卫
+- 新增 `forceSetOwner(caseId, newOwnerId)`：降级所有现有 OWNER → 设定目标为 OWNER；`ContractAdminController` 新增 `POST /{id}/owner/force-set` 端点
+
+#### 问题 3a（安全）：审批操作端点仅做 `checkAccess`
+
+`POST /runs/{runId}/actions/{actionId}/approval`（审批 Run Action）仅调用 `checkAccess`，非审核角色用户也可审批。
+
+**修复**：该端点升级为 `checkReviewAccess`。
+
+#### 问题 3b（一致性）：所有权转移未同步 `contract_case.owner_id`
+
+`transferOwnership` 和 `forceSetOwner` 只更新 `contract_member` 表，不写回 `contract_case.owner_id` 和 `maintainer_id`，导致合同列表的 `owner_id` 与成员表不一致。
+
+**修复**：两个方法末尾各增加：
+```sql
+UPDATE contract_case SET owner_id=?, maintainer_id=? WHERE id=?
+```
+
+### 验证
+
+- **42 个测试全部通过**：`mvn test` 0 失败（ContractMemberServiceTest 18 + QuotaServiceTest 4 + UserServiceImplTest 17 + KnowledgeBaseServiceImplTest 3）
+- `.\\mvnw.cmd -q -DskipTests compile` 通过
+- 前端 `npm run build` 通过
+
+### 修改文件总览
+
+| 文件 | 变更 |
+|------|------|
+| `ContractAccessPolicy.java` | 三阶访问检查 + 4 个细粒度方法 + 两个 filter 新增 member EXISTS 子句 |
+| `ContractMemberService.java` | **新建** — 完整成员 CRUD + 权限检查 + 转移/强制设定 OWNER |
+| `ContractMemberServiceTest.java` | **新建** — 18 个测试覆盖全部核心路径 |
+| `AgentWorkbenchSchemaInitializer.java` | 新增 `contract_member` 表 DDL |
+| `ContractWorkspaceController.java` | 成员管理端点 + 状态转换端点 + 12+ 权限加固 + 辅助方法 |
+| `ContractAdminController.java` | ADMIN 成员管理端点 + `toLong()` 辅助方法 |
+| `ContractCaseServiceImpl.java` | `memberService` 注入 + `addOwner` 自动创建 + `transitionStatus()` |
+| `ContractCaseService.java` | 接口新增 `transitionStatus()` 方法签名 |
+| `runner.py` | `_settle_quota()` 异步回调 + terminal 分支调用 |
+| `QuotaInternalController.java` | **新建** — confirm/refund 内部端点 |
+| `QuotaSettlementJob.java` | 兜底对账逻辑 |
+| `ContractCaseView.vue` | 成员 UI + 权限 computed + 角色徽章 |
+| `agent-front/src/api/index.js` | 10 个新 API 函数 |
+| `.env.example` | `INTERNAL_SERVICE_TOKEN` + `JAVA_BACKEND_URL` |
+
+### H2 兼容性修复
+
+- `listMembers()` 排序从 MySQL `FIELD()` 改为 `CASE WHEN`（H2 不支持 `FIELD()`）
+- 测试 `t_user` schema 新增 `avatar` 列（`listMembers` JOIN 查询需要）
+
+---
+
 ## 权限体系四个硬点补全：合同访问边角、额度幂等、管理员保护、Token 测试
 
 **日期**：2026-08-09

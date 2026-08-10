@@ -91,7 +91,7 @@ export function elementPresentation(element) {
   const key = cleanText(element?.elementKey).toLowerCase()
   const category = cleanText(element?.category || element?.groupKey).toLowerCase()
   const label = cleanText(element?.displayLabel || element?.label || element?.title || element?.elementKey || '合同要素')
-  const summary = elementDisplayValue(element)
+  const summary = cleanText(elementDisplayValue(element))
   const details = value ? structuredValueDetails(value) : []
   const type = value ? pickValue(value, ['type', 'kind', 'category']) : ''
   const headline = type && !label.includes(type) ? `${label} · ${type}` : label
@@ -162,7 +162,7 @@ export function elementDisplayValue(element) {
     if (structured) return structured
     return '结构化信息，查看完整证据'
   }
-  return raw || '待确认'
+  return cleanText(raw) || '待确认'
 }
 
 export function compactElementValue(element, limit = 100) {
