@@ -6,12 +6,24 @@ plus LegacyAdapter (existing harness) and GraphAdapter (LangGraph) implementatio
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
 logger = logging.getLogger(__name__)
+
+# Per-run overrides — set by eval runner or any caller that wants to
+# override global settings for a specific run.
+_model_override: contextvars.ContextVar[str] = contextvars.ContextVar("model_override", default="")
+_prompt_version_override: contextvars.ContextVar[str] = contextvars.ContextVar("prompt_version_override", default="")
+_recall_multiplier_override: contextvars.ContextVar[int] = contextvars.ContextVar("recall_multiplier_override", default=0)
+_recall_min_override: contextvars.ContextVar[int] = contextvars.ContextVar("recall_min_override", default=0)
+_recall_max_override: contextvars.ContextVar[int] = contextvars.ContextVar("recall_max_override", default=0)
+_retry_limit_override: contextvars.ContextVar[int] = contextvars.ContextVar("retry_limit_override", default=-1)
+_coverage_reflection_disabled: contextvars.ContextVar[bool] = contextvars.ContextVar("coverage_reflection_disabled", default=False)
+_temperature_override: contextvars.ContextVar[float] = contextvars.ContextVar("temperature_override", default=-1.0)
 
 _GRAPH_PROMPT_VERSIONS = {
     "CONTRACT_REVIEW": "contract-review-graph-v1",
@@ -21,14 +33,25 @@ _GRAPH_PROMPT_VERSIONS = {
 
 
 def _runtime_model_metadata(task_type: str) -> tuple[str, str]:
-    """Return the configured model and stable prompt version for a graph."""
-    try:
-        from app.config import settings
+    """Return the configured model and stable prompt version for a graph.
 
-        model = str(getattr(settings, "llm_model", "") or "")
-    except Exception:
-        model = ""
-    return model, _GRAPH_PROMPT_VERSIONS.get(str(task_type or "").upper(), "")
+    Per-run overrides (set via contextvars) take precedence over global settings.
+    """
+    # Model: contextvar override → global settings → empty
+    model = _model_override.get()
+    if not model:
+        try:
+            from app.config import settings
+            model = str(getattr(settings, "llm_model", "") or "")
+        except Exception:
+            model = ""
+
+    # Prompt version: contextvar override → hardcoded lookup
+    prompt = _prompt_version_override.get()
+    if not prompt:
+        prompt = _GRAPH_PROMPT_VERSIONS.get(str(task_type or "").upper(), "")
+
+    return model, prompt
 
 
 # ── Protocol & models ────────────────────────────────────────────────

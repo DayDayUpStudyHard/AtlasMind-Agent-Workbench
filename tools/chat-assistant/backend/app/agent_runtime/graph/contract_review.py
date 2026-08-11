@@ -36,14 +36,18 @@ def _route_after_reflection(state: dict[str, Any]) -> str:
     coverage = state.get("coverage") or {}
     status = coverage.get("status", "NEED_MORE_EVIDENCE")
     retry_count = int((state.get("retry_state") or {}).get("reflection_rounds", 0))
+
+    # Per-run override for max retries (default 1, 0 = no targeted retrieval)
+    from app.agent_runtime.runtime import _retry_limit_override
+    max_retries = _retry_limit_override.get()
+    if max_retries < 0:
+        max_retries = 1  # default: one targeted retrieval pass
+
     if status == "CONFIRMED":
         return "compose_report"
     if status == "CANNOT_RESOLVE":
         return "compose_limited_report"
-    # One targeted retrieval is enough for the MVP. Re-running every domain
-    # LLM after that can leave the graph in a long, report-less verification
-    # loop when the model or policy evidence is unavailable.
-    if retry_count >= 1:
+    if retry_count >= max_retries:
         return "compose_limited_report"
     return "targeted_retrieval"
 

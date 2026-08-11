@@ -610,10 +610,12 @@ class ContractStore:
             return (keyword_hits or await _run_sync(_fallback_keyword))[:top_k]
 
         # Recall 30–50 candidates (configurable) for the reranker to narrow to 8–12.
-        candidate_k = min(
-            max(top_k * settings.reranker_recall_multiplier, settings.reranker_min_recall),
-            settings.reranker_max_recall,
-        )
+        # Per-run overrides take precedence over global settings.
+        from app.agent_runtime.runtime import _recall_multiplier_override, _recall_min_override, _recall_max_override
+        _mult = _recall_multiplier_override.get() or settings.reranker_recall_multiplier
+        _min = _recall_min_override.get() or settings.reranker_min_recall
+        _max = _recall_max_override.get() or settings.reranker_max_recall
+        candidate_k = min(max(top_k * _mult, _min), _max)
         vector_hits: list[dict] = []
         es_keyword_hits: list[dict] = []
         try:
@@ -625,8 +627,11 @@ class ContractStore:
             es_keyword_hits = es.search_contract_by_keyword(query, case_id, candidate_k)
         except Exception as exc:
             logger.warning("contract ES keyword retrieval failed while ES is available: %s", exc)
+        # Fusion cap now respects recall overrides so the reranker gets
+        # enough candidates (30–50 by default) instead of being capped at
+        # top_k * 2 (≤24).  candidate_k is already bounded by _max.
         hits, retrieval_validation = _fuse_contract_retrieval(
-            vector_hits, keyword_hits, max(top_k * 2, top_k),
+            vector_hits, keyword_hits, candidate_k,
             es_keyword_hits=es_keyword_hits,
         )
         if not hits:
@@ -750,8 +755,12 @@ class ContractStore:
         standard_limit = max(1, min(3, limit // 2 or 1))
         kb_limit = max(1, limit - standard_limit)
         # Recall more candidates for the reranker to narrow down.
-        standard_recall = min(standard_limit * 6, 20)
-        kb_recall = min(max(kb_limit * settings.reranker_recall_multiplier, settings.reranker_min_recall), settings.reranker_max_recall)
+        from app.agent_runtime.runtime import _recall_multiplier_override, _recall_min_override, _recall_max_override
+        _mult = _recall_multiplier_override.get() or settings.reranker_recall_multiplier
+        _min = _recall_min_override.get() or settings.reranker_min_recall
+        _max = _recall_max_override.get() or settings.reranker_max_recall
+        standard_recall = min(max(standard_limit * _mult, _min), _max)
+        kb_recall = min(max(kb_limit * _mult, _min), _max)
         reranker = get_reranker()
 
         def _standard():

@@ -511,6 +511,52 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     UNIQUE KEY uk_run_case (run_id, case_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // ── Add features_json column (safe ALTER, may already exist) ────
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_run
+                    ADD COLUMN features_json LONGTEXT
+                    """);
+        } catch (Exception ignored) {
+            // Column may already exist — safe to ignore
+        }
+        // ── Backfill metric columns for pre-existing tables ──────────
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_run
+                    ADD COLUMN false_positive_rate DOUBLE DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_run
+                    ADD COLUMN schema_valid_rate DOUBLE DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_run
+                    ADD COLUMN passed_count INT DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_result
+                    ADD COLUMN false_positives INT DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_result
+                    ADD COLUMN dual_citation_rate DOUBLE DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_result
+                    ADD COLUMN schema_valid_rate DOUBLE DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
         jdbcTemplate.update("""
                 INSERT IGNORE INTO system_config (config_key, config_value)
                 VALUES ('AGENT_RUNTIME', 'java')

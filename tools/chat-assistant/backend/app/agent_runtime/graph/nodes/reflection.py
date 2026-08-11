@@ -57,6 +57,11 @@ def _domain_state(
 
 def coverage_reflection(state: dict[str, Any]) -> dict[str, Any]:
     """Compute a domain coverage matrix from validated findings."""
+    # Per-run disable — skip reflection and confirm immediately
+    from app.agent_runtime.runtime import _coverage_reflection_disabled
+    if _coverage_reflection_disabled.get():
+        return {"coverage": {"status": "CONFIRMED", "skipReason": "coverage_reflection_disabled_per_run"}}
+
     validated = state.get("validated_findings") or []
     domain_tasks = state.get("domain_tasks") or []
     domain_analysis = state.get("domain_analysis") or {}

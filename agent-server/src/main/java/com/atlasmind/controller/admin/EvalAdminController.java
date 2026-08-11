@@ -29,18 +29,19 @@ public class EvalAdminController {
                        d.case_count AS caseCount, d.status, d.create_time AS createTime
                 FROM agent_eval_dataset d
                 ORDER BY d.create_time DESC
-                """));
+                """).stream().map(this::decorateDataset).toList());
     }
 
     @PostMapping("/datasets")
     @OperationLog(value = "创建评测数据集", type = "CREATE")
     public Result<Map<String, Object>> createDataset(@RequestBody Map<String, Object> request) {
+        String contractType = normalizeDatasetType(str(request, "contractType"));
         jdbc.update("""
                 INSERT INTO agent_eval_dataset (name, version, description, contract_type, case_count, status)
                 VALUES (?,?,?,?,0,'DRAFT')
                 """,
                 str(request, "name"), str(request, "version"),
-                str(request, "description"), str(request, "contractType"));
+                str(request, "description"), contractType);
         return Result.ok(Map.of("created", true));
     }
 
@@ -62,19 +63,20 @@ public class EvalAdminController {
                 FROM agent_eval_case
                 WHERE dataset_id=?
                 ORDER BY id
-                """, datasetId));
+                """, datasetId).stream().map(this::decorateCase).toList());
     }
 
     @GetMapping("/cases/{caseId}")
     public Result<Map<String, Object>> getCase(@PathVariable Long caseId) {
-        return Result.ok(first(jdbc.queryForList(
-                "SELECT * FROM agent_eval_case WHERE id=?", caseId)));
+        return Result.ok(decorateCase(first(jdbc.queryForList(
+                "SELECT * FROM agent_eval_case WHERE id=?", caseId))));
     }
 
     @PostMapping("/datasets/{datasetId}/cases")
     @OperationLog(value = "添加评测用例", type = "CREATE")
     public Result<Map<String, Object>> addCase(@PathVariable Long datasetId,
                                                 @RequestBody Map<String, Object> request) {
+        String contractType = normalizeCaseType(str(request, "contractType"));
         jdbc.update("""
                 INSERT INTO agent_eval_case
                 (dataset_id, case_key, title, contract_type, contract_text,
@@ -82,7 +84,7 @@ public class EvalAdminController {
                 VALUES (?,?,?,?,?,?,?,?,'ACTIVE')
                 """,
                 datasetId, str(request, "caseKey"), str(request, "title"),
-                str(request, "contractType"), str(request, "contractText"),
+                contractType, str(request, "contractText"),
                 str(request, "expectedFindingsJson"), str(request, "shouldNotFindJson"),
                 request.getOrDefault("expectedCitationCount", 0));
         jdbc.update("""
@@ -116,16 +118,15 @@ public class EvalAdminController {
     public Result<Map<String, Object>> startEvalRun(@RequestBody Map<String, Object> request) {
         Long datasetId = numberAsLong(request.get("datasetId"));
         String runtime = str(request, "runtime"); // legacy | langgraph
+        String featuresJson = str(request, "features");
+        if (featuresJson.isEmpty()) featuresJson = "{}";
 
         jdbc.update("""
                 INSERT INTO agent_eval_run
-                (dataset_id, runtime_engine, graph_name, graph_version,
-                 llm_model, prompt_version, status, started_at)
-                VALUES (?,?,?,?,?,?,'RUNNING',NOW())
+                (dataset_id, runtime_engine, features_json, status, started_at)
+                VALUES (?,?,?,'RUNNING',NOW())
                 """,
-                datasetId, runtime,
-                str(request, "graphName"), str(request, "graphVersion"),
-                str(request, "llmModel"), str(request, "promptVersion"));
+                datasetId, runtime, featuresJson);
 
         // Get the generated eval_run_id
         Long evalRunId = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
@@ -148,23 +149,25 @@ public class EvalAdminController {
     public Result<List<Map<String, Object>>> listRuns() {
         return Result.ok(jdbc.queryForList("""
                 SELECT r.id, d.name AS datasetName, d.version AS datasetVersion,
+                       d.contract_type AS contractType,
                        r.runtime_engine AS runtimeEngine, r.graph_name AS graphName,
                        r.graph_version AS graphVersion, r.status,
                        r.high_risk_recall AS highRiskRecall,
                        r.dual_citation_rate AS dualCitationRate,
                        r.false_positive_rate AS falsePositiveRate,
                        r.case_count AS caseCount, r.passed_count AS passedCount,
+                       r.features_json AS featuresJson,
                        r.started_at AS startedAt, r.finished_at AS finishedAt
                 FROM agent_eval_run r
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 ORDER BY r.id DESC LIMIT 50
-                """));
+                """).stream().map(this::decorateRun).toList());
     }
 
     @GetMapping("/runs/{runId}")
     public Result<Map<String, Object>> getRun(@PathVariable Long runId) {
         Map<String, Object> run = first(jdbc.queryForList("""
-                SELECT r.*, d.name AS datasetName, d.version AS datasetVersion
+                SELECT r.*, d.name AS datasetName, d.version AS datasetVersion, d.contract_type AS contractType
                 FROM agent_eval_run r
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 WHERE r.id=?
@@ -178,7 +181,8 @@ public class EvalAdminController {
                 WHERE er.run_id=?
                 ORDER BY ec.id
                 """, runId);
-        run.put("results", results);
+        run.put("results", results.stream().map(this::decorateResult).toList());
+        decorateRun(run);
         return Result.ok(run);
     }
 
@@ -208,13 +212,14 @@ public class EvalAdminController {
         return Result.ok(Map.of(
                 "run1", run1,
                 "run2", run2,
-                "diffs", diffs));
+                "diffs", diffs.stream().map(this::decorateDiff).toList()));
     }
 
     @GetMapping("/metrics/trend")
     public Result<List<Map<String, Object>>> metricsTrend() {
         return Result.ok(jdbc.queryForList("""
                 SELECT r.id, d.name AS datasetName, r.runtime_engine AS runtimeEngine,
+                       d.contract_type AS contractType,
                        r.status, r.high_risk_recall AS highRiskRecall,
                        r.dual_citation_rate AS dualCitationRate,
                        r.false_positive_rate AS falsePositiveRate,
@@ -223,7 +228,7 @@ public class EvalAdminController {
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 WHERE r.status='COMPLETED'
                 ORDER BY r.started_at DESC LIMIT 20
-                """));
+                """).stream().map(this::decorateRun).toList());
     }
 
     // ── helpers ────────────────────────────────────────────────────
@@ -243,5 +248,108 @@ public class EvalAdminController {
 
     private static Map<String, Object> first(List<Map<String, Object>> list) {
         return list.isEmpty() ? null : list.get(0);
+    }
+
+    private Map<String, Object> decorateDataset(Map<String, Object> row) {
+        if (row == null) return null;
+        row.put("contractTypeLabel", datasetTypeLabel(str(row, "contractType")));
+        row.put("statusLabel", statusLabel(str(row, "status")));
+        return row;
+    }
+
+    private Map<String, Object> decorateCase(Map<String, Object> row) {
+        if (row == null) return null;
+        row.put("contractTypeLabel", caseTypeLabel(str(row, "contractType")));
+        row.put("statusLabel", statusLabel(str(row, "status")));
+        return row;
+    }
+
+    private Map<String, Object> decorateRun(Map<String, Object> row) {
+        if (row == null) return null;
+        row.put("runtimeEngineLabel", runtimeLabel(str(row, "runtimeEngine")));
+        row.put("datasetTypeLabel", datasetTypeLabel(str(row, "contractType")));
+        row.put("statusLabel", statusLabel(str(row, "status")));
+        return row;
+    }
+
+    private Map<String, Object> decorateResult(Map<String, Object> row) {
+        if (row == null) return null;
+        row.put("analysisModeLabel", analysisModeLabel(str(row, "analysis_mode")));
+        return row;
+    }
+
+    private Map<String, Object> decorateDiff(Map<String, Object> row) {
+        if (row == null) return null;
+        row.put("mode1Label", analysisModeLabel(str(row, "mode1")));
+        row.put("mode2Label", analysisModeLabel(str(row, "mode2")));
+        return row;
+    }
+
+    private static String normalizeDatasetType(String value) {
+        String v = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (v.isBlank()) return "CONTRACT_REVIEW";
+        return switch (v) {
+            case "CONTRACT_REVIEW", "RISK_REVIEW" -> "CONTRACT_REVIEW";
+            case "INTAKE", "ELEMENT_EXTRACTION" -> "INTAKE";
+            case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "FULFILLMENT_TIMELINE";
+            case "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION" -> "FULFILLMENT_CHECK";
+            case "COMPREHENSIVE" -> "COMPREHENSIVE";
+            default -> "CONTRACT_REVIEW";
+        };
+    }
+
+    private static String normalizeCaseType(String value) {
+        String v = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (v.isBlank()) return "OTHER";
+        return Set.of("SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA", "OTHER").contains(v) ? v : "OTHER";
+    }
+
+    private static String datasetTypeLabel(String value) {
+        return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
+            case "CONTRACT_REVIEW", "RISK_REVIEW" -> "风险审查";
+            case "INTAKE", "ELEMENT_EXTRACTION" -> "合同要素提取";
+            case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "履约日程提取";
+            case "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION" -> "履约核验";
+            case "COMPREHENSIVE" -> "综合评测";
+            default -> "风险审查";
+        };
+    }
+
+    private static String caseTypeLabel(String value) {
+        return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
+            case "SERVICE_PROCUREMENT" -> "服务采购";
+            case "GOODS_PURCHASE" -> "货物采购";
+            case "NDA" -> "保密协议";
+            default -> "其他";
+        };
+    }
+
+    private static String runtimeLabel(String value) {
+        return switch (value == null ? "" : value.trim().toLowerCase(Locale.ROOT)) {
+            case "langgraph" -> "LangGraph";
+            case "legacy" -> "传统流水线";
+            default -> value == null || value.isBlank() ? "-" : value;
+        };
+    }
+
+    private static String statusLabel(String value) {
+        return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
+            case "ACTIVE" -> "启用";
+            case "DRAFT" -> "草稿";
+            case "RUNNING" -> "运行中";
+            case "COMPLETED" -> "已完成";
+            case "FAILED" -> "失败";
+            case "CANCELLED" -> "已取消";
+            default -> value == null || value.isBlank() ? "-" : value;
+        };
+    }
+
+    private static String analysisModeLabel(String value) {
+        return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
+            case "FULL" -> "完整分析";
+            case "LIMITED" -> "范围受限";
+            case "RULE_ONLY" -> "规则兜底";
+            default -> value == null || value.isBlank() ? "-" : value;
+        };
     }
 }

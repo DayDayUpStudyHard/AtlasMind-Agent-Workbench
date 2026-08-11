@@ -315,6 +315,13 @@ class LLMService:
             template, temperature, _version = registry.get_ab(key, run_id)
         else:
             template, temperature, _version = registry.get(key)
+
+        # Per-run temperature override (0 = use prompt default)
+        from app.agent_runtime.runtime import _temperature_override
+        override = _temperature_override.get()
+        if override > 0:
+            temperature = override
+
         return template, temperature
 
     # ── retry helper ─────────────────────────────────────────────────

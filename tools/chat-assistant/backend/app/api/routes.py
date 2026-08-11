@@ -1893,7 +1893,7 @@ async def _run_evaluation_background(eval_run_id: int):
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT id, dataset_id, runtime_engine FROM agent_eval_run WHERE id=%s",
+                    "SELECT id, dataset_id, runtime_engine, features_json FROM agent_eval_run WHERE id=%s",
                     (eval_run_id,),
                 )
                 run_row = cur.fetchone()
@@ -1902,8 +1902,13 @@ async def _run_evaluation_background(eval_run_id: int):
                     return
                 dataset_id = int(run_row["dataset_id"])
                 runtime = str(run_row["runtime_engine"])
+                import json as _json_features
+                try:
+                    features = _json_features.loads(run_row.get("features_json") or "{}")
+                except Exception:
+                    features = {}
                 cur.execute(
-                    "SELECT id, case_key, title, contract_type, contract_text, expected_findings_json FROM agent_eval_case WHERE dataset_id=%s AND status='ACTIVE'",
+                    "SELECT id, case_key, title, contract_type, contract_text, expected_findings_json, should_not_find_json FROM agent_eval_case WHERE dataset_id=%s AND status='ACTIVE'",
                     (dataset_id,),
                 )
                 cases = cur.fetchall()
@@ -1968,8 +1973,31 @@ async def _run_evaluation_background(eval_run_id: int):
                         "title": case["title"],
                         "contractType": case["contract_type"],
                     },
-                    task_input={"evalCaseId": case["case_key"]},
+                    task_input={
+                        "evalCaseId": case["case_key"],
+                        "features": features,
+                    },
                 )
+
+                # Set per-run feature overrides via contextvars
+                from app.agent_runtime.reranker import _rerank_disabled
+                from app.agent_runtime.runtime import (
+                    _model_override, _prompt_version_override,
+                    _recall_multiplier_override, _recall_min_override, _recall_max_override,
+                    _retry_limit_override, _coverage_reflection_disabled, _temperature_override,
+                )
+                rerank_on = features.get("rerank", True)
+                _rerank_disabled.set(not rerank_on)
+                _model_override.set(str(features.get("model") or ""))
+                _prompt_version_override.set(str(features.get("promptVersion") or ""))
+                _recall_multiplier_override.set(int(features.get("recallMultiplier") or 0))
+                _recall_min_override.set(int(features.get("recallMin") or 0))
+                _recall_max_override.set(int(features.get("recallMax") or 0))
+                # P1: targeted retrieval retries; coverage reflection toggle
+                _retry_limit_override.set(int(features.get("targetedRetrievalRetries", 1)))
+                _coverage_reflection_disabled.set(not features.get("coverageReflection", True))
+                # P2: temperature override (0 = use prompt default)
+                _temperature_override.set(float(features.get("temperature") or 0))
 
                 result = await router.dispatch_with_mode(ctx, runtime)
                 artifact = result.artifact or {}
@@ -1981,6 +2009,7 @@ async def _run_evaluation_background(eval_run_id: int):
                 except Exception:
                     expected = []
 
+                # ── Per-case metrics ──────────────────────────────────
                 expected_high = [f for f in expected if str(f.get("severity", "")).upper() == "HIGH"]
                 actual_high = [f for f in findings if str(f.get("severity", "")).upper() == "HIGH"]
                 high_recall = len([h for h in expected_high if any(
@@ -1988,8 +2017,29 @@ async def _run_evaluation_background(eval_run_id: int):
                     for a in actual_high
                 )]) / max(len(expected_high), 1)
 
-                dual_cited = sum(1 for f in findings if f.get("contractCitation") or f.get("contractCitationIds"))
+                # dualCitationRate: findings with BOTH contract AND policy citations
+                dual_cited = sum(
+                    1 for f in findings
+                    if (f.get("contractCitation") or f.get("contractCitationIds"))
+                    and (f.get("policyCitation") or f.get("policyCitationIds"))
+                )
                 dual_rate = dual_cited / max(len(findings), 1)
+
+                # falsePositives: count findings whose title matches should_not_find substrings
+                should_not_json = case.get("should_not_find_json") or "[]"
+                try:
+                    should_not_list = _json.loads(should_not_json) if isinstance(should_not_json, str) else should_not_json
+                except Exception:
+                    should_not_list = []
+                false_pos = sum(
+                    1 for f in findings
+                    for s in (should_not_list if isinstance(should_not_list, list) else [])
+                    if str(s).lower() in str(f.get("title", "")).lower()
+                )
+
+                analysis_mode = artifact.get("analysisMode", "FULL")
+                # schema_valid: 1 if report produced structured output (has findings array), 0 otherwise
+                schema_valid = 1 if isinstance(findings, list) else 0
 
                 with _conn() as conn:
                     with conn.cursor() as cur:
@@ -1997,24 +2047,32 @@ async def _run_evaluation_background(eval_run_id: int):
                             INSERT INTO agent_eval_result
                             (run_id, case_id, success, high_recall, dual_citation_rate,
                              false_positives, analysis_mode, risk_score, finding_count, result_json)
-                            VALUES (%s,%s,1,%s,%s,0,%s,%s,%s,%s)
+                            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s)
                             ON DUPLICATE KEY UPDATE high_recall=VALUES(high_recall),
                                                     dual_citation_rate=VALUES(dual_citation_rate),
+                                                    false_positives=VALUES(false_positives),
                                                     analysis_mode=VALUES(analysis_mode),
                                                     risk_score=VALUES(risk_score),
                                                     finding_count=VALUES(finding_count),
                                                     result_json=VALUES(result_json)
                             """, (
                             eval_run_id, case_id,
-                            high_recall, dual_rate,
-                            artifact.get("analysisMode", "FULL"),
+                            high_recall, dual_rate, false_pos,
+                            analysis_mode,
                             artifact.get("riskScore", 0),
                             len(findings),
                             _json.dumps(artifact, ensure_ascii=False, default=str),
                         ))
                         conn.commit()
 
-                per_case_results.append({"caseId": case_id, "highRecall": high_recall})
+                per_case_results.append({
+                    "caseId": case_id,
+                    "highRecall": high_recall,
+                    "dualCitationRate": dual_rate,
+                    "falsePositives": false_pos,
+                    "schemaValid": schema_valid,
+                    "analysisMode": analysis_mode,
+                })
                 success_count += 1
                 logger.info("Eval run %s: case %s/%s done (recall=%.2f)", eval_run_id, idx + 1, len(cases), high_recall)
 
@@ -2032,19 +2090,42 @@ async def _run_evaluation_background(eval_run_id: int):
 
         # Compute aggregate metrics
         if per_case_results:
-            avg_recall = sum(r["highRecall"] for r in per_case_results) / len(per_case_results)
+            n = len(per_case_results)
+            avg_recall = sum(r["highRecall"] for r in per_case_results) / n
+            avg_dual_cite = sum(r["dualCitationRate"] for r in per_case_results) / n
+            avg_false_pos = sum(r["falsePositives"] for r in per_case_results) / n
+            schema_valid_count = sum(1 for r in per_case_results if r.get("schemaValid"))
+            avg_schema_valid = schema_valid_count / n
+            limited_count = sum(1 for r in per_case_results if r.get("analysisMode") == "LIMITED")
+            limited_report_rate = limited_count / n
         else:
             avg_recall = 0
+            avg_dual_cite = 0
+            avg_false_pos = 0
+            avg_schema_valid = 0
+            limited_report_rate = 0
+
+        import json as _json_summary
+        summary = _json_summary.dumps({
+            "highRiskRecall": round(avg_recall, 4),
+            "dualCitationRate": round(avg_dual_cite, 4),
+            "falsePositiveRate": round(avg_false_pos, 4),
+            "schemaValidRate": round(avg_schema_valid, 4),
+            "limitedReportRate": round(limited_report_rate, 4),
+            "caseCount": len(cases),
+            "passedCount": success_count,
+        }, ensure_ascii=False)
 
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE agent_eval_run
-                    SET status='COMPLETED', high_risk_recall=%s, dual_citation_rate=0,
-                        false_positive_rate=0, case_count=%s, passed_count=%s,
+                    SET status='COMPLETED', high_risk_recall=%s, dual_citation_rate=%s,
+                        false_positive_rate=%s, schema_valid_rate=%s,
+                        case_count=%s, passed_count=%s, summary_json=%s,
                         finished_at=NOW()
                     WHERE id=%s
-                    """, (avg_recall, len(cases), success_count, eval_run_id))
+                    """, (avg_recall, avg_dual_cite, avg_false_pos, avg_schema_valid, len(cases), success_count, summary, eval_run_id))
                 conn.commit()
 
     except Exception as exc:

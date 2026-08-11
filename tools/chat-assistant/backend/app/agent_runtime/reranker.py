@@ -16,6 +16,7 @@ Design:
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from typing import Any
@@ -25,6 +26,12 @@ from openai import OpenAI, APIError, APIConnectionError
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Per-task rerank toggle: set by eval runner or any caller that wants to
+# force-disable the LLM reranker for a specific run.
+_rerank_disabled: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "rerank_disabled", default=False
+)
 
 # ── Prompt templates ───────────────────────────────────────────────────────
 
@@ -229,6 +236,10 @@ class LLMReranker:
         if len(hits) <= 1:
             return hits[:top_k]
 
+        if _rerank_disabled.get():
+            logger.info("Reranker disabled per-run — using keyword-bonus fallback for contract clauses")
+            return _rerank_contract_hits_keyword(query, hits)[:top_k]
+
         if not self._configured:
             return _rerank_contract_hits_keyword(query, hits)[:top_k]
 
@@ -261,6 +272,10 @@ class LLMReranker:
             Re-ranked hits, truncated to top_k.
         """
         if len(hits) <= 1:
+            return hits[:top_k]
+
+        if _rerank_disabled.get():
+            logger.info("Reranker disabled per-run — using original order for policy items")
             return hits[:top_k]
 
         if not self._configured:
