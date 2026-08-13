@@ -600,7 +600,7 @@ def parse_inline_document(document_id: int) -> dict:
     return parse_contract_document(document_id)
 
 
-def extract_final_contract_timeline(case_id: int, run_id: int) -> dict:
+def extract_final_contract_timeline(case_id: int, run_id: int, document_id: int | None = None) -> dict:
     """Publish the final, LLM-reviewed fulfillment schedule for one contract.
 
     Parsing owns text and clause evidence only. This task runs after the fact
@@ -609,14 +609,24 @@ def extract_final_contract_timeline(case_id: int, run_id: int) -> dict:
     """
     with new_connection() as conn:
         with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, version, parse_diagnostics_json AS parseDiagnostics
-                   FROM contract_document
-                   WHERE case_id=%s AND document_type='MAIN'
-                     AND parse_status='READY' AND COALESCE(deleted,0)=0
-                   ORDER BY version DESC, id DESC LIMIT 1""",
-                (case_id,),
-            )
+            if document_id:
+                cur.execute(
+                    """SELECT id, version, parse_diagnostics_json AS parseDiagnostics
+                       FROM contract_document
+                       WHERE id=%s AND case_id=%s AND document_type='MAIN'
+                         AND parse_status='READY' AND COALESCE(deleted,0)=0
+                       LIMIT 1""",
+                    (document_id, case_id),
+                )
+            else:
+                cur.execute(
+                    """SELECT id, version, parse_diagnostics_json AS parseDiagnostics
+                       FROM contract_document
+                       WHERE case_id=%s AND document_type='MAIN'
+                         AND parse_status='READY' AND COALESCE(deleted,0)=0
+                       ORDER BY version DESC, id DESC LIMIT 1""",
+                    (case_id,),
+                )
             document = cur.fetchone()
             if not document:
                 raise ValueError("合同正文尚未解析完成，无法生成正式履约日程")

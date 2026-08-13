@@ -18,6 +18,7 @@ from typing import Any, Awaitable
 
 from langgraph.graph import END, START, StateGraph
 
+from .evidence_snapshot import load_contract_evidence_snapshot
 from .state import BaseGraphState
 
 logger = logging.getLogger(__name__)
@@ -164,117 +165,29 @@ def _citation_supported(citation: dict[str, Any], evidence_by_id: dict[str, dict
 
 
 def _load_context(state: dict[str, Any]) -> dict[str, Any]:
-    from ..persistence import _conn, _normalize_value
-
     case_id = int(state.get("subject_id") or 0)
     task_input = state.get("task_input") or {}
     requested_document_id = int(task_input.get("documentId") or 0)
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """SELECT id, case_key AS caseKey, title, contract_type AS contractType,
-                          status, our_entity AS ourEntity, counterparty, our_side AS ourSide,
-                          amount, currency, signed_date AS signedDate,
-                          effective_date AS effectiveDate, expiry_date AS expiryDate,
-                          department
-                   FROM contract_case WHERE id=%s AND deleted=0""",
-                (case_id,),
-            )
-            case_row = _normalize_value(cur.fetchone() or {})
-            if not case_row:
-                raise ValueError(f"Contract case {case_id} not found")
-
-            if requested_document_id:
-                cur.execute(
-                    """SELECT id, file_name AS fileName, version, content_hash AS contentHash,
-                              parse_status AS parseStatus, parse_quality AS parseQuality,
-                              content_text AS contentText
-                       FROM contract_document
-                       WHERE id=%s AND case_id=%s AND document_type='MAIN'
-                         AND COALESCE(deleted,0)=0""",
-                    (requested_document_id, case_id),
-                )
-            else:
-                cur.execute(
-                    """SELECT id, file_name AS fileName, version, content_hash AS contentHash,
-                              parse_status AS parseStatus, parse_quality AS parseQuality,
-                              content_text AS contentText
-                       FROM contract_document
-                       WHERE case_id=%s AND document_type='MAIN'
-                         AND parse_status='READY' AND COALESCE(deleted,0)=0
-                       ORDER BY version DESC, id DESC LIMIT 1""",
-                    (case_id,),
-                )
-            document = _normalize_value(cur.fetchone() or {})
-            if not document:
-                raise ValueError("没有可用于要素提取的主合同文档")
-            if str(document.get("parseStatus") or "").upper() != "READY":
-                raise ValueError("合同文档尚未解析完成，暂不能提取合同要素")
-
-            cur.execute(
-                """SELECT id AS clauseId, document_id AS documentId,
-                          clause_number AS clauseNumber, title, content,
-                          clause_type AS clauseType, page_number AS pageNumber,
-                          start_offset AS startOffset, end_offset AS endOffset
-                   FROM contract_clause
-                   WHERE case_id=%s AND document_id=%s
-                   ORDER BY id ASC LIMIT 240""",
-                (case_id, document.get("id")),
-            )
-            clause_count = 0
-            clauses = []
-            for row in cur.fetchall():
-                clause_count += 1
-                clauses.append(_compact_clause(_normalize_value(row)))
-
-            cur.execute(
-                """SELECT id, validated_json AS validatedJson,
-                          confirmed_json AS confirmedJson, content_hash AS contentHash,
-                          schema_version AS schemaVersion, prompt_version AS promptVersion,
-                          model, update_time AS confirmedAt
-                   FROM contract_intake
-                   WHERE case_id=%s AND status='CONFIRMED'
-                   ORDER BY id DESC LIMIT 1""",
-                (case_id,),
-            )
-            intake_row = _normalize_value(cur.fetchone() or {})
-
-    confirmed_intake: dict[str, Any] = {}
-    if intake_row:
-        try:
-            validated = json.loads(intake_row.get("validatedJson") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            validated = {}
-        try:
-            confirmed = json.loads(intake_row.get("confirmedJson") or "{}")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            confirmed = {}
-        confirmed_intake = {
-            "id": intake_row.get("id"),
-            "contentHash": intake_row.get("contentHash"),
-            "schemaVersion": intake_row.get("schemaVersion"),
-            "promptVersion": intake_row.get("promptVersion"),
-            "model": intake_row.get("model"),
-            "confirmedAt": intake_row.get("confirmedAt"),
-            "fields": validated.get("fields") or {},
-            "confirmed": confirmed,
-        }
-
-    content_hash = str(document.get("contentHash") or "").strip()
-    if not content_hash:
-        content_hash = hashlib.sha256(str(document.get("contentText") or "").encode("utf-8")).hexdigest()
+    shared_snapshot = load_contract_evidence_snapshot(
+        case_id,
+        requested_document_id=requested_document_id,
+        include_content_text=True,
+        clause_limit=240,
+    )
+    document = dict(shared_snapshot.get("currentDocument") or {})
+    if str(document.get("parseStatus") or "").upper() != "READY":
+        raise ValueError("Contract document is not ready for element extraction")
     document.pop("contentText", None)
-    context = {
-        "case": case_row,
-        "document": {**document, "contentHash": content_hash},
-        "clauseCount": clause_count,
-        "clauses": clauses,
-        "confirmedIntake": confirmed_intake,
-        "contentHash": content_hash,
-        "documentQuality": {"parseQuality": document.get("parseQuality")},
+    return {
+        "case": shared_snapshot.get("case") or {},
+        "document": document,
+        "clauseCount": shared_snapshot.get("clauseCount") or 0,
+        "clauses": shared_snapshot.get("clauses") or [],
+        "confirmedIntake": shared_snapshot.get("confirmedIntake") or {},
+        "contentHash": shared_snapshot.get("contentHash"),
+        "documentQuality": shared_snapshot.get("documentQuality") or {"parseQuality": document.get("parseQuality")},
+        "evidenceSnapshotHash": shared_snapshot.get("snapshotHash"),
     }
-    return context
-
 
 def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
     context = _load_context(state)
@@ -291,6 +204,7 @@ def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
             "output": {
                 "documentVersion": context["document"].get("version"),
                 "contentHash": context["contentHash"],
+                "evidenceSnapshotHash": context.get("evidenceSnapshotHash"),
                 "clauseCount": context["clauseCount"],
                 "parseQuality": context["documentQuality"],
             },

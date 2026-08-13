@@ -66,6 +66,7 @@ class BaseGraphState(TypedDict, total=False):
     case_snapshot: dict[str, Any]
     analysis_workflow: dict[str, Any]
     document_snapshot: list[dict[str, Any]]
+    contract_evidence_snapshot: list[dict[str, Any]]
     knowledge_snapshot: list[dict[str, Any]]
     document_quality: dict[str, Any]
 
