@@ -124,13 +124,7 @@ def build_contract_review_graph(checkpointer: Any = None) -> Any:
     # Targeted retrieval feeds supplementary evidence back into domain analysis
     # so gap domains get a second LLM pass before the report is composed.
     # The coverage_reflection retry gate prevents unbounded loops.
-    builder.add_conditional_edges(
-        "targeted_retrieval",
-        _route_after_targeted,
-        {
-            "draft_domain_findings": "draft_domain_findings",
-        },
-    )
+    builder.add_edge("targeted_retrieval", "draft_domain_findings")
 
     # Report paths with quality gate
     builder.add_edge("compose_report", "validate_schema")

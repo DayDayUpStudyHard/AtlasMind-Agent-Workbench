@@ -59,6 +59,7 @@ public class EvalAdminController {
     public Result<List<Map<String, Object>>> listCases(@PathVariable Long datasetId) {
         return Result.ok(jdbc.queryForList("""
                 SELECT id, case_key AS caseKey, title, contract_type AS contractType,
+                       scenario, difficulty, noise_level AS noiseLevel,
                        COALESCE(JSON_LENGTH(expected_findings_json), 0) AS expectedFindingCount, status
                 FROM agent_eval_case
                 WHERE dataset_id=?
@@ -68,8 +69,18 @@ public class EvalAdminController {
 
     @GetMapping("/cases/{caseId}")
     public Result<Map<String, Object>> getCase(@PathVariable Long caseId) {
-        return Result.ok(decorateCase(first(jdbc.queryForList(
-                "SELECT * FROM agent_eval_case WHERE id=?", caseId))));
+        return Result.ok(decorateCase(first(jdbc.queryForList("""
+                SELECT id, case_key AS caseKey, title, contract_type AS contractType,
+                       contract_text AS contractText,
+                       expected_findings_json AS expectedFindingsJson,
+                       should_not_find_json AS shouldNotFindJson,
+                       expected_citation_count AS expectedCitationCount,
+                       scenario, industry, difficulty,
+                       noise_level AS noiseLevel,
+                       must_have_contract_citation AS mustHaveContractCitation,
+                       must_have_policy_citation AS mustHavePolicyCitation,
+                       dataset_id AS datasetId, status
+                FROM agent_eval_case WHERE id=?""", caseId))));
     }
 
     @PostMapping("/datasets/{datasetId}/cases")
@@ -80,13 +91,19 @@ public class EvalAdminController {
         jdbc.update("""
                 INSERT INTO agent_eval_case
                 (dataset_id, case_key, title, contract_type, contract_text,
-                 expected_findings_json, should_not_find_json, expected_citation_count, status)
-                VALUES (?,?,?,?,?,?,?,?,'ACTIVE')
+                 expected_findings_json, should_not_find_json, expected_citation_count,
+                 scenario, industry, difficulty, noise_level,
+                 must_have_contract_citation, must_have_policy_citation, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')
                 """,
                 datasetId, str(request, "caseKey"), str(request, "title"),
                 contractType, str(request, "contractText"),
                 str(request, "expectedFindingsJson"), str(request, "shouldNotFindJson"),
-                request.getOrDefault("expectedCitationCount", 0));
+                request.getOrDefault("expectedCitationCount", 0),
+                str(request, "scenario"), str(request, "industry"),
+                str(request, "difficulty"), str(request, "noiseLevel"),
+                request.getOrDefault("mustHaveContractCitation", 0),
+                request.getOrDefault("mustHavePolicyCitation", 0));
         jdbc.update("""
                 UPDATE agent_eval_dataset
                 SET case_count=(SELECT COUNT(*) FROM agent_eval_case WHERE dataset_id=?)
@@ -120,11 +137,19 @@ public class EvalAdminController {
         String runtime = str(request, "runtime"); // legacy | langgraph
         String featuresJson = str(request, "features");
         if (featuresJson.isEmpty()) featuresJson = "{}";
+        Integer activeCount = jdbc.queryForObject("""
+                SELECT COUNT(*) FROM agent_eval_run
+                WHERE dataset_id=?
+                  AND status IN ('QUEUED','PRECHECKING','RUNNING')
+                """, Integer.class, datasetId);
+        if (activeCount != null && activeCount > 0) {
+            throw new IllegalArgumentException("该数据集已有评测在排队或运行中");
+        }
 
         jdbc.update("""
                 INSERT INTO agent_eval_run
                 (dataset_id, runtime_engine, features_json, status, started_at)
-                VALUES (?,?,?,'RUNNING',NOW())
+                VALUES (?,?,?,'QUEUED',NOW())
                 """,
                 datasetId, runtime, featuresJson);
 
@@ -157,6 +182,13 @@ public class EvalAdminController {
                        r.false_positive_rate AS falsePositiveRate,
                        r.case_count AS caseCount, r.passed_count AS passedCount,
                        r.features_json AS featuresJson,
+                       r.current_case_index AS currentCaseIndex,
+                       r.current_case_key AS currentCaseKey,
+                       r.current_step AS currentStep,
+                       r.queue_position AS queuePosition,
+                       r.environment_status AS environmentStatus,
+                       r.environment_snapshot_json AS environmentSnapshotJson,
+                       r.summary_json AS summaryJson,
                        r.started_at AS startedAt, r.finished_at AS finishedAt
                 FROM agent_eval_run r
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
@@ -164,10 +196,37 @@ public class EvalAdminController {
                 """).stream().map(this::decorateRun).toList());
     }
 
+    @DeleteMapping("/runs/{runId}")
+    @OperationLog(value = "删除评测记录", type = "DELETE")
+    public Result<Map<String, Object>> deleteRun(@PathVariable Long runId) {
+        jdbc.update("DELETE FROM agent_eval_result WHERE run_id=?", runId);
+        jdbc.update("DELETE FROM agent_eval_run WHERE id=?", runId);
+        return Result.ok(Map.of("deleted", true));
+    }
+
     @GetMapping("/runs/{runId}")
     public Result<Map<String, Object>> getRun(@PathVariable Long runId) {
         Map<String, Object> run = first(jdbc.queryForList("""
-                SELECT r.*, d.name AS datasetName, d.version AS datasetVersion, d.contract_type AS contractType
+                SELECT r.id, r.dataset_id AS datasetId, d.name AS datasetName, d.version AS datasetVersion,
+                       d.contract_type AS contractType,
+                       r.runtime_engine AS runtimeEngine, r.graph_name AS graphName,
+                       r.graph_version AS graphVersion, r.llm_model AS llmModel,
+                       r.prompt_version AS promptVersion, r.status,
+                       r.high_risk_recall AS highRiskRecall,
+                       r.dual_citation_rate AS dualCitationRate,
+                       r.false_positive_rate AS falsePositiveRate,
+                       r.schema_valid_rate AS schemaValidRate,
+                       r.case_count AS caseCount, r.passed_count AS passedCount,
+                       r.summary_json AS summaryJson,
+                       r.features_json AS featuresJson,
+                       r.current_case_index AS currentCaseIndex,
+                       r.current_case_key AS currentCaseKey,
+                       r.current_step AS currentStep,
+                       r.queue_position AS queuePosition,
+                       r.environment_status AS environmentStatus,
+                       r.environment_snapshot_json AS environmentSnapshotJson,
+                       r.started_at AS startedAt, r.finished_at AS finishedAt,
+                       r.create_time AS createTime
                 FROM agent_eval_run r
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 WHERE r.id=?
@@ -175,7 +234,22 @@ public class EvalAdminController {
         if (run == null) throw new IllegalArgumentException("评测运行不存在");
 
         List<Map<String, Object>> results = jdbc.queryForList("""
-                SELECT er.*, ec.title AS caseTitle, ec.case_key AS caseKey
+                SELECT er.id, er.run_id AS runId, er.case_id AS caseId,
+                       er.success, er.high_recall AS highRecall,
+                       er.dual_citation_rate AS dualCitationRate,
+                       er.false_positives AS falsePositives,
+                       er.analysis_mode AS analysisMode,
+                       er.risk_score AS riskScore,
+                       er.finding_count AS findingCount,
+                       er.error_message AS errorMessage,
+                       er.result_json AS resultJson,
+                       er.schema_valid_rate AS schemaValidRate,
+                       er.create_time AS createTime,
+                       ec.case_key AS caseKey, ec.title AS caseTitle,
+                       ec.scenario, ec.industry, ec.difficulty,
+                       ec.noise_level AS noiseLevel,
+                       ec.expected_findings_json AS expectedFindingsJson,
+                       ec.should_not_find_json AS shouldNotFindJson
                 FROM agent_eval_result er
                 JOIN agent_eval_case ec ON ec.id=er.case_id
                 WHERE er.run_id=?
@@ -274,7 +348,7 @@ public class EvalAdminController {
 
     private Map<String, Object> decorateResult(Map<String, Object> row) {
         if (row == null) return null;
-        row.put("analysisModeLabel", analysisModeLabel(str(row, "analysis_mode")));
+        row.put("analysisModeLabel", analysisModeLabel(str(row, "analysisMode")));
         return row;
     }
 
@@ -301,7 +375,10 @@ public class EvalAdminController {
     private static String normalizeCaseType(String value) {
         String v = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
         if (v.isBlank()) return "OTHER";
-        return Set.of("SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA", "OTHER").contains(v) ? v : "OTHER";
+        // Seed data and the admin UI send GOODS_PROCUREMENT; canonical token is GOODS_PURCHASE.
+        v = "GOODS_PROCUREMENT".equals(v) ? "GOODS_PURCHASE" : v;
+        return Set.of("SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA", "OTHER",
+                "ENGINEERING_EPC", "SOFTWARE_IT", "OPS_MAINTENANCE", "MIXED").contains(v) ? v : "OTHER";
     }
 
     private static String datasetTypeLabel(String value) {
@@ -320,6 +397,10 @@ public class EvalAdminController {
             case "SERVICE_PROCUREMENT" -> "服务采购";
             case "GOODS_PURCHASE" -> "货物采购";
             case "NDA" -> "保密协议";
+            case "ENGINEERING_EPC" -> "工程EPC";
+            case "SOFTWARE_IT" -> "软件IT";
+            case "OPS_MAINTENANCE" -> "运维服务";
+            case "MIXED" -> "混合场景";
             default -> "其他";
         };
     }
@@ -336,8 +417,12 @@ public class EvalAdminController {
         return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
             case "ACTIVE" -> "启用";
             case "DRAFT" -> "草稿";
+            case "QUEUED" -> "排队中";
+            case "PRECHECKING" -> "环境检查";
             case "RUNNING" -> "运行中";
+            case "ENVIRONMENT_UNAVAILABLE" -> "环境不可用";
             case "COMPLETED" -> "已完成";
+            case "DEGRADED" -> "结果降级";
             case "FAILED" -> "失败";
             case "CANCELLED" -> "已取消";
             default -> value == null || value.isBlank() ? "-" : value;
@@ -349,6 +434,7 @@ public class EvalAdminController {
             case "FULL" -> "完整分析";
             case "LIMITED" -> "范围受限";
             case "RULE_ONLY" -> "规则兜底";
+            case "INFRA_FAILED" -> "环境失败";
             default -> value == null || value.isBlank() ? "-" : value;
         };
     }

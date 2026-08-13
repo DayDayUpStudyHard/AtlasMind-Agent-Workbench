@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+from difflib import SequenceMatcher
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +12,7 @@ import secrets
 import threading
 import time
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Header, HTTPException
 from fastapi.responses import StreamingResponse
@@ -50,6 +53,10 @@ _contract_dispatcher = None  # RunDispatcher (contract mode)
 _contract_runtime_router = None  # RuntimeRouter (G1+)
 _contract_initialized = False
 _contract_document_tasks: dict[int, asyncio.Task] = {}
+_eval_queue: asyncio.Queue[int] | None = None
+_eval_worker_task: asyncio.Task | None = None
+_eval_active_run_id: int | None = None
+_eval_enqueued_ids: set[int] = set()
 
 
 def _check_internal_token(token: str | None) -> None:
@@ -1856,15 +1863,53 @@ async def run_evaluation(
     payload: dict,
     x_internal_token: str | None = Header(default=None),
 ):
-    """Fire-and-forget eval run. Returns immediately, runs in background."""
+    """Queue an eval run. A single in-process worker executes runs sequentially."""
     _check_internal_token(x_internal_token)
     eval_run_id = int(payload.get("evalRunId", 0))
     if not eval_run_id:
         raise HTTPException(status_code=400, detail="evalRunId is required")
 
-    # Spawn background task, return immediately to avoid HTTP timeout
-    asyncio.create_task(_run_evaluation_background(eval_run_id))
-    return {"evalRunId": eval_run_id, "status": "ACCEPTED", "message": "评测已开始后台执行"}
+    queued = _enqueue_eval_run(eval_run_id)
+    return {
+        "evalRunId": eval_run_id,
+        "status": "QUEUED" if queued else "ALREADY_QUEUED",
+        "message": "Evaluation queued",
+    }
+
+
+def _enqueue_eval_run(eval_run_id: int) -> bool:
+    global _eval_queue, _eval_worker_task
+    if _eval_queue is None:
+        _eval_queue = asyncio.Queue()
+    if eval_run_id == _eval_active_run_id or eval_run_id in _eval_enqueued_ids:
+        return False
+    _eval_enqueued_ids.add(eval_run_id)
+    _eval_queue.put_nowait(eval_run_id)
+    _update_eval_progress(
+        eval_run_id,
+        status="QUEUED",
+        current_step="Waiting for evaluation worker",
+        queue_position=_eval_queue.qsize(),
+    )
+    if _eval_worker_task is None or _eval_worker_task.done():
+        _eval_worker_task = asyncio.create_task(_eval_worker_loop())
+    return True
+
+
+async def _eval_worker_loop() -> None:
+    global _eval_active_run_id
+    assert _eval_queue is not None
+    while True:
+        eval_run_id = await _eval_queue.get()
+        _eval_enqueued_ids.discard(eval_run_id)
+        _eval_active_run_id = eval_run_id
+        try:
+            await _run_evaluation_background(eval_run_id)
+        finally:
+            _eval_active_run_id = None
+            _eval_queue.task_done()
+        if _eval_queue.empty():
+            return
 
 
 def _fail_eval_run(eval_run_id: int, error: str) -> None:
@@ -1882,11 +1927,265 @@ def _fail_eval_run(eval_run_id: int, error: str) -> None:
         pass
 
 
-async def _run_evaluation_background(eval_run_id: int):
+def _json_safe(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _update_eval_progress(
+    eval_run_id: int,
+    *,
+    status: str | None = None,
+    case_count: int | None = None,
+    passed_count: int | None = None,
+    current_case_index: int | None = None,
+    current_case_key: str | None = None,
+    current_step: str | None = None,
+    queue_position: int | None = None,
+    environment_status: str | None = None,
+    environment_snapshot: dict | None = None,
+    summary_patch: dict | None = None,
+    finished: bool = False,
+) -> None:
+    from app.agent_runtime.persistence import _conn
+
+    sets: list[str] = []
+    params: list[Any] = []
+    for column, value in (
+        ("status", status),
+        ("case_count", case_count),
+        ("passed_count", passed_count),
+        ("current_case_index", current_case_index),
+        ("current_case_key", current_case_key),
+        ("current_step", current_step),
+        ("queue_position", queue_position),
+        ("environment_status", environment_status),
+        ("environment_snapshot_json", _json_safe(environment_snapshot) if environment_snapshot is not None else None),
+    ):
+        if value is not None:
+            sets.append(f"{column}=%s")
+            params.append(value)
+    if finished:
+        sets.append("finished_at=NOW()")
+    if not sets and summary_patch is None:
+        return
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            if summary_patch is not None:
+                cur.execute("SELECT summary_json FROM agent_eval_run WHERE id=%s", (eval_run_id,))
+                row = cur.fetchone() or {}
+                try:
+                    summary = json.loads(row.get("summary_json") or "{}")
+                except Exception:
+                    summary = {}
+                summary.update(summary_patch)
+                sets.append("summary_json=%s")
+                params.append(_json_safe(summary))
+            params.append(eval_run_id)
+            cur.execute(f"UPDATE agent_eval_run SET {', '.join(sets)} WHERE id=%s", params)
+            conn.commit()
+
+
+async def _eval_environment_gate(features: dict) -> dict[str, Any]:
+    checked_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    snapshot: dict[str, Any] = {
+        "environmentStatus": "READY",
+        "checkedAt": checked_at,
+        "reasons": [],
+        "components": {},
+    }
+
+    def _component_status(name: str, value: dict | None) -> str:
+        status = str((value or {}).get("status") or "unknown").lower()
+        snapshot["components"][name] = value or {"status": "unknown"}
+        return status
+
+    probe = await health(probe=True)
+    components = probe.get("components") or {}
+    hard_fail = False
+    for name in ("llm", "embedding"):
+        status = _component_status(name, components.get(name))
+        if status != "ok":
+            hard_fail = True
+            snapshot["reasons"].append(f"{name} unavailable")
+
+    retrieval = components.get("elasticsearch") or {}
+    retrieval_status = _component_status("elasticsearch", retrieval)
+    require_es = bool(features.get("requireElasticsearch") or features.get("requireEs"))
+    allow_mysql_fallback = bool(features.get("allowMysqlRetrievalFallback", True))
+    if retrieval_status != "ok":
+        if require_es or not allow_mysql_fallback:
+            hard_fail = True
+            snapshot["reasons"].append("elasticsearch unavailable")
+        else:
+            snapshot["environmentStatus"] = "DEGRADED"
+            snapshot["reasons"].append("elasticsearch unavailable; MySQL fallback allowed")
+
+    if hard_fail:
+        snapshot["environmentStatus"] = "UNAVAILABLE"
+    return snapshot
+
+
+def _is_infra_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    return any(token in text for token in (
+        "llm connection",
+        "llm unreachable",
+        "api connection",
+        "apiconnection",
+        "apierror",
+        "embedding api",
+        "request timed out",
+        "timeout",
+        "circuit breaker",
+        "connection refused",
+        "service unavailable",
+    ))
+
+
+def _eval_task_plan(dataset_type: str) -> list[str]:
+    raw = str(dataset_type or "").upper()
+    mapping = {
+        "CONTRACT_REVIEW": ["CONTRACT_REVIEW"],
+        "RISK_REVIEW": ["CONTRACT_REVIEW"],
+        "INTAKE": ["CONTRACT_ELEMENT_EXTRACTION"],
+        "ELEMENT_EXTRACTION": ["CONTRACT_ELEMENT_EXTRACTION"],
+        "CONTRACT_ELEMENT_EXTRACTION": ["CONTRACT_ELEMENT_EXTRACTION"],
+        "FULFILLMENT_TIMELINE": ["TIMELINE_EXTRACTION"],
+        "TIMELINE_EXTRACTION": ["TIMELINE_EXTRACTION"],
+        "FULFILLMENT_CHECK": ["FULFILLMENT_CHECK"],
+        "FULFILLMENT_VERIFICATION": ["FULFILLMENT_CHECK"],
+        "COMPREHENSIVE": [
+            "CONTRACT_ELEMENT_EXTRACTION",
+            "TIMELINE_EXTRACTION",
+            "CONTRACT_REVIEW",
+        ],
+    }
+    return mapping.get(raw, ["CONTRACT_REVIEW"])
+
+
+async def _run_evaluation_background_legacy(eval_run_id: int):
     """Background worker: iterate cases, run agent, compute metrics, write results."""
     from app.agent_runtime.persistence import _conn
 
     temp_case_ids: list[int] = []  # Track temp cases for cleanup
+
+    def _eval_task_type(value: Any) -> str:
+        raw = str(value or "").upper()
+        return {
+            "INTAKE": "CONTRACT_ELEMENT_EXTRACTION",
+            "ELEMENT_EXTRACTION": "CONTRACT_ELEMENT_EXTRACTION",
+            "CONTRACT_ELEMENT_EXTRACTION": "CONTRACT_ELEMENT_EXTRACTION",
+            "FULFILLMENT_TIMELINE": "TIMELINE_EXTRACTION",
+            "TIMELINE_EXTRACTION": "TIMELINE_EXTRACTION",
+            "FULFILLMENT_CHECK": "FULFILLMENT_CHECK",
+            "COMPREHENSIVE": "CONTRACT_REVIEW",
+        }.get(raw, "CONTRACT_REVIEW")
+
+    def _create_eval_agent_run(
+        *,
+        task_type: str,
+        temp_case_id: int,
+        title: str,
+        case_key: str,
+        idx: int,
+        features: dict,
+    ) -> int:
+        import json as _json_run
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO agent_run
+                       (project_id, run_type, trigger_type, question, status,
+                        progress, current_step, input_json, subject_type, subject_id)
+                       VALUES (%s,%s,'EVALUATION',%s,'CREATED',
+                               0,'Evaluation case queued',%s,'CONTRACT_CASE',%s)""",
+                    (
+                        temp_case_id,
+                        task_type,
+                        f"Eval {case_key}: {title}",
+                        _json_run.dumps({
+                            "evalRunId": eval_run_id,
+                            "evalCaseKey": case_key,
+                            "evalCaseIndex": idx,
+                            "features": features,
+                        }, ensure_ascii=False, default=str),
+                        temp_case_id,
+                    ),
+                )
+                run_id = int(cur.lastrowid)
+                conn.commit()
+                return run_id
+
+    def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
+        try:
+            with _conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """UPDATE agent_run
+                           SET status=%s,
+                               progress=CASE WHEN %s='COMPLETED' THEN 100 ELSE progress END,
+                               current_step=%s,
+                               error_message=CASE WHEN %s='FAILED' THEN %s ELSE NULL END,
+                               finished_at=NOW(),
+                               last_heartbeat_at=NOW()
+                           WHERE id=%s""",
+                        (
+                            status,
+                            status,
+                            message[:120] if message else status,
+                            status,
+                            message[:4000] if message else None,
+                            run_id,
+                        ),
+                    )
+                    conn.commit()
+        except Exception:
+            logger.exception("Could not finish eval agent run %s", run_id)
+
+    def _record_eval_failure(
+        *,
+        case_id: int,
+        error: str,
+        artifact: dict | None = None,
+        per_case_results: list,
+    ) -> None:
+        import json as _json_result
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO agent_eval_result
+                    (run_id, case_id, success, high_recall, dual_citation_rate,
+                     false_positives, analysis_mode, risk_score, finding_count,
+                     error_message, result_json)
+                    VALUES (%s,%s,0,0,0,0,%s,0,0,%s,%s)
+                    ON DUPLICATE KEY UPDATE success=VALUES(success),
+                                            high_recall=VALUES(high_recall),
+                                            dual_citation_rate=VALUES(dual_citation_rate),
+                                            false_positives=VALUES(false_positives),
+                                            analysis_mode=VALUES(analysis_mode),
+                                            risk_score=VALUES(risk_score),
+                                            finding_count=VALUES(finding_count),
+                                            error_message=VALUES(error_message),
+                                            result_json=VALUES(result_json)
+                    """, (
+                    eval_run_id,
+                    case_id,
+                    str((artifact or {}).get("analysisMode") or "FAILED")[:32],
+                    error[:500],
+                    _json_result.dumps(artifact or {"artifactError": error}, ensure_ascii=False, default=str),
+                ))
+                conn.commit()
+
+        per_case_results.append({
+            "caseId": case_id,
+            "highRecall": 0,
+            "dualCitationRate": 0,
+            "falsePositives": 0,
+            "schemaValid": 0,
+            "analysisMode": "FAILED",
+        })
 
     try:
         # ── Load eval run config ──
@@ -1907,6 +2206,10 @@ async def _run_evaluation_background(eval_run_id: int):
                     features = _json_features.loads(run_row.get("features_json") or "{}")
                 except Exception:
                     features = {}
+                eval_case_timeout_seconds = max(
+                    60,
+                    int(features.get("caseTimeoutSeconds") or 900),
+                )
                 cur.execute(
                     "SELECT id, case_key, title, contract_type, contract_text, expected_findings_json, should_not_find_json FROM agent_eval_case WHERE dataset_id=%s AND status='ACTIVE'",
                     (dataset_id,),
@@ -1917,6 +2220,14 @@ async def _run_evaluation_background(eval_run_id: int):
             _fail_eval_run(eval_run_id, "No active cases in dataset")
             return
 
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE agent_eval_run SET case_count=%s, passed_count=0 WHERE id=%s",
+                    (len(cases), eval_run_id),
+                )
+                conn.commit()
+
         logger.info("Eval run %s: %d cases, runtime=%s", eval_run_id, len(cases), runtime)
 
         per_case_results = []
@@ -1924,10 +2235,12 @@ async def _run_evaluation_background(eval_run_id: int):
 
         for idx, case in enumerate(cases):
             case_id = int(case["id"])
+            eval_agent_run_id = 0
             try:
                 # Execute a minimal contract review for this case
                 from app.agent_runtime.api_models import AgentTaskContext
                 router = get_contract_runtime_router()
+                task_type = _eval_task_type(case.get("contract_type"))
 
                 # Create temp contract_case for eval context so ContractStore can find clauses
                 temp_case_id = 0
@@ -1936,8 +2249,9 @@ async def _run_evaluation_background(eval_run_id: int):
                     with _conn() as conn:
                         with conn.cursor() as cur:
                             cur.execute(
-                                """INSERT INTO contract_case (case_key, title, contract_type, status, counterparty)
-                                   VALUES (%s,%s,%s,'MATERIAL_PENDING','评测对方主体')""",
+                                """INSERT INTO contract_case
+                                   (case_key, title, contract_type, status, counterparty, is_evaluation)
+                                   VALUES (%s,%s,%s,'MATERIAL_PENDING','评测对方主体',1)""",
                                 (f"EVAL-{eval_run_id}-{idx}", case["title"], case["contract_type"]),
                             )
                             temp_case_id = cur.lastrowid
@@ -1961,10 +2275,19 @@ async def _run_evaluation_background(eval_run_id: int):
                                 )
                             conn.commit()
 
+                eval_agent_run_id = _create_eval_agent_run(
+                    task_type=task_type,
+                    temp_case_id=temp_case_id,
+                    title=str(case.get("title") or ""),
+                    case_key=str(case.get("case_key") or ""),
+                    idx=idx,
+                    features=features,
+                )
+
                 ctx = AgentTaskContext(
-                    run_id=eval_run_id * 10000 + idx,
+                    run_id=eval_agent_run_id,
                     project_id=temp_case_id,
-                    task_type="CONTRACT_REVIEW",
+                    task_type=task_type,
                     question=f"审查合同: {case['title']}",
                     subject_type="CONTRACT_CASE",
                     subject_id=temp_case_id,
@@ -1999,9 +2322,29 @@ async def _run_evaluation_background(eval_run_id: int):
                 # P2: temperature override (0 = use prompt default)
                 _temperature_override.set(float(features.get("temperature") or 0))
 
-                result = await router.dispatch_with_mode(ctx, runtime)
+                result = await asyncio.wait_for(
+                    router.dispatch_with_mode(ctx, runtime),
+                    timeout=eval_case_timeout_seconds,
+                )
                 artifact = result.artifact or {}
                 findings = artifact.get("findings") or []
+                if result.status != "COMPLETED" or artifact.get("artifactError") or not isinstance(findings, list):
+                    error = str(
+                        artifact.get("artifactError")
+                        or f"Agent runtime ended with status {result.status}"
+                    )
+                    _finish_eval_agent_run(eval_agent_run_id, "FAILED", error)
+                    _record_eval_failure(
+                        case_id=case_id,
+                        error=error,
+                        artifact=artifact,
+                        per_case_results=per_case_results,
+                    )
+                    logger.warning(
+                        "Eval run %s: case %s/%s failed (%s)",
+                        eval_run_id, idx + 1, len(cases), error,
+                    )
+                    continue
                 expected_json = case["expected_findings_json"] or "[]"
                 import json as _json
                 try:
@@ -2012,10 +2355,15 @@ async def _run_evaluation_background(eval_run_id: int):
                 # ── Per-case metrics ──────────────────────────────────
                 expected_high = [f for f in expected if str(f.get("severity", "")).upper() == "HIGH"]
                 actual_high = [f for f in findings if str(f.get("severity", "")).upper() == "HIGH"]
-                high_recall = len([h for h in expected_high if any(
-                    str(h.get("title", "")).lower() in str(a.get("title", "")).lower()
-                    for a in actual_high
-                )]) / max(len(expected_high), 1)
+                if expected_high:
+                    high_recall = len([h for h in expected_high if any(
+                        _risk_finding_matches(h, a) for a in actual_high
+                    )]) / len(expected_high)
+                else:
+                    # Vacuous recall: the case expects no HIGH finding, so there
+                    # is nothing to miss. Scoring 0 here would drag the run
+                    # average down for cases that cannot fail.
+                    high_recall = 1.0
 
                 # dualCitationRate: findings with BOTH contract AND policy citations
                 dual_cited = sum(
@@ -2046,14 +2394,17 @@ async def _run_evaluation_background(eval_run_id: int):
                         cur.execute("""
                             INSERT INTO agent_eval_result
                             (run_id, case_id, success, high_recall, dual_citation_rate,
-                             false_positives, analysis_mode, risk_score, finding_count, result_json)
-                            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,%s)
-                            ON DUPLICATE KEY UPDATE high_recall=VALUES(high_recall),
+                             false_positives, analysis_mode, risk_score, finding_count,
+                             error_message, result_json)
+                            VALUES (%s,%s,1,%s,%s,%s,%s,%s,%s,NULL,%s)
+                            ON DUPLICATE KEY UPDATE success=VALUES(success),
+                                                    high_recall=VALUES(high_recall),
                                                     dual_citation_rate=VALUES(dual_citation_rate),
                                                     false_positives=VALUES(false_positives),
                                                     analysis_mode=VALUES(analysis_mode),
                                                     risk_score=VALUES(risk_score),
                                                     finding_count=VALUES(finding_count),
+                                                    error_message=VALUES(error_message),
                                                     result_json=VALUES(result_json)
                             """, (
                             eval_run_id, case_id,
@@ -2065,6 +2416,7 @@ async def _run_evaluation_background(eval_run_id: int):
                         ))
                         conn.commit()
 
+                _finish_eval_agent_run(eval_agent_run_id, "COMPLETED", "Evaluation case completed")
                 per_case_results.append({
                     "caseId": case_id,
                     "highRecall": high_recall,
@@ -2078,15 +2430,14 @@ async def _run_evaluation_background(eval_run_id: int):
 
             except Exception as exc:
                 logger.error("Eval case %s failed: %s", case_id, exc)
-                with _conn() as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO agent_eval_result
-                            (run_id, case_id, success, error_message)
-                            VALUES (%s,%s,0,%s)
-                            ON DUPLICATE KEY UPDATE error_message=VALUES(error_message)
-                            """, (eval_run_id, case_id, str(exc)[:500]))
-                        conn.commit()
+                if eval_agent_run_id:
+                    _finish_eval_agent_run(eval_agent_run_id, "FAILED", str(exc))
+                _record_eval_failure(
+                    case_id=case_id,
+                    error=str(exc),
+                    artifact={"artifactError": str(exc)},
+                    per_case_results=per_case_results,
+                )
 
         # Compute aggregate metrics
         if per_case_results:
@@ -2098,12 +2449,22 @@ async def _run_evaluation_background(eval_run_id: int):
             avg_schema_valid = schema_valid_count / n
             limited_count = sum(1 for r in per_case_results if r.get("analysisMode") == "LIMITED")
             limited_report_rate = limited_count / n
+            failed_count = n - success_count
         else:
             avg_recall = 0
             avg_dual_cite = 0
             avg_false_pos = 0
             avg_schema_valid = 0
             limited_report_rate = 0
+            limited_count = 0
+            failed_count = 0
+
+        if success_count == 0:
+            eval_status = "FAILED"
+        elif failed_count > 0 or limited_count > 0:
+            eval_status = "DEGRADED"
+        else:
+            eval_status = "COMPLETED"
 
         import json as _json_summary
         summary = _json_summary.dumps({
@@ -2114,18 +2475,22 @@ async def _run_evaluation_background(eval_run_id: int):
             "limitedReportRate": round(limited_report_rate, 4),
             "caseCount": len(cases),
             "passedCount": success_count,
+            "failedCount": failed_count,
+            "limitedCount": limited_count,
+            "resultValid": eval_status == "COMPLETED",
         }, ensure_ascii=False)
 
         with _conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("""
                     UPDATE agent_eval_run
-                    SET status='COMPLETED', high_risk_recall=%s, dual_citation_rate=%s,
+                    SET status=%s, high_risk_recall=%s, dual_citation_rate=%s,
                         false_positive_rate=%s, schema_valid_rate=%s,
                         case_count=%s, passed_count=%s, summary_json=%s,
                         finished_at=NOW()
                     WHERE id=%s
-                    """, (avg_recall, avg_dual_cite, avg_false_pos, avg_schema_valid, len(cases), success_count, summary, eval_run_id))
+                    """, (eval_status, avg_recall, avg_dual_cite, avg_false_pos,
+                          avg_schema_valid, len(cases), success_count, summary, eval_run_id))
                 conn.commit()
 
     except Exception as exc:
@@ -2150,6 +2515,813 @@ async def _run_evaluation_background(eval_run_id: int):
 
     logger.info("Eval run %s completed: recall=%.3f, %d/%d passed",
                 eval_run_id, avg_recall, success_count, len(cases))
+
+
+def _record_eval_result(eval_run_id: int, case_id: int, row: dict[str, Any]) -> None:
+    from app.agent_runtime.persistence import _conn
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO agent_eval_result
+                (run_id, case_id, success, high_recall, dual_citation_rate,
+                 false_positives, analysis_mode, risk_score, finding_count,
+                 error_message, result_json, schema_valid_rate)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                ON DUPLICATE KEY UPDATE success=VALUES(success),
+                                        high_recall=VALUES(high_recall),
+                                        dual_citation_rate=VALUES(dual_citation_rate),
+                                        false_positives=VALUES(false_positives),
+                                        analysis_mode=VALUES(analysis_mode),
+                                        risk_score=VALUES(risk_score),
+                                        finding_count=VALUES(finding_count),
+                                        error_message=VALUES(error_message),
+                                        result_json=VALUES(result_json),
+                                        schema_valid_rate=VALUES(schema_valid_rate)
+                """, (
+                eval_run_id,
+                case_id,
+                1 if row.get("success") else 0,
+                float(row.get("highRecall") or 0),
+                float(row.get("dualCitationRate") or 0),
+                int(row.get("falsePositives") or 0),
+                str(row.get("analysisMode") or "FAILED")[:32],
+                float(row.get("riskScore") or 0),
+                int(row.get("findingCount") or 0),
+                str(row.get("error") or "")[:500] or None,
+                _json_safe(row.get("artifact") or row),
+                float(row.get("schemaValid") or 0),
+            ))
+            conn.commit()
+
+
+_EVAL_SCENARIO_TYPE_NORMALIZATION = {
+    # Seed data and the admin UI use GOODS_PROCUREMENT; rule sets, clause
+    # inventories, and intake extraction all key off GOODS_PURCHASE.
+    "GOODS_PROCUREMENT": "GOODS_PURCHASE",
+}
+
+_EVAL_BUSINESS_TYPES = {
+    "SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA",
+    "ENGINEERING_EPC", "SOFTWARE_IT", "OPS_MAINTENANCE", "MIXED", "OTHER",
+}
+
+
+def _eval_business_contract_type(case: dict[str, Any]) -> str:
+    """Derive the business contract type for an eval case.
+
+    Eval cases store the dataset task type (CONTRACT_REVIEW/INTAKE/...) in the
+    ``contract_type`` column; the business scenario lives in ``scenario``.
+    Rule-set selection, mandatory-clause inventories, and policy retrieval all
+    key off the business type, so prefer the scenario and normalize its
+    spelling to the canonical token.
+    """
+    scenario = str(case.get("scenario") or "").strip().upper()
+    candidate = _EVAL_SCENARIO_TYPE_NORMALIZATION.get(scenario, scenario)
+    if candidate in _EVAL_BUSINESS_TYPES:
+        return candidate
+    raw = str(case.get("contract_type") or "").strip().upper()
+    candidate = _EVAL_SCENARIO_TYPE_NORMALIZATION.get(raw, raw)
+    if candidate in _EVAL_BUSINESS_TYPES:
+        return candidate
+    return "OTHER"
+
+
+def _eval_expected_dimensions(case: dict[str, Any]) -> list[str]:
+    """Distinct risk dimensions from expected_findings_json (normalized via _risk_dimension)."""
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        return []
+    dims: list[str] = []
+    for item in expected if isinstance(expected, list) else []:
+        dim = _risk_dimension(item if isinstance(item, dict) else {})
+        if dim and dim not in dims:
+            dims.append(dim)
+    return dims
+
+
+def _create_eval_temp_case(eval_run_id: int, case: dict[str, Any], idx: int, temp_case_ids: list[int]) -> int:
+    from app.agent_runtime.persistence import _conn
+    from app.agent_runtime.contract_document_parser import (
+        _index_contract_chunks,
+        _iter_clause_chunks,
+        classify_clause,
+        split_contract_text,
+    )
+
+    contract_text = str(case.get("contract_text") or "")
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO contract_case
+                   (case_key, title, contract_type, status, counterparty, is_evaluation)
+                   VALUES (%s,%s,%s,'MATERIAL_PENDING','Evaluation Counterparty',1)""",
+                (f"EVAL-{eval_run_id}-{idx}", case.get("title") or "", _eval_business_contract_type(case)),
+            )
+            temp_case_id = int(cur.lastrowid)
+            temp_case_ids.append(temp_case_id)
+            if contract_text.strip():
+                cur.execute(
+                    """INSERT INTO contract_document
+                       (case_id, document_type, file_name, file_path, version, parse_status, content_text)
+                       VALUES (%s,'MAIN',%s,'eval://text',1,'READY',%s)""",
+                    (temp_case_id, str(case.get("title") or "evaluation") + ".txt", contract_text),
+                )
+                doc_id = int(cur.lastrowid)
+                clauses = _split_eval_contract_clauses(
+                    contract_text,
+                    split_contract_text=split_contract_text,
+                    classify_clause=classify_clause,
+                )
+                for ci, clause in enumerate(clauses):
+                    content = str(clause.get("content") or "").strip()
+                    if len(content) < 10:
+                        continue
+                    cur.execute(
+                        """INSERT INTO contract_clause
+                           (document_id, case_id, clause_number, title, content, clause_type)
+                           VALUES (%s,%s,%s,%s,LEFT(%s,8000),%s)""",
+                        (
+                            doc_id,
+                            temp_case_id,
+                            str(clause.get("clauseNumber") or ci + 1),
+                            str(clause.get("title") or content[:80])[:256],
+                            content,
+                            str(clause.get("clauseType") or classify_clause(content)),
+                        ),
+                    )
+                    clause_id = int(cur.lastrowid)
+                    for chunk_index, chunk_text in enumerate(_iter_clause_chunks(content)):
+                        content_hash = hashlib.sha256(chunk_text.encode("utf-8")).hexdigest()
+                        cur.execute(
+                            """INSERT INTO contract_clause_chunk
+                               (case_id, document_id, clause_id, clause_number, chunk_index,
+                                chunk_text, source_page, content_hash, embedding_status, index_status)
+                               VALUES (%s,%s,%s,%s,%s,%s,1,%s,'PENDING','PENDING')""",
+                            (
+                                temp_case_id,
+                                doc_id,
+                                clause_id,
+                                str(clause.get("clauseNumber") or ci + 1),
+                                chunk_index,
+                                chunk_text,
+                                content_hash,
+                            ),
+                        )
+            conn.commit()
+            if contract_text.strip():
+                _index_contract_chunks(cur, None, doc_id, commit_callback=conn.commit)
+            return temp_case_id
+
+
+def _split_eval_contract_clauses(
+    contract_text: str,
+    *,
+    split_contract_text=None,
+    classify_clause=None,
+) -> list[dict[str, Any]]:
+    if split_contract_text is None or classify_clause is None:
+        from app.agent_runtime.contract_document_parser import classify_clause, split_contract_text
+
+    clauses = split_contract_text(contract_text)
+    if len(clauses) > 1:
+        return clauses
+
+    lines = [line.strip() for line in re.split(r"[\r\n]+", contract_text) if line.strip()]
+    if len(lines) <= 1:
+        lines = [
+            segment.strip()
+            for segment in re.split(r"(?<=[。；;])", contract_text)
+            if segment.strip()
+        ]
+    if len(lines) <= 1:
+        content = contract_text.strip()
+        return [{
+            "clauseNumber": "1",
+            "title": content[:80],
+            "content": content,
+            "clauseType": classify_clause(content),
+        }] if content else []
+
+    return [
+        {
+            "clauseNumber": str(index),
+            "title": line[:80],
+            "content": line,
+            "clauseType": classify_clause(line),
+        }
+        for index, line in enumerate(lines, 1)
+        if len(line) >= 4
+    ]
+
+
+def _cleanup_eval_search_indexes(temp_case_ids: list[int]) -> None:
+    if not temp_case_ids:
+        return
+    try:
+        from app.agent_runtime.persistence import _conn
+        from app.services.es_service import ESService
+
+        placeholders = ",".join(["%s"] * len(temp_case_ids))
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id FROM contract_document WHERE case_id IN ({placeholders})",
+                    temp_case_ids,
+                )
+                document_ids = [int(row["id"]) for row in cur.fetchall()]
+        es = ESService()
+        for document_id in document_ids:
+            es.delete_contract_document(document_id)
+    except Exception:
+        logger.exception("Could not clean evaluation search indexes")
+
+
+def _latest_eval_timeline_node_id(temp_case_id: int) -> int:
+    from app.agent_runtime.persistence import _conn
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id FROM contract_timeline_node WHERE case_id=%s ORDER BY id LIMIT 1",
+                (temp_case_id,),
+            )
+            row = cur.fetchone()
+            return int(row["id"]) if row else 0
+
+
+def _set_eval_feature_overrides(features: dict) -> None:
+    from app.agent_runtime.reranker import _rerank_disabled, reset_rerank_observation
+    from app.agent_runtime.runtime import (
+        _coverage_reflection_disabled,
+        _model_override,
+        _prompt_version_override,
+        _recall_max_override,
+        _recall_min_override,
+        _recall_multiplier_override,
+        _retry_limit_override,
+        _temperature_override,
+    )
+
+    reset_rerank_observation()
+    _rerank_disabled.set(not features.get("rerank", True))
+    _model_override.set(str(features.get("model") or ""))
+    _prompt_version_override.set(str(features.get("promptVersion") or ""))
+    _recall_multiplier_override.set(int(features.get("recallMultiplier") or 0))
+    _recall_min_override.set(int(features.get("recallMin") or 0))
+    _recall_max_override.set(int(features.get("recallMax") or 0))
+    _retry_limit_override.set(int(features.get("targetedRetrievalRetries", 1)))
+    _coverage_reflection_disabled.set(not features.get("coverageReflection", True))
+    _temperature_override.set(float(features.get("temperature") or 0))
+
+
+def _normalize_eval_text(value: Any) -> str:
+    return re.sub(r"[^0-9a-z\u4e00-\u9fff]+", "", str(value or "").lower())
+
+
+def _eval_bigrams(value: str) -> set[str]:
+    return {value[index:index + 2] for index in range(max(0, len(value) - 1))}
+
+
+def _risk_dimension(value: dict[str, Any]) -> str:
+    raw = str(
+        value.get("riskDimension") or value.get("clauseType")
+        or value.get("domainKey") or ""
+    ).upper()
+    aliases = {
+        "PRICE_PAYMENT_TAX": "PAYMENT",
+        "PAYMENT_SECURITY_AND_WORK_STOPPAGE": "PAYMENT",
+        "SCOPE_DELIVERY_ACCEPTANCE": "ACCEPTANCE",
+        "LIABILITY_REMEDIES": "LIABILITY",
+        "TERM_CHANGE_TERMINATION": "TERMINATION",
+        "CONFIDENTIALITY_DATA_IP": "IP",
+        "IP_OWNERSHIP_AND_MORAL_RIGHTS": "IP",
+    }
+    return aliases.get(raw, raw)
+
+
+def _risk_finding_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    expected_text = _normalize_eval_text(expected.get("title"))
+    actual_text = _normalize_eval_text(" ".join(str(actual.get(key) or "") for key in (
+        "title", "oneLineSummary", "claim", "riskExplanation", "description",
+    )))
+    if not expected_text or not actual_text:
+        return False
+    expected_dimension = _risk_dimension(expected)
+    actual_dimension = _risk_dimension(actual)
+    if expected_dimension and actual_dimension and expected_dimension != actual_dimension:
+        return False
+    if expected_text in actual_text or actual_text in expected_text:
+        return True
+    expected_pairs = _eval_bigrams(expected_text)
+    actual_pairs = _eval_bigrams(actual_text)
+    shared = len(expected_pairs & actual_pairs)
+    overlap = shared / max(len(expected_pairs), 1)
+    # Compact actual titles vs long descriptive expected titles: measure
+    # containment from the shorter side so "不可抗力范围过宽" matches an
+    # expected title that embeds the same phrase. Minimum shared-bigram and
+    # length guards keep two-character coincidences from matching, and the
+    # dimension gate above still applies when both sides carry dimensions.
+    shorter_pairs = min(len(expected_pairs), len(actual_pairs))
+    containment = shared / max(shorter_pairs, 1)
+    if shared >= 3 and shorter_pairs >= 3 and containment >= 0.5:
+        return True
+    sequence_ratio = SequenceMatcher(None, expected_text, actual_text).ratio()
+    return overlap >= 0.28 or sequence_ratio >= 0.42
+
+
+def _failed_eval_stage_run_ids(run_ids: list[int], completed_run_ids: set[int]) -> list[int]:
+    return [run_id for run_id in run_ids if run_id not in completed_run_ids]
+
+
+def _eval_rerank_observation(artifact: dict[str, Any]) -> dict[str, Any]:
+    methods: set[str] = set()
+    retrieval = artifact.get("retrievalValidation") or artifact.get("retrieval_validation") or {}
+    if isinstance(retrieval, dict):
+        for value in retrieval.values():
+            if not isinstance(value, dict):
+                continue
+            methods.update(str(method) for method in value.get("rerankMethods") or [] if method)
+    normalized = {
+        "MODEL_RERANK" if method == "MODEL_RERANK" else
+        "KEYWORD_FALLBACK" if method.startswith("KEYWORD_") else method
+        for method in methods
+    }
+    if not normalized:
+        actual = "NOT_USED"
+    elif len(normalized) == 1:
+        actual = next(iter(normalized))
+    else:
+        actual = "MIXED"
+    return {"actualMethod": actual, "methods": sorted(normalized)}
+
+
+def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_mode: str) -> dict[str, Any]:
+    findings = artifact.get("findings") or []
+    if not isinstance(findings, list):
+        findings = []
+    if score_mode != "CONTRACT_REVIEW":
+        return {
+            "success": True,
+            "highRecall": 1,
+            "dualCitationRate": 1,
+            "falsePositives": 0,
+            "schemaValid": 1 if isinstance(artifact, dict) else 0,
+            "analysisMode": artifact.get("analysisMode", "FULL"),
+            "riskScore": artifact.get("riskScore", 0),
+            "findingCount": len(findings),
+            "artifact": artifact,
+        }
+
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        expected = []
+    expected_high = [
+        f for f in (expected if isinstance(expected, list) else [])
+        if str((f or {}).get("severity", "")).upper() == "HIGH"
+    ]
+    actual_high = [f for f in findings if str((f or {}).get("severity", "")).upper() == "HIGH"]
+    if expected_high:
+        high_recall = len([
+            h for h in expected_high
+            if any(_risk_finding_matches(h, a) for a in actual_high)
+        ]) / len(expected_high)
+    else:
+        # Vacuous recall: no expected HIGH findings — nothing can be missed.
+        high_recall = 1.0
+    dual_cited = sum(
+        1 for f in findings
+        if (f.get("contractCitation") or f.get("contractCitationIds"))
+        and (f.get("policyCitation") or f.get("policyCitationIds"))
+    )
+    try:
+        should_not = json.loads(case.get("should_not_find_json") or "[]")
+    except Exception:
+        should_not = []
+    false_pos = sum(
+        1 for f in findings
+        for s in (should_not if isinstance(should_not, list) else [])
+        if str(s).lower() in str(f.get("title", "")).lower()
+    )
+    return {
+        "success": True,
+        "highRecall": high_recall,
+        "dualCitationRate": dual_cited / max(len(findings), 1),
+        "falsePositives": false_pos,
+        "schemaValid": 1,
+        "analysisMode": artifact.get("analysisMode", "FULL"),
+        "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(findings),
+        "artifact": artifact,
+    }
+
+
+async def _dispatch_eval_task(
+    *,
+    eval_run_id: int,
+    case: dict[str, Any],
+    idx: int,
+    temp_case_id: int,
+    task_type: str,
+    features: dict,
+    runtime: str,
+    timeout_seconds: int,
+) -> tuple[int, Any]:
+    from app.agent_runtime.api_models import AgentTaskContext
+    from app.agent_runtime.persistence import _conn
+
+    task_input = {
+        "evalRunId": eval_run_id,
+        "evalCaseId": case.get("case_key"),
+        "features": features,
+        "evaluationTaskType": task_type,
+    }
+    if task_type == "FULFILLMENT_CHECK":
+        node_id = _latest_eval_timeline_node_id(temp_case_id)
+        if not node_id:
+            raise ValueError("No timeline node available for fulfillment check")
+        task_input["timelineNodeId"] = node_id
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO agent_run
+                   (project_id, run_type, trigger_type, question, status,
+                    progress, current_step, input_json, subject_type, subject_id)
+                   VALUES (%s,%s,'EVALUATION',%s,'CREATED',
+                           0,'Evaluation case queued',%s,'CONTRACT_CASE',%s)""",
+                (
+                    temp_case_id,
+                    task_type,
+                    f"Eval {case.get('case_key')}: {case.get('title')}",
+                    _json_safe({
+                        "evalRunId": eval_run_id,
+                        "evalCaseKey": case.get("case_key"),
+                        "evalCaseIndex": idx,
+                        "features": features,
+                    }),
+                    temp_case_id,
+                ),
+            )
+            run_id = int(cur.lastrowid)
+            conn.commit()
+
+    ctx = AgentTaskContext(
+        run_id=run_id,
+        project_id=temp_case_id,
+        task_type=task_type,
+        question=f"Evaluate contract: {case.get('title')}",
+        subject_type="CONTRACT_CASE",
+        subject_id=temp_case_id,
+        project={
+            "id": temp_case_id,
+            "title": case.get("title"),
+            "contractType": _eval_business_contract_type(case),
+            "scenario": case.get("scenario") or "",
+            "industry": case.get("industry") or "",
+            "difficulty": case.get("difficulty") or "",
+            "evalExpectedDimensions": _eval_expected_dimensions(case),
+        },
+        task_input=task_input,
+    )
+    router = get_contract_runtime_router()
+    return run_id, await asyncio.wait_for(
+        router.dispatch_with_mode(ctx, runtime),
+        timeout=timeout_seconds,
+    )
+
+
+def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
+    if not run_id:
+        return
+    from app.agent_runtime.persistence import _conn
+
+    try:
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """UPDATE agent_run
+                       SET status=%s,
+                           progress=CASE WHEN %s='COMPLETED' THEN 100 ELSE progress END,
+                           current_step=%s,
+                           error_message=CASE WHEN %s='FAILED' THEN %s ELSE NULL END,
+                           finished_at=NOW(),
+                           last_heartbeat_at=NOW()
+                       WHERE id=%s""",
+                    (
+                        status,
+                        status,
+                        message[:120] if message else status,
+                        status,
+                        message[:4000] if message else None,
+                        run_id,
+                    ),
+                )
+                conn.commit()
+    except Exception:
+        logger.exception("Could not finish eval agent run %s", run_id)
+
+
+async def _run_evaluation_background(eval_run_id: int):
+    from app.agent_runtime.persistence import _conn
+
+    temp_case_ids: list[int] = []
+    total_cases = 0
+    success_count = 0
+    avg_recall = 0.0
+    try:
+        _update_eval_progress(
+            eval_run_id,
+            status="PRECHECKING",
+            current_step="Checking evaluation environment",
+            queue_position=0,
+        )
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT r.id, r.dataset_id, r.runtime_engine, r.features_json,
+                              d.contract_type AS dataset_type
+                       FROM agent_eval_run r
+                       JOIN agent_eval_dataset d ON d.id=r.dataset_id
+                       WHERE r.id=%s""",
+                    (eval_run_id,),
+                )
+                run_row = cur.fetchone()
+                if not run_row:
+                    _fail_eval_run(eval_run_id, "Eval run not found")
+                    return
+                dataset_id = int(run_row["dataset_id"])
+                runtime = str(run_row["runtime_engine"] or "legacy")
+                dataset_type = str(run_row.get("dataset_type") or "CONTRACT_REVIEW")
+                try:
+                    features = json.loads(run_row.get("features_json") or "{}")
+                except Exception:
+                    features = {}
+                timeout_seconds = max(60, int(features.get("caseTimeoutSeconds") or 900))
+                cur.execute(
+                    """SELECT id, case_key, title, contract_type, contract_text,
+                              expected_findings_json, should_not_find_json,
+                              scenario, industry, difficulty, noise_level,
+                              must_have_contract_citation, must_have_policy_citation
+                       FROM agent_eval_case
+                       WHERE dataset_id=%s AND status='ACTIVE'
+                       ORDER BY id""",
+                    (dataset_id,),
+                )
+                cases = cur.fetchall()
+                total_cases = len(cases)
+
+        if not cases:
+            _fail_eval_run(eval_run_id, "No active cases in dataset")
+            return
+
+        env_snapshot = await _eval_environment_gate(features)
+        env_status = str(env_snapshot.get("environmentStatus") or "UNAVAILABLE")
+        unavailable = env_status == "UNAVAILABLE"
+        _update_eval_progress(
+            eval_run_id,
+            status="ENVIRONMENT_UNAVAILABLE" if unavailable else "RUNNING",
+            case_count=total_cases,
+            passed_count=0,
+            current_case_index=0,
+            current_step="Environment unavailable" if unavailable else "Running evaluation cases",
+            environment_status=env_status,
+            environment_snapshot=env_snapshot,
+            summary_patch={"environment": env_snapshot, "percent": 0, "infraFailedCount": 0},
+            finished=unavailable,
+        )
+        if unavailable:
+            return
+
+        task_plan = _eval_task_plan(dataset_type)
+        per_case_results: list[dict[str, Any]] = []
+        infra_failed_count = 0
+        logger.info(
+            "Eval run %s: %d cases, runtime=%s, dataset=%s, tasks=%s",
+            eval_run_id, total_cases, runtime, dataset_type, task_plan,
+        )
+
+        for idx, case in enumerate(cases):
+            case_id = int(case["id"])
+            case_key = str(case.get("case_key") or case_id)
+            case_run_ids: list[int] = []
+            completed_run_ids: set[int] = set()
+            try:
+                _update_eval_progress(
+                    eval_run_id,
+                    status="RUNNING",
+                    current_case_index=idx + 1,
+                    current_case_key=case_key,
+                    current_step=f"Running case {idx + 1}/{total_cases}: {case_key}",
+                    summary_patch={"percent": round((idx / total_cases) * 100, 2)},
+                )
+                temp_case_id = _create_eval_temp_case(eval_run_id, case, idx, temp_case_ids)
+                _set_eval_feature_overrides(features)
+                stage_outputs: dict[str, Any] = {}
+                review_artifact: dict[str, Any] | None = None
+                for task_type in task_plan:
+                    try:
+                        run_id, result = await _dispatch_eval_task(
+                            eval_run_id=eval_run_id,
+                            case=case,
+                            idx=idx,
+                            temp_case_id=temp_case_id,
+                            task_type=task_type,
+                            features=features,
+                            runtime=runtime,
+                            timeout_seconds=timeout_seconds,
+                        )
+                        case_run_ids.append(run_id)
+                    except ValueError as skip_exc:
+                        stage_outputs[task_type] = {"skipped": True, "reason": str(skip_exc)}
+                        continue
+                    artifact = result.artifact or {}
+                    if result.status != "COMPLETED" or artifact.get("artifactError"):
+                        error = str(artifact.get("artifactError") or f"Agent runtime ended with status {result.status}")
+                        _finish_eval_agent_run(run_id, "FAILED", error)
+                        raise RuntimeError(error)
+                    _finish_eval_agent_run(run_id, "COMPLETED", "Evaluation case completed")
+                    completed_run_ids.add(run_id)
+                    stage_outputs[task_type] = artifact
+                    if task_type == "CONTRACT_REVIEW":
+                        review_artifact = artifact
+
+                score_mode = "CONTRACT_REVIEW" if "CONTRACT_REVIEW" in task_plan else task_plan[-1]
+                artifact_for_score = review_artifact or {
+                    "analysisMode": "FULL",
+                    "evaluationStages": stage_outputs,
+                }
+                row = _score_eval_artifact(case, artifact_for_score, score_mode)
+                rerank_observation = _eval_rerank_observation(artifact_for_score)
+                if rerank_observation["actualMethod"] == "NOT_USED":
+                    # Legacy artifacts lack retrievalValidation; the per-case
+                    # contextvar observation captures actual legacy rerank usage.
+                    try:
+                        from app.agent_runtime.reranker import get_rerank_observation
+                        rerank_observation = get_rerank_observation()
+                    except Exception:
+                        pass
+                row["artifact"] = {
+                    **(row.get("artifact") or {}),
+                    "evaluationStages": stage_outputs,
+                    "evaluationTaskPlan": task_plan,
+                    "rerank": rerank_observation,
+                }
+                row["rerankMethod"] = rerank_observation["actualMethod"]
+                _record_eval_result(eval_run_id, case_id, row)
+                per_case_results.append({"caseId": case_id, **row})
+                success_count += 1
+            except Exception as exc:
+                for run_id in _failed_eval_stage_run_ids(case_run_ids, completed_run_ids):
+                    _finish_eval_agent_run(run_id, "FAILED", str(exc))
+                infra_failed = _is_infra_error(exc)
+                if infra_failed:
+                    infra_failed_count += 1
+                row = {
+                    "caseId": case_id,
+                    "success": False,
+                    "highRecall": 0,
+                    "dualCitationRate": 0,
+                    "falsePositives": 0,
+                    "schemaValid": 0,
+                    "analysisMode": "INFRA_FAILED" if infra_failed else "FAILED",
+                    "error": str(exc),
+                    "artifact": {"artifactError": str(exc), "infraFailed": infra_failed},
+                }
+                try:
+                    from app.agent_runtime.reranker import get_rerank_observation
+                    rerank_observation = get_rerank_observation()
+                    row["rerankMethod"] = rerank_observation["actualMethod"]
+                    row["artifact"]["rerank"] = rerank_observation
+                except Exception:
+                    pass
+                _record_eval_result(eval_run_id, case_id, row)
+                per_case_results.append(row)
+                logger.warning("Eval run %s case %s/%s failed: %s", eval_run_id, idx + 1, total_cases, exc)
+            finally:
+                _update_eval_progress(
+                    eval_run_id,
+                    passed_count=success_count,
+                    summary_patch={
+                        "completedCases": idx + 1,
+                        "failedCases": len([
+                            r for r in per_case_results
+                            if not r.get("success") and r.get("analysisMode") != "INFRA_FAILED"
+                        ]),
+                        "infraFailedCases": infra_failed_count,
+                        "percent": round(((idx + 1) / total_cases) * 100, 2),
+                    },
+                )
+
+        metric_results = [r for r in per_case_results if r.get("analysisMode") != "INFRA_FAILED"]
+        if metric_results:
+            n = len(metric_results)
+            avg_recall = sum(float(r.get("highRecall") or 0) for r in metric_results) / n
+            avg_dual_cite = sum(float(r.get("dualCitationRate") or 0) for r in metric_results) / n
+            avg_false_pos = sum(float(r.get("falsePositives") or 0) for r in metric_results) / n
+            avg_schema_valid = sum(1 for r in metric_results if r.get("schemaValid")) / n
+            limited_count = sum(1 for r in metric_results if r.get("analysisMode") == "LIMITED")
+            limited_report_rate = limited_count / n
+        else:
+            avg_dual_cite = 0.0
+            avg_false_pos = 0.0
+            avg_schema_valid = 0.0
+            limited_count = 0
+            limited_report_rate = 0.0
+        failed_count = len([
+            r for r in per_case_results
+            if not r.get("success") and r.get("analysisMode") != "INFRA_FAILED"
+        ])
+        rerank_methods = sorted({
+            str(result.get("rerankMethod") or "NOT_USED")
+            for result in per_case_results
+        })
+        requested_rerank = bool(features.get("rerank", True))
+        rerank_fallback_count = sum(
+            1 for result in per_case_results
+            if result.get("rerankMethod") in {"KEYWORD_FALLBACK", "MIXED"}
+        )
+
+        if success_count == 0 and infra_failed_count == total_cases:
+            eval_status = "ENVIRONMENT_UNAVAILABLE"
+        elif success_count == 0:
+            eval_status = "FAILED"
+        elif (
+            failed_count > 0 or limited_count > 0 or infra_failed_count > 0
+            or env_status == "DEGRADED" or (requested_rerank and rerank_fallback_count > 0)
+        ):
+            eval_status = "DEGRADED"
+        else:
+            eval_status = "COMPLETED"
+
+        summary = _json_safe({
+            "highRiskRecall": round(avg_recall, 4),
+            "dualCitationRate": round(avg_dual_cite, 4),
+            "falsePositiveRate": round(avg_false_pos, 4),
+            "schemaValidRate": round(avg_schema_valid, 4),
+            "limitedReportRate": round(limited_report_rate, 4),
+            "caseCount": total_cases,
+            "metricCaseCount": len(metric_results),
+            "passedCount": success_count,
+            "failedCount": failed_count,
+            "infraFailedCount": infra_failed_count,
+            "limitedCount": limited_count,
+            "resultValid": eval_status == "COMPLETED",
+            "environment": env_snapshot,
+            "evaluationTaskPlan": task_plan,
+            "rerankRequested": requested_rerank,
+            "rerankActualMethods": rerank_methods,
+            "rerankFallbackCount": rerank_fallback_count,
+            "percent": 100,
+        })
+        current_step = {
+            "FAILED": f"Evaluation failed: {failed_count}/{total_cases} cases failed",
+            "DEGRADED": "Evaluation completed with limited results",
+            "ENVIRONMENT_UNAVAILABLE": "Evaluation environment unavailable",
+        }.get(eval_status, "Evaluation completed")
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    UPDATE agent_eval_run
+                    SET status=%s, high_risk_recall=%s, dual_citation_rate=%s,
+                        false_positive_rate=%s, schema_valid_rate=%s,
+                        case_count=%s, passed_count=%s, current_step=%s,
+                        summary_json=%s, finished_at=NOW()
+                    WHERE id=%s
+                    """, (
+                    eval_status,
+                    avg_recall,
+                    avg_dual_cite,
+                    avg_false_pos,
+                    avg_schema_valid,
+                    total_cases,
+                    success_count,
+                        current_step,
+                    summary,
+                    eval_run_id,
+                ))
+                conn.commit()
+    except Exception as exc:
+        logger.exception("Eval run %s background task failed", eval_run_id)
+        _fail_eval_run(eval_run_id, str(exc)[:500])
+    finally:
+        if temp_case_ids:
+            try:
+                _cleanup_eval_search_indexes(temp_case_ids)
+                placeholders = ",".join(["%s"] * len(temp_case_ids))
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"UPDATE contract_case SET deleted=1, is_evaluation=1 WHERE id IN ({placeholders})",
+                            temp_case_ids,
+                        )
+                        conn.commit()
+            except Exception:
+                logger.exception("Could not clean evaluation temp cases")
+
+    logger.info("Eval run %s completed: recall=%.3f, %d/%d passed", eval_run_id, avg_recall, success_count, total_cases)
 
 
 @kb_router.post("/qa/test")

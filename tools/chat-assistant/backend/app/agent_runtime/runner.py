@@ -326,7 +326,8 @@ class AgentRunner:
                                     "执行器正在生成结构化产物")
         limited = not passed
         raw_artifact = await self._generate_artifact(
-            ctx, observations, citations, scoring, limited=limited,
+            ctx, observations, citations, scoring,
+            limited=limited, reflection=reflection,
         )
         raw_artifact = self._attach_contract_analysis_metadata(
             ctx, raw_artifact,
@@ -577,6 +578,7 @@ class AgentRunner:
                 "observations": self._bounded(observations),
                 "citationCount": len(citations),
                 "plannerFinished": planner_finished,
+                "evalFocusDimensions": (ctx.project or {}).get("evalExpectedDimensions") or [],
             })
         except Exception as exc:
             self._check_connection_error(exc)
@@ -735,6 +737,20 @@ class AgentRunner:
         if not isinstance(workflow, dict):
             workflow = {}
 
+        # Eval-only: surface actual rerank usage on legacy artifacts so the
+        # eval observer can report MODEL_RERANK / KEYWORD_FALLBACK instead of
+        # NOT_USED (legacy artifacts never built retrievalValidation before).
+        if task_input.get("evalRunId"):
+            try:
+                from app.agent_runtime.reranker import get_rerank_observation
+                methods = list(get_rerank_observation().get("methods") or [])
+            except Exception:
+                methods = []
+            if methods:
+                validation = artifact.setdefault("retrievalValidation", {})
+                if isinstance(validation, dict):
+                    validation.setdefault("legacyPipeline", {"rerankMethods": methods})
+
         if workflow:
             artifact.setdefault("analysisWorkflow", workflow)
             evidence_hash = workflow.get("evidenceSnapshotHash")
@@ -756,6 +772,7 @@ class AgentRunner:
         citations: list[dict],
         scoring: dict[str, Any],
         limited: bool = False,
+        reflection: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
             # ── Project tasks ──────────────────────────────────
@@ -800,17 +817,54 @@ class AgentRunner:
             findings = list(unique_findings.values())
             if ctx.task_type == "CONTRACT_REVIEW":
                 if limited:
-                    return self._fallback_review_artifact(
-                        ctx, contract_case, findings, citations, scoring or {},
-                    )
+                    reflection_domains = (reflection or {}).get("domains") or {}
+                    missing_domains = [
+                        str(info.get("domainName") or key)
+                        for key, info in reflection_domains.items()
+                        if isinstance(info, dict) and not bool(info.get("covered"))
+                    ] if isinstance(reflection_domains, dict) else []
+                    limited_case = {
+                        **contract_case,
+                        "analysisMode": "LIMITED",
+                        "coverageLimitation": str((reflection or {}).get("summary") or "部分风险领域证据不足"),
+                        "missingDomains": missing_domains,
+                    }
+                    try:
+                        artifact = self.llm.contract_review(
+                            limited_case, findings, citations, scoring or {},
+                            run_id=ctx.run_id,
+                        )
+                        artifact["analysisMode"] = "LIMITED"
+                        artifact.setdefault("coverageLimitation", limited_case["coverageLimitation"])
+                        if not str(artifact.get("title") or "").startswith("[范围受限]"):
+                            artifact["title"] = "[范围受限] " + str(
+                                artifact.get("title") or contract_case.get("title") or "合同审查报告"
+                            )
+                        return artifact
+                    except Exception as limited_exc:
+                        self._check_connection_error(limited_exc)
+                        logger.warning("Limited review LLM failed, using deterministic artifact: %s", limited_exc)
+                        return self._fallback_review_artifact(
+                            ctx, contract_case, findings, citations, scoring or {},
+                        )
                 # ── Pre-review metadata extraction (LLM + rules) ──
                 meta = await self._ensure_contract_metadata(ctx, contract_case)
                 if meta:
                     contract_case.update(meta)
-                return self.llm.contract_review(
-                    contract_case, findings, citations, scoring or {},
-                    run_id=ctx.run_id,
-                )
+                try:
+                    return self.llm.contract_review(
+                        contract_case, findings, citations, scoring or {},
+                        run_id=ctx.run_id,
+                    )
+                except Exception as full_exc:
+                    self._check_connection_error(full_exc)
+                    logger.warning(
+                        "Full review LLM failed, using deterministic artifact: %s",
+                        full_exc,
+                    )
+                    return self._fallback_review_artifact(
+                        ctx, contract_case, findings, citations, scoring or {},
+                    )
             if ctx.task_type == "CONTRACT_INTAKE":
                 return self.llm.contract_intake(
                     contract_case, run_id=ctx.run_id,

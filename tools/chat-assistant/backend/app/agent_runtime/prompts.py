@@ -216,8 +216,11 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         '     "title":"string","description":"80-160字","priority":"HIGH|MEDIUM|LOW"}\n'
         '  ]\n}\n\n'
         "Rules:\n"
-        "1. Every finding must cite BOTH a contract clause AND a policy source via\n"
-        "   contractCitationIds and policyCitationIds (dual citation). Use prefixed IDs:\n"
+        "1. In FULL mode every finding must cite BOTH a contract clause AND a policy source via\n"
+        "   contractCitationIds and policyCitationIds. In LIMITED mode, a contract-grounded\n"
+        "   finding may be CONTRACT_ONLY with LOW confidence and mandatory legal review; never\n"
+        "   suppress a material, directly quoted contract risk only because policy evidence is\n"
+        "   unavailable. Use prefixed IDs:\n"
         "   CONTRACT_CLAUSE:NNN, KB_CHUNK:NNN, STANDARD_CLAUSE:NNN.\n"
         "2. The deterministic scoring engine supplies risk dimensions and scores — treat them\n"
         "   as fixed facts. Do not modify riskScore, riskStatus, scoringVersion, evidenceHash,\n"

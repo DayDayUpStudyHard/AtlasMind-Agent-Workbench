@@ -74,7 +74,7 @@ public class WorkspaceStatusController {
         String visFilter = accessPolicy.buildVisibilityFilter(visParams);
         List<Object> allParams = new ArrayList<>();
 
-        StringBuilder where = new StringBuilder("WHERE ");
+        StringBuilder where = new StringBuilder("WHERE COALESCE(r.trigger_type,'') <> 'EVALUATION' AND ");
         if (visFilter.isEmpty()) {
             // Admin: all runs visible
             where.append("1=1");

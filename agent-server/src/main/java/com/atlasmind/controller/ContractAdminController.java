@@ -39,6 +39,7 @@ public class ContractAdminController {
 
         String baseWhere = """
                 WHERE c.deleted=?
+                  AND COALESCE(c.is_evaluation,0)=0
                   AND (? IS NULL OR c.status=?)
                   AND (? IS NULL OR c.case_key LIKE CONCAT('%', ?, '%')
                        OR c.title LIKE CONCAT('%', ?, '%')
@@ -87,7 +88,8 @@ public class ContractAdminController {
     @Transactional
     public Result<Map<String, Object>> softDeleteCase(@PathVariable Long id) {
         Map<String, Object> impact = caseDeleteImpact(id);
-        int updated = jdbc.update("UPDATE contract_case SET deleted=1 WHERE id=? AND deleted=0", id);
+        int updated = jdbc.update(
+                "UPDATE contract_case SET deleted=1 WHERE id=? AND deleted=0 AND COALESCE(is_evaluation,0)=0", id);
         if (updated == 0) throw new IllegalArgumentException("合同案件不存在或已删除");
         impact.put("deleted", true);
         return Result.ok(impact);
@@ -96,7 +98,8 @@ public class ContractAdminController {
     @OperationLog(value = "恢复合同案件", type = "UPDATE")
     @PostMapping("/cases/{id}/restore")
     public Result<Map<String, Object>> restoreCase(@PathVariable Long id) {
-        int updated = jdbc.update("UPDATE contract_case SET deleted=0 WHERE id=? AND deleted=1", id);
+        int updated = jdbc.update(
+                "UPDATE contract_case SET deleted=0 WHERE id=? AND deleted=1 AND COALESCE(is_evaluation,0)=0", id);
         if (updated == 0) throw new IllegalArgumentException("合同案件不存在或未删除");
         return Result.ok(Map.of("restored", true, "caseId", id));
     }
@@ -105,7 +108,7 @@ public class ContractAdminController {
         List<Map<String, Object>> cases = jdbc.queryForList("""
                 SELECT id AS caseId, case_key AS caseKey, title, status, deleted
                 FROM contract_case
-                WHERE id=?
+                WHERE id=? AND COALESCE(is_evaluation,0)=0
                 """, id);
         if (cases.isEmpty()) {
             throw new IllegalArgumentException("合同案件不存在");
@@ -252,7 +255,7 @@ public class ContractAdminController {
             + " d.page_count AS pageCount, d.content_text IS NOT NULL AS hasInlineText,"
             + " CHAR_LENGTH(d.content_text) AS textLength, d.create_time AS createTime"
             + " FROM contract_document d JOIN contract_case c ON c.id=d.case_id"
-            + " WHERE c.deleted=0 ORDER BY d.create_time DESC LIMIT 100"));
+            + " WHERE c.deleted=0 AND COALESCE(c.is_evaluation,0)=0 ORDER BY d.create_time DESC LIMIT 100"));
     }
 
     /** File access audit log for a specific document. */
@@ -261,7 +264,10 @@ public class ContractAdminController {
         return Result.ok(jdbc.queryForList(
             "SELECT l.id, l.user_id AS userId, u.username, u.nickname,"
             + " l.access_type AS accessType, l.ip, l.create_time AS createTime"
-            + " FROM file_access_log l LEFT JOIN t_user u ON u.id=l.user_id"
+            + " FROM file_access_log l"
+            + " JOIN contract_document d ON d.id=l.document_id"
+            + " JOIN contract_case c ON c.id=d.case_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0"
+            + " LEFT JOIN t_user u ON u.id=l.user_id"
             + " WHERE l.document_id=? ORDER BY l.create_time DESC LIMIT 100", id));
     }
 
@@ -274,7 +280,9 @@ public class ContractAdminController {
             "SELECT l.id, l.case_id AS caseId, l.document_id AS documentId,"
             + " l.user_id AS userId, u.username, u.nickname,"
             + " l.access_type AS accessType, l.ip, l.create_time AS createTime"
-            + " FROM file_access_log l LEFT JOIN t_user u ON u.id=l.user_id"
+            + " FROM file_access_log l"
+            + " JOIN contract_case c ON c.id=l.case_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0"
+            + " LEFT JOIN t_user u ON u.id=l.user_id"
             + " ORDER BY l.create_time DESC LIMIT ?", safeLimit));
     }
 
@@ -282,6 +290,7 @@ public class ContractAdminController {
     @OperationLog(value = "取消文档解析", type = "UPDATE")
     @PutMapping("/documents/{id}/cancel")
     public Result<Map<String, Object>> cancelDocument(@PathVariable Long id) {
+        assertWorkspaceDocument(id);
         int updated = jdbc.update(
             "UPDATE contract_document SET parse_status='FAILED', parse_error='用户手动停止' WHERE id=? AND parse_status IN ('PENDING','PARSING')", id);
         return Result.ok(Map.of("cancelled", updated > 0));
@@ -293,7 +302,12 @@ public class ContractAdminController {
     @Transactional
     public Result<Map<String, Object>> deleteDocument(@PathVariable Long id) {
         List<Map<String, Object>> documents = jdbc.queryForList(
-            "SELECT id, case_id AS caseId FROM contract_document WHERE id=?", id);
+            """
+            SELECT d.id, d.case_id AS caseId
+            FROM contract_document d
+            JOIN contract_case c ON c.id=d.case_id
+            WHERE d.id=? AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
+            """, id);
         if (documents.isEmpty()) {
             throw new IllegalArgumentException("合同文件不存在");
         }
@@ -310,6 +324,7 @@ public class ContractAdminController {
     @PostMapping("/documents/{id}/retry-parse")
     @Transactional
     public Result<Map<String, Object>> retryDocumentParse(@PathVariable Long id) {
+        assertWorkspaceDocument(id);
         jdbc.update("UPDATE contract_document SET parse_status='PENDING', parse_error=NULL WHERE id=?", id);
         jdbc.update("UPDATE contract_intake SET status='PENDING', error_message=NULL WHERE case_id=(SELECT case_id FROM contract_document WHERE id=?) AND status='FAILED'", id);
         // Dispatch to Python worker
@@ -333,7 +348,7 @@ public class ContractAdminController {
                    rp.status, rp.create_time AS createTime
             FROM agent_report rp
             JOIN agent_run r ON r.id=rp.run_id AND r.subject_type='CONTRACT_CASE'
-            LEFT JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0
+            JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
             ORDER BY rp.id DESC LIMIT 100
             """));
     }
@@ -344,6 +359,7 @@ public class ContractAdminController {
         int deleted = jdbc.update("""
             DELETE rp FROM agent_report rp
             JOIN agent_run r ON r.id=rp.run_id AND r.subject_type='CONTRACT_CASE'
+            JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
             WHERE rp.id=?
             """, id);
         if (deleted == 0) throw new IllegalArgumentException("合同报告不存在");
@@ -362,7 +378,7 @@ public class ContractAdminController {
                    a.create_time AS createTime
             FROM agent_action a
             JOIN agent_run r ON r.id=a.run_id AND r.subject_type='CONTRACT_CASE'
-            LEFT JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0
+            JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
             WHERE (? IS NULL OR a.status=?)
             ORDER BY a.id DESC LIMIT 100
             """, statusFilter, statusFilter));
@@ -375,6 +391,7 @@ public class ContractAdminController {
         List<Map<String, Object>> actions = jdbc.queryForList("""
             SELECT a.id, a.status FROM agent_action a
             JOIN agent_run r ON r.id=a.run_id AND r.subject_type='CONTRACT_CASE'
+            JOIN contract_case c ON c.id=r.subject_id AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
             WHERE a.id=? FOR UPDATE
             """, id);
         if (actions.isEmpty()) throw new IllegalArgumentException("合同动作不存在");
@@ -393,7 +410,14 @@ public class ContractAdminController {
     @PutMapping("/runs/{id}/cancel")
     public Result<Map<String, Object>> cancelRun(@PathVariable Long id) {
         int updated = jdbc.update(
-            "UPDATE agent_run SET status='CANCELLED', progress=0, current_step='管理员手动停止' WHERE id=? AND subject_type='CONTRACT_CASE' AND status IN ('CREATED','CONTEXT_BUILDING','PLANNING','ANALYZING','VERIFYING')", id);
+            """
+            UPDATE agent_run r
+            JOIN contract_case c ON c.id=r.subject_id
+            SET r.status='CANCELLED', r.progress=0, r.current_step='管理员手动停止'
+            WHERE r.id=? AND r.subject_type='CONTRACT_CASE'
+              AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
+              AND r.status IN ('CREATED','CONTEXT_BUILDING','PLANNING','ANALYZING','VERIFYING')
+            """, id);
         return Result.ok(Map.of("cancelled", updated > 0, "runId", id));
     }
 
@@ -402,6 +426,7 @@ public class ContractAdminController {
     /** List members of a contract case (admin bypass). */
     @GetMapping("/cases/{id}/members")
     public Result<List<Map<String, Object>>> caseMembers(@PathVariable Long id) {
+        assertWorkspaceCase(id);
         return Result.ok(memberService.listMembers(id));
     }
 
@@ -410,6 +435,7 @@ public class ContractAdminController {
     @PostMapping("/cases/{id}/members/force-add")
     public Result<Map<String, Object>> forceAddMember(@PathVariable Long id,
                                                       @RequestBody Map<String, Object> body) {
+        assertWorkspaceCase(id);
         Long userId = toLong(body.get("userId"));
         String role = String.valueOf(body.getOrDefault("role", "VIEWER"));
         memberService.addOwner(id, userId); // addOwner 幂等，非 OWNER 后面会覆盖
@@ -424,6 +450,7 @@ public class ContractAdminController {
     @PostMapping("/cases/{id}/owner/force-set")
     public Result<Map<String, Object>> forceSetOwner(@PathVariable Long id,
                                                      @RequestBody Map<String, Object> body) {
+        assertWorkspaceCase(id);
         Long userId = toLong(body.get("userId"));
         if (userId == null) throw new IllegalArgumentException("userId 不能为空");
         memberService.forceSetOwner(id, userId);
@@ -435,6 +462,7 @@ public class ContractAdminController {
     @DeleteMapping("/cases/{caseId}/members/{userId}")
     public Result<Map<String, Object>> forceRemoveMember(@PathVariable Long caseId,
                                                          @PathVariable Long userId) {
+        assertWorkspaceCase(caseId);
         // Admin bypass: directly soft-remove without ownership check
         int updated = jdbc.update(
             "UPDATE contract_member SET status='REMOVED', removed_at=NOW(), update_time=NOW() WHERE case_id=? AND user_id=? AND status='ACTIVE'",
@@ -448,7 +476,14 @@ public class ContractAdminController {
     @Transactional
     public Result<Map<String, Object>> deleteRun(@PathVariable Long id) {
         List<Map<String, Object>> runs = jdbc.queryForList(
-            "SELECT id FROM agent_run WHERE id=? AND subject_type='CONTRACT_CASE' FOR UPDATE", id);
+            """
+            SELECT r.id
+            FROM agent_run r
+            JOIN contract_case c ON c.id=r.subject_id
+            WHERE r.id=? AND r.subject_type='CONTRACT_CASE'
+              AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
+            FOR UPDATE
+            """, id);
         if (runs.isEmpty()) throw new IllegalArgumentException("合同 Agent Run 不存在");
         // Cancel first if still running
         jdbc.update("UPDATE agent_run SET status='CANCELLED' WHERE id=? AND status IN ('CREATED','CONTEXT_BUILDING','PLANNING','ANALYZING','VERIFYING')", id);
@@ -466,5 +501,26 @@ public class ContractAdminController {
             try { return Long.parseLong(s); } catch (NumberFormatException e) { return null; }
         }
         return null;
+    }
+
+    private void assertWorkspaceCase(Long caseId) {
+        Integer count = jdbc.queryForObject(
+            "SELECT COUNT(*) FROM contract_case WHERE id=? AND COALESCE(is_evaluation,0)=0",
+            Integer.class, caseId);
+        if (count == null || count == 0) {
+            throw new IllegalArgumentException("合同案件不存在");
+        }
+    }
+
+    private void assertWorkspaceDocument(Long documentId) {
+        Integer count = jdbc.queryForObject("""
+            SELECT COUNT(*)
+            FROM contract_document d
+            JOIN contract_case c ON c.id=d.case_id
+            WHERE d.id=? AND c.deleted=0 AND COALESCE(c.is_evaluation,0)=0
+            """, Integer.class, documentId);
+        if (count == null || count == 0) {
+            throw new IllegalArgumentException("合同文件不存在");
+        }
     }
 }

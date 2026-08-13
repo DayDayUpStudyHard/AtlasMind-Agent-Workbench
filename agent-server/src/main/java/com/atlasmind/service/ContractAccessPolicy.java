@@ -44,6 +44,7 @@ public class ContractAccessPolicy {
      * @throws RuntimeException 如果不可访问（始终返回 404 语义）
      */
     public void checkAccess(Long caseId) {
+        assertWorkspaceCase(caseId);
         long userId = StpUtil.getLoginIdAsLong();
         if (isAdmin(userId)) return;
 
@@ -56,6 +57,7 @@ public class ContractAccessPolicy {
 
     /** 检查写权限 — ADMIN / OWNER / EDITOR 可通过。 */
     public void checkWriteAccess(Long caseId) {
+        assertWorkspaceCase(caseId);
         long userId = StpUtil.getLoginIdAsLong();
         if (isAdmin(userId)) return;
         if (memberService != null && memberService.canWrite(caseId, userId)) return;
@@ -64,6 +66,7 @@ public class ContractAccessPolicy {
 
     /** 检查审核权限 — ADMIN / OWNER / EDITOR / REVIEWER 可通过。 */
     public void checkReviewAccess(Long caseId) {
+        assertWorkspaceCase(caseId);
         long userId = StpUtil.getLoginIdAsLong();
         if (isAdmin(userId)) return;
         if (memberService != null && memberService.canReview(caseId, userId)) return;
@@ -72,6 +75,7 @@ public class ContractAccessPolicy {
 
     /** 检查成员管理权限 — 仅 ADMIN / OWNER 可通过。 */
     public void checkManageMembersAccess(Long caseId) {
+        assertWorkspaceCase(caseId);
         long userId = StpUtil.getLoginIdAsLong();
         if (isAdmin(userId)) return;
         if (memberService != null && memberService.canManageMembers(caseId, userId)) return;
@@ -80,7 +84,8 @@ public class ContractAccessPolicy {
 
     private void checkVisibility(Long caseId, long userId) {
         var contracts = jdbc.queryForList(
-            "SELECT id, visibility, department_id FROM contract_case WHERE id=? AND deleted=0",
+            "SELECT id, visibility, department_id FROM contract_case "
+                    + "WHERE id=? AND deleted=0 AND COALESCE(is_evaluation,0)=0",
             caseId);
         if (contracts.isEmpty()) throw notFound("合同不存在");
 
@@ -112,13 +117,14 @@ public class ContractAccessPolicy {
      */
     public String buildVisibilityFilter(List<Object> params) {
         long userId = StpUtil.getLoginIdAsLong();
-        if (isAdmin(userId)) return "";
+        if (isAdmin(userId)) return " AND COALESCE(c.is_evaluation,0)=0 ";
 
         Long userDeptId = getCurrentUserDepartmentId(userId);
         params.add(userDeptId);
         params.add(userDeptId);
         params.add(userId);
         return """
+            AND COALESCE(c.is_evaluation,0)=0
             AND (
               c.visibility IN ('ALL','LEGACY_REVIEW')
               OR (c.visibility = 'DEPARTMENT' AND c.department_id = ?)
@@ -134,13 +140,14 @@ public class ContractAccessPolicy {
     /** Build visibility filter for queries where the table alias is absent (direct FROM contract_case). */
     public String buildVisibilityFilterNoAlias(List<Object> params) {
         long userId = StpUtil.getLoginIdAsLong();
-        if (isAdmin(userId)) return "";
+        if (isAdmin(userId)) return " AND COALESCE(is_evaluation,0)=0 ";
 
         Long userDeptId = getCurrentUserDepartmentId(userId);
         params.add(userDeptId);
         params.add(userDeptId);
         params.add(userId);
         return """
+            AND COALESCE(is_evaluation,0)=0
             AND (
               visibility IN ('ALL','LEGACY_REVIEW')
               OR (visibility = 'DEPARTMENT' AND department_id = ?)
@@ -156,6 +163,15 @@ public class ContractAccessPolicy {
     public boolean isAdmin(long userId) {
         User user = userService.getById(userId);
         return user != null && "ADMIN".equals(user.getRole());
+    }
+
+    private void assertWorkspaceCase(Long caseId) {
+        if (caseId == null) throw notFound("合同不存在");
+        Integer count = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM contract_case "
+                        + "WHERE id=? AND deleted=0 AND COALESCE(is_evaluation,0)=0",
+                Integer.class, caseId);
+        if (count == null || count == 0) throw notFound("合同不存在");
     }
 
     private Long getCurrentUserDepartmentId(long userId) {

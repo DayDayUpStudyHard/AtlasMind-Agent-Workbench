@@ -188,7 +188,10 @@ class MySqlCheckpointSaver:
                     if not row:
                         return None
 
-                    channel_values = self._serde.loads(row["state_json"] or "{}")
+                    stored_state = self._serde.loads(row["state_json"] or "{}")
+                    checkpoint_meta = stored_state.pop("__checkpoint_meta__", {}) \
+                        if isinstance(stored_state, dict) else {}
+                    channel_values = stored_state if isinstance(stored_state, dict) else {}
 
                     # Build Checkpoint
                     checkpoint: dict = {
@@ -196,9 +199,9 @@ class MySqlCheckpointSaver:
                         "id": row["checkpoint_id"],
                         "ts": str(row["create_time"]),
                         "channel_values": channel_values,
-                        "channel_versions": {},
-                        "versions_seen": {},
-                        "updated_channels": None,
+                        "channel_versions": checkpoint_meta.get("channel_versions") or {},
+                        "versions_seen": checkpoint_meta.get("versions_seen") or {},
+                        "updated_channels": checkpoint_meta.get("updated_channels"),
                     }
 
                     # Build CheckpointMetadata
@@ -228,7 +231,15 @@ class MySqlCheckpointSaver:
         thread_id = _thread_id(config)
         checkpoint_id = str(checkpoint.get("id") or _gen_ckpt_id())
         channel_values = checkpoint.get("channel_values") or {}
-        state_json = self._serde.dumps(channel_values)
+        stored_state = {
+            **channel_values,
+            "__checkpoint_meta__": {
+                "channel_versions": checkpoint.get("channel_versions") or new_versions or {},
+                "versions_seen": checkpoint.get("versions_seen") or {},
+                "updated_channels": checkpoint.get("updated_channels"),
+            },
+        }
+        state_json = self._serde.dumps(stored_state)
         state_hash = hashlib.sha256(state_json.encode()).hexdigest()
         state_revision = int(metadata.get("step", 0))
         node_name = str(channel_values.get("current_node") or metadata.get("source") or "checkpoint")[:128]
@@ -457,13 +468,17 @@ class MySqlCheckpointSaver:
                         )
                     rows = cur.fetchall()
                     for row in rows:
-                        channel_values = self._serde.loads(row["state_json"] or "{}")
+                        stored_state = self._serde.loads(row["state_json"] or "{}")
+                        checkpoint_meta = stored_state.pop("__checkpoint_meta__", {}) \
+                            if isinstance(stored_state, dict) else {}
+                        channel_values = stored_state if isinstance(stored_state, dict) else {}
                         checkpoint: dict = {
                             "v": 1, "id": row["checkpoint_id"],
                             "ts": str(row["create_time"]),
                             "channel_values": channel_values,
-                            "channel_versions": {}, "versions_seen": {},
-                            "updated_channels": None,
+                            "channel_versions": checkpoint_meta.get("channel_versions") or {},
+                            "versions_seen": checkpoint_meta.get("versions_seen") or {},
+                            "updated_channels": checkpoint_meta.get("updated_channels"),
                         }
                         metadata: dict = {
                             "source": "input", "step": row["state_revision"],
@@ -486,11 +501,22 @@ class MySqlCheckpointSaver:
         """Store pending writes for crash recovery. MVP: no-op (writes in checkpoint)."""
         pass
 
-    def get_next_version(self, current: dict | None, channel: str) -> int:
-        """Return the next version number for a channel. MVP: monotonic counter."""
+    def get_next_version(self, current: Any | None, channel: str | None = None) -> Any:
+        """Return a strictly increasing version for one LangGraph channel."""
         if current is None:
             return 1
-        return int(current.get(channel, 0)) + 1 if isinstance(current, dict) else 1
+        if isinstance(current, bool):
+            return int(current) + 1
+        if isinstance(current, int):
+            return current + 1
+        if isinstance(current, float):
+            return current + 1.0
+        if isinstance(current, str):
+            try:
+                return str(int(current) + 1)
+            except ValueError:
+                return f"{current}.{time.monotonic_ns()}"
+        raise TypeError(f"Unsupported checkpoint version type: {type(current).__name__}")
 
     # Async wrappers — LangGraph 0.4.x calls async methods internally
     async def aget_tuple(self, config: dict) -> Any | None:

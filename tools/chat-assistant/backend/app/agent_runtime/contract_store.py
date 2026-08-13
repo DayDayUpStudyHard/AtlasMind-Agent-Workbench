@@ -777,11 +777,19 @@ class ContractStore:
                     cur.execute(sql, params)
                     rows = [_normalize_value(r) for r in cur.fetchall()]
             if query:
-                q = query.lower()
-                rows = [
-                    r for r in rows
-                    if q in (str(r.get("title") or "") + " " + str(r.get("content") or "")).lower()
-                ]
+                # The domain query is a joined search phrase; requiring the
+                # whole phrase to appear verbatim never matches. Score rows by
+                # CJK/alphanumeric bigram overlap with the query instead.
+                q_tokens = re.findall(r"[0-9a-z一-鿿]{2,}", query.lower())
+                q_grams = {
+                    token[index:index + 2]
+                    for token in q_tokens
+                    for index in range(len(token) - 1)
+                }
+                def _overlaps(row: dict) -> bool:
+                    text = (str(row.get("title") or "") + " " + str(row.get("content") or "")).lower()
+                    return any(gram in text for gram in q_grams)
+                rows = [row for row in rows if _overlaps(row)]
             result = []
             for row in rows[:standard_recall]:
                 result.append({
@@ -1095,6 +1103,10 @@ class ContractStore:
                         "ruleId": rule.get("id"),
                         "ruleKey": rule.get("ruleKey"),
                         "ruleTitle": rule.get("title"),
+                        # Uniform structure with LLM findings so the eval scorer,
+                        # dedup, and downstream consumers see the same keys.
+                        "title": rule.get("title"),
+                        "riskDimension": rule.get("clauseType"),
                         "severity": rule.get("severity"),
                         "isVeto": rule.get("isVeto"),
                         "clauseType": rule.get("clauseType"),

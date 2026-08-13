@@ -539,6 +539,12 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     ADD COLUMN passed_count INT DEFAULT 0
                     """);
         } catch (Exception ignored) { }
+        addColumnIfMissing("agent_eval_run", "current_case_index", "INT DEFAULT 0");
+        addColumnIfMissing("agent_eval_run", "current_case_key", "VARCHAR(128) DEFAULT ''");
+        addColumnIfMissing("agent_eval_run", "current_step", "VARCHAR(256) DEFAULT ''");
+        addColumnIfMissing("agent_eval_run", "queue_position", "INT DEFAULT 0");
+        addColumnIfMissing("agent_eval_run", "environment_status", "VARCHAR(32) DEFAULT ''");
+        addColumnIfMissing("agent_eval_run", "environment_snapshot_json", "LONGTEXT");
         try {
             jdbcTemplate.execute("""
                     ALTER TABLE agent_eval_result
@@ -555,6 +561,43 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
             jdbcTemplate.execute("""
                     ALTER TABLE agent_eval_result
                     ADD COLUMN schema_valid_rate DOUBLE DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        // ── Eval case enrichment columns (safe ALTER) ──────────────────
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN scenario VARCHAR(64) DEFAULT ''
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN industry VARCHAR(64) DEFAULT ''
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN difficulty VARCHAR(32) DEFAULT ''
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN noise_level VARCHAR(32) DEFAULT ''
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN must_have_contract_citation TINYINT(1) DEFAULT 0
+                    """);
+        } catch (Exception ignored) { }
+        try {
+            jdbcTemplate.execute("""
+                    ALTER TABLE agent_eval_case
+                    ADD COLUMN must_have_policy_citation TINYINT(1) DEFAULT 0
                     """);
         } catch (Exception ignored) { }
         jdbcTemplate.update("""
@@ -700,6 +743,14 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 "BIGINT DEFAULT NULL COMMENT '维护人'");
         addColumnIfMissing("contract_case", "department_id",
                 "BIGINT DEFAULT NULL COMMENT '创建时的部门快照（不可变）'");
+        // Internal evaluation fixtures are never part of the normal contract workspace.
+        addColumnIfMissing("contract_case", "is_evaluation",
+                "TINYINT NOT NULL DEFAULT 0 COMMENT 'Internal evaluation fixture'");
+        jdbcTemplate.update("""
+                UPDATE contract_case
+                SET is_evaluation=1
+                WHERE case_key LIKE 'EVAL-%' AND COALESCE(is_evaluation,0)=0
+                """);
         // contract_department_visibility
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_department_visibility (

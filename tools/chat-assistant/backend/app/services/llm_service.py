@@ -513,6 +513,9 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max(8192, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=3, backoff_base=2.0,
@@ -569,6 +572,9 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max(8192, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=3, backoff_base=2.0,
@@ -645,6 +651,14 @@ class LLMService:
         task = payload.get("task") or {}
         run_id = int(task.get("runId", 0))
         template, temperature = self._prompt("reflection", run_id)
+        focus = payload.get("evalFocusDimensions") or []
+        if focus:
+            template = (
+                "评测模式：本用例的审查重点仅为以下风险维度："
+                + "、".join(str(dim) for dim in focus)
+                + "。adequate=true 只需这些维度的证据充分；其他维度的证据缺口"
+                "不得作为降级（adequate=false）的依据。\n\n"
+            ) + template
         return self._structured_completion(template, payload, temperature=temperature)
 
     # ── Contract task methods (Phase 5) ────────────────────────────
@@ -654,6 +668,25 @@ class LLMService:
                         run_id: int = 0) -> dict:
         """Generate structured contract review report with findings and action proposals."""
         template, temperature = self._prompt("contract_review", run_id)
+        severity_order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+
+        def _is_rule_finding(item: dict) -> bool:
+            return bool(item.get("ruleKey")) or str(item.get("evidenceBasis") or "") == "CLAUSE_INVENTORY"
+
+        # Keep rule-engine findings apart from LLM findings: missing-clause
+        # inventory noise must not crowd out explicit unfair-clause risks.
+        rule_findings = sorted(
+            (item for item in findings if _is_rule_finding(item)),
+            key=lambda item: severity_order.get(str(item.get("severity") or "").upper(), 3),
+        )
+        llm_findings = [item for item in findings if not _is_rule_finding(item)]
+        if rule_findings:
+            template = (
+                "审查顺序要求：1) 优先识别并报告合同中实际存在的显性异常或"
+                "不公平条款；2) 规则引擎缺失条款清单（ruleEngineFindings）"
+                "仅作补充参考，最多选取其中最严重的若干条，且不得挤压显性"
+                "风险发现；不得将\"未找到X类型条款\"的清单项逐一平铺为主要发现。\n\n"
+            ) + template
         payload = {
             "case": {
                 "caseKey": case.get("caseKey", ""),
@@ -662,9 +695,13 @@ class LLMService:
                 "amount": case.get("amount"),
                 "contractType": case.get("contractType", ""),
             },
-            "findings": findings[:15],
+            "findings": llm_findings + rule_findings[:8],
+            "ruleEngineFindings": rule_findings[:8],
             "citations": citations[:8],
             "deterministicScoring": scoring,
+            "analysisMode": case.get("analysisMode") or scoring.get("analysisMode") or "FULL",
+            "coverageLimitation": case.get("coverageLimitation") or "",
+            "missingDomains": case.get("missingDomains") or [],
         }
         response = self._call_llm_with_retry(
             lambda: self.analysis_client.chat.completions.create(
@@ -676,12 +713,15 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max(8192, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=3, backoff_base=2.0,
         )
-        content = response.choices[0].message.content if response.choices else ""
-        return self._parse_json_object(content or "")
+        # Reasoning models may leave visible content empty; recover from reasoning_content.
+        return self._parse_structured_response(response)
 
     def plan_contract_risk_domains(self, case: dict, inventory: dict,
                                    baseline_domains: list[dict],
@@ -747,6 +787,9 @@ class LLMService:
                 temperature=temperature,
                 max_tokens=max(4096, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=2, backoff_base=2.0,
@@ -811,6 +854,9 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
                 temperature=0.0,
                 max_tokens=max(4096, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=2, backoff_base=1.0,
@@ -876,6 +922,8 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                 }
                 if structured:
                     kwargs["response_format"] = {"type": "json_object"}
+                    if self._uses_deepseek_reasoning_model():
+                        kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
                 response = self._call_llm_with_retry(
                     lambda kwargs=kwargs: self.analysis_client.chat.completions.create(**kwargs),
                     max_retries=1,
@@ -1228,6 +1276,9 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                 temperature=temperature,
                 max_tokens=max(4096, settings.chat_max_tokens),
                 response_format={"type": "json_object"},
+                # DeepSeek v4: thinking must ride inside extra_body, not as a
+                # top-level kwarg — the SDK rejects unknown top-level params.
+                extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
             max_retries=2, backoff_base=2.0,
@@ -1294,6 +1345,16 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
         base_url = str(settings.llm_base_url or "").lower()
         model = str(self.model or "").lower()
         return "deepseek.com" in base_url and model.startswith("deepseek-")
+
+    def _reasoning_guard(self) -> dict:
+        """DeepSeek v4 models burn the completion budget on reasoning_content
+        before emitting the required JSON object; disable thinking for
+        response_format=json_object calls (see _structured_completion)."""
+        return (
+            {"thinking": {"type": "disabled"}}
+            if self._uses_deepseek_reasoning_model()
+            else {}
+        )
 
     @staticmethod
     def _repair_json(text: str) -> str:

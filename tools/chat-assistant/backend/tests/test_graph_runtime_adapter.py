@@ -4,6 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent_runtime.api_models import AgentTaskContext
 from app.agent_runtime.runtime import GraphAdapter, ResumeCommand, ResumeAction
+from app.agent_runtime.graph.checkpoint import MySqlCheckpointSaver
 
 
 class _CompletedGraph:
@@ -24,6 +25,15 @@ class _RecordingRunStore:
 
     async def set_runtime_metadata(self, run_id, **kwargs):
         self.runtime_metadata.append((run_id, kwargs))
+
+
+def test_mysql_checkpoint_versions_are_strictly_monotonic():
+    saver = MySqlCheckpointSaver()
+
+    assert saver.get_next_version(None, None) == 1
+    assert saver.get_next_version(1, None) == 2
+    assert saver.get_next_version(7, None) == 8
+    assert saver.get_next_version(1.5, None) > 1.5
 
 
 def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):

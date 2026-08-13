@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Awaitable
@@ -16,8 +17,9 @@ def _run_async(awaitable: Awaitable[Any]) -> Any:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(awaitable)
+    context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(lambda: asyncio.run(awaitable)).result()
+        return executor.submit(context.run, asyncio.run, awaitable).result()
 
 
 def _normalize_evidence(item: dict[str, Any]) -> dict[str, Any]:
@@ -167,6 +169,10 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 1 for item in evidence if item.get("crossValidated")
             ),
             "evidenceCount": len(evidence),
+            "rerankMethods": sorted({
+                str(item.get("rerankerMethod"))
+                for item in evidence if item.get("rerankerMethod")
+            }),
             "stats": stats,
         }
         observations.append({
@@ -575,6 +581,21 @@ def _fallback_rule_findings(task: dict[str, Any], evidence: list[dict[str, Any]]
         }
         normalized = _normalize_finding(raw, task, evidence, index)
         if normalized:
+            if not normalized.get("policyCitation") and rule_key:
+                # The fired rule itself is the policy basis (mirrors the legacy
+                # pipeline, where rule findings cite the rule as 制度依据).
+                normalized["policyCitation"] = {
+                    "ruleKey": rule_key,
+                    "ruleTitle": rule_title,
+                    "snippet": str(rule.get("description") or _rule_requirement_text(rule))[:220],
+                }
+                normalized["policyCitationIds"] = [f"RULE:{rule_key}"]
+                if normalized.get("contractCitation"):
+                    normalized["evidenceStatus"] = "DUAL_CITED"
+                    normalized["sourceBasis"] = "CONTRACT_AND_POLICY"
+                else:
+                    normalized["evidenceStatus"] = "POLICY_ONLY"
+                    normalized["sourceBasis"] = "POLICY_ONLY"
             result.append(normalized)
     return result
 

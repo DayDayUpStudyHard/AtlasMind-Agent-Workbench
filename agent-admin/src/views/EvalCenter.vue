@@ -19,9 +19,9 @@
           <strong>{{ r.datasetName }} v{{ r.datasetVersion }}</strong>
           <div class="trend-metrics">
             <small>目标 {{ r.datasetTypeLabel || formatDatasetType(r.contractType) }}</small>
-            <small>召回 {{ (r.highRiskRecall * 100).toFixed(0) }}%</small>
-            <small>引用 {{ (r.dualCitationRate * 100).toFixed(0) }}%</small>
-            <small>误报 {{ (r.falsePositiveRate * 100).toFixed(0) }}%</small>
+            <small>召回 {{ formatMetric(r, 'highRiskRecall') }}</small>
+            <small>引用 {{ formatMetric(r, 'dualCitationRate') }}</small>
+            <small>误报 {{ formatMetric(r, 'falsePositiveRate') }}</small>
           </div>
         </div>
       </div>
@@ -118,10 +118,78 @@
             <el-form-item label="预期引用数">
               <el-input-number v-model="newCase.expectedCitationCount" :min="0" />
             </el-form-item>
+            <el-form-item label="合同场景">
+              <el-select v-model="newCase.scenario" placeholder="选择合同场景" style="width:100%">
+                <el-option label="服务采购" value="SERVICE_PROCUREMENT" />
+                <el-option label="工程建设/EPC" value="ENGINEERING_EPC" />
+                <el-option label="货物采购" value="GOODS_PROCUREMENT" />
+                <el-option label="软件开发/IT" value="SOFTWARE_IT" />
+                <el-option label="保密协议" value="NDA" />
+                <el-option label="运维/维修/物业" value="OPS_MAINTENANCE" />
+                <el-option label="其他混合" value="MIXED" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="行业">
+              <el-input v-model="newCase.industry" placeholder="如：制造业、金融、医疗、互联网..." />
+            </el-form-item>
+            <el-form-item label="难度">
+              <el-select v-model="newCase.difficulty" placeholder="选择难度" style="width:100%">
+                <el-option label="明确条款（Easy）" value="EASY" />
+                <el-option label="模糊条款（Fuzzy）" value="FUZZY" />
+                <el-option label="缺失条款（Missing）" value="MISSING_CLAUSE" />
+                <el-option label="冲突条款（Conflicting）" value="CONFLICTING" />
+                <el-option label="OCR/扫描噪声" value="OCR_NOISE" />
+                <el-option label="金额/日期歧义" value="AMBIGUITY" />
+                <el-option label="跨段落分散" value="CROSS_PARAGRAPH" />
+                <el-option label="仅附件出现" value="ATTACHMENT_ONLY" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="噪声级别">
+              <el-select v-model="newCase.noiseLevel" placeholder="噪声级别" style="width:100%">
+                <el-option label="无" value="NONE" />
+                <el-option label="低" value="LOW" />
+                <el-option label="中" value="MEDIUM" />
+                <el-option label="高" value="HIGH" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="引用要求">
+              <el-checkbox v-model="newCase.mustHaveContractCitation" :true-value="1" :false-value="0">必须引用合同条款</el-checkbox>
+              <el-checkbox v-model="newCase.mustHavePolicyCitation" :true-value="1" :false-value="0" style="margin-left:16px">必须引用政策法规</el-checkbox>
+            </el-form-item>
           </el-form>
           <template #footer>
             <el-button @click="showAddCase = false">取消</el-button>
             <el-button type="primary" @click="addCase">添加</el-button>
+          </template>
+        </el-dialog>
+
+        <!-- Case detail dialog -->
+        <el-dialog v-model="showCaseDetail" title="用例详情" width="720px">
+          <template v-if="viewingCase">
+            <el-descriptions :column="2" border size="small">
+              <el-descriptions-item label="Key" :span="1">{{ viewingCase.caseKey }}</el-descriptions-item>
+              <el-descriptions-item label="ID" :span="1">{{ viewingCase.id }}</el-descriptions-item>
+              <el-descriptions-item label="标题" :span="2">{{ viewingCase.title }}</el-descriptions-item>
+              <el-descriptions-item label="合同类型" :span="1">{{ viewingCase.contractTypeLabel || viewingCase.contractType }}</el-descriptions-item>
+              <el-descriptions-item label="合同场景" :span="1">{{ scenarioLabel(viewingCase.scenario) }}</el-descriptions-item>
+              <el-descriptions-item label="行业" :span="1">{{ viewingCase.industry || '（未设置）' }}</el-descriptions-item>
+              <el-descriptions-item label="难度" :span="1">
+                <el-tag size="small" :type="difficultyTagType(viewingCase.difficulty)">{{ difficultyLabel(viewingCase.difficulty) }}</el-tag>
+              </el-descriptions-item>
+              <el-descriptions-item label="噪声级别" :span="1">{{ noiseLabel(viewingCase.noiseLevel) }}</el-descriptions-item>
+              <el-descriptions-item label="预期引用数" :span="1">{{ viewingCase.expectedCitationCount ?? 0 }}</el-descriptions-item>
+              <el-descriptions-item label="必须引用合同" :span="1">{{ viewingCase.mustHaveContractCitation ? '是' : '否' }}</el-descriptions-item>
+              <el-descriptions-item label="必须引用政策" :span="1">{{ viewingCase.mustHavePolicyCitation ? '是' : '否' }}</el-descriptions-item>
+            </el-descriptions>
+            <h4 style="margin:16px 0 8px;color:#303133">合同全文</h4>
+            <div class="contract-text-viewer" v-html="renderedContractText()"></div>
+            <h4 style="margin:16px 0 8px;color:#303133">预期发现 (expectedFindingsJson)</h4>
+            <pre class="json-block">{{ formatJson(viewingCase.expectedFindingsJson) }}</pre>
+            <h4 style="margin:16px 0 8px;color:#303133">不应发现 (shouldNotFindJson)</h4>
+            <pre class="json-block">{{ formatJson(viewingCase.shouldNotFindJson) }}</pre>
+          </template>
+          <template #footer>
+            <el-button @click="showCaseDetail = false">关闭</el-button>
           </template>
         </el-dialog>
 
@@ -179,16 +247,16 @@
             </template>
             <el-divider content-position="left" style="margin:12px 0">P1 反思与控制</el-divider>
             <el-form-item label="定向检索重试">
-              <el-select v-model="startRunFeatures.targetedRetrievalRetries" style="width: 120px">
+              <el-select v-model="startRunFeatures.targetedRetrievalRetries" style="width: 120px" :disabled="startRunRuntime === 'legacy'">
                 <el-option label="0 (跳过)" :value="0" />
                 <el-option label="1 (默认)" :value="1" />
                 <el-option label="2" :value="2" />
               </el-select>
-              <small style="color:#909399;margin-left:8px">覆盖缺口后二次检索次数</small>
+              <small style="color:#909399;margin-left:8px">{{ startRunRuntime === 'legacy' ? '仅 LangGraph 生效' : '覆盖缺口后二次检索次数' }}</small>
             </el-form-item>
             <el-form-item label="覆盖反思">
-              <el-switch v-model="startRunFeatures.coverageReflection" active-text="启用" inactive-text="跳过" />
-              <small style="color:#909399;margin-left:8px">关闭后直接 CONFIRMED，跳过反思阶段</small>
+              <el-switch v-model="startRunFeatures.coverageReflection" active-text="启用" inactive-text="跳过" :disabled="startRunRuntime === 'legacy'" />
+              <small style="color:#909399;margin-left:8px">{{ startRunRuntime === 'legacy' ? '仅 LangGraph 生效' : '关闭后直接 CONFIRMED，跳过反思阶段' }}</small>
             </el-form-item>
             <el-divider content-position="left" style="margin:12px 0">P2 生成参数</el-divider>
             <el-form-item label="温度">
@@ -198,7 +266,7 @@
           </el-form>
           <template #footer>
             <el-button @click="showStartRun = false">取消</el-button>
-            <el-button type="primary" @click="doStartRun">开始评测</el-button>
+            <el-button type="primary" :loading="startingRun" @click="doStartRun">开始评测</el-button>
           </template>
         </el-dialog>
 
@@ -209,11 +277,22 @@
             <el-button type="primary" size="small" @click="showAddCase = true">+ 添加用例</el-button>
           </div>
           <el-table :data="cases" stripe v-if="cases.length">
-            <el-table-column prop="caseKey" label="Key" width="120" />
-            <el-table-column prop="title" label="标题" min-width="180" />
-            <el-table-column prop="expectedFindingCount" label="预期发现" width="90" align="center" />
-            <el-table-column label="操作" width="80">
+            <el-table-column prop="caseKey" label="Key" width="100" />
+            <el-table-column prop="title" label="标题" min-width="160" />
+            <el-table-column label="场景" width="100" align="center">
               <template #default="{ row }">
+                <el-tag size="small" effect="plain" type="">{{ scenarioLabel(row.scenario) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="难度" width="100" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="difficultyTagType(row.difficulty)">{{ difficultyLabel(row.difficulty) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="expectedFindingCount" label="预期发现" width="80" align="center" />
+            <el-table-column label="操作" width="140" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" @click="viewCaseDetail(row.id)">详情</el-button>
                 <el-button size="small" type="danger" @click="deleteCase(row.id)">删除</el-button>
               </template>
             </el-table-column>
@@ -246,33 +325,195 @@
               <div style="display:flex;flex-wrap:wrap;gap:3px;justify-content:center">
                 <el-tag v-if="parseFeatures(row.featuresJson).model" type="warning" effect="plain" size="small">{{ parseFeatures(row.featuresJson).model }}</el-tag>
                 <el-tag v-if="parseFeatures(row.featuresJson).promptVersion" type="" effect="plain" size="small">{{ parseFeatures(row.featuresJson).promptVersion }}</el-tag>
-                <el-tag v-if="parseFeatures(row.featuresJson).rerank !== false" type="success" effect="plain" size="small">重排序</el-tag>
+                <el-tag v-if="parseFeatures(row.featuresJson).rerank !== false" type="info" effect="plain" size="small">请求重排序</el-tag>
                 <el-tag v-else type="info" effect="plain" size="small">无重排序</el-tag>
-                <el-tag v-if="parseFeatures(row.featuresJson).targetedRetrievalRetries > 0" type="primary" effect="plain" size="small">定向检索×{{ parseFeatures(row.featuresJson).targetedRetrievalRetries }}</el-tag>
-                <el-tag v-if="parseFeatures(row.featuresJson).coverageReflection === false" type="danger" effect="plain" size="small">无覆盖反思</el-tag>
+                <el-tag
+                  v-if="rerankExecution(row).label"
+                  :type="rerankExecution(row).type"
+                  effect="plain"
+                  size="small"
+                >{{ rerankExecution(row).label }}</el-tag>
+                <el-tag v-if="row.runtimeEngine === 'langgraph' && parseFeatures(row.featuresJson).targetedRetrievalRetries > 0" type="primary" effect="plain" size="small">定向检索×{{ parseFeatures(row.featuresJson).targetedRetrievalRetries }}</el-tag>
+                <el-tag v-if="row.runtimeEngine === 'langgraph' && parseFeatures(row.featuresJson).coverageReflection === false" type="danger" effect="plain" size="small">无覆盖反思</el-tag>
                 <el-tag v-if="parseFeatures(row.featuresJson).temperature > 0" type="warning" effect="plain" size="small">T={{ parseFeatures(row.featuresJson).temperature }}</el-tag>
-                <el-tag v-if="!parseFeatures(row.featuresJson).model && !parseFeatures(row.featuresJson).promptVersion && parseFeatures(row.featuresJson).rerank !== false && !(parseFeatures(row.featuresJson).targetedRetrievalRetries > 0) && parseFeatures(row.featuresJson).coverageReflection !== false && !(parseFeatures(row.featuresJson).temperature > 0)" type="info" effect="plain" size="small">默认配置</el-tag>
+                <el-tag v-if="!parseFeatures(row.featuresJson).model && !parseFeatures(row.featuresJson).promptVersion && parseFeatures(row.featuresJson).rerank !== false && !(row.runtimeEngine === 'langgraph' && parseFeatures(row.featuresJson).targetedRetrievalRetries > 0) && !(row.runtimeEngine === 'langgraph' && parseFeatures(row.featuresJson).coverageReflection === false) && !(parseFeatures(row.featuresJson).temperature > 0)" type="info" effect="plain" size="small">默认配置</el-tag>
               </div>
             </template>
           </el-table-column>
           <el-table-column prop="statusLabel" label="状态" width="90" align="center">
             <template #default="{ row }">{{ row.statusLabel || formatStatus(row.status) }}</template>
           </el-table-column>
+          <el-table-column label="进度" width="180" align="center">
+            <template #default="{ row }">
+              <div class="run-progress">
+                <el-progress :percentage="evalPercent(row)" :stroke-width="8" :show-text="false" />
+                <small>{{ progressText(row) }}</small>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="执行成功" width="90" align="center">
+            <template #default="{ row }">{{ formatExecutedCases(row) }}</template>
+          </el-table-column>
+          <el-table-column label="完整报告" width="90" align="center">
+            <template #default="{ row }">{{ formatEffectiveCases(row) }}</template>
+          </el-table-column>
           <el-table-column label="风险召回" width="100" align="center">
-            <template #default="{ row }">{{ (row.highRiskRecall * 100).toFixed(0) }}%</template>
+            <template #default="{ row }">{{ formatMetric(row, 'highRiskRecall') }}</template>
           </el-table-column>
           <el-table-column label="引用率" width="90" align="center">
-            <template #default="{ row }">{{ (row.dualCitationRate * 100).toFixed(0) }}%</template>
+            <template #default="{ row }">{{ formatMetric(row, 'dualCitationRate') }}</template>
           </el-table-column>
           <el-table-column label="误报率" width="90" align="center">
-            <template #default="{ row }">{{ (row.falsePositiveRate * 100).toFixed(0) }}%</template>
+            <template #default="{ row }">{{ formatMetric(row, 'falsePositiveRate') }}</template>
           </el-table-column>
           <el-table-column label="时间" width="140">
             <template #default="{ row }">{{ formatDate(row.startedAt) }}</template>
           </el-table-column>
+          <el-table-column label="操作" width="140" align="center">
+            <template #default="{ row }">
+              <el-button size="small" type="primary" @click="viewRunDetail(row.id)">详情</el-button>
+              <el-button size="small" type="danger" @click="deleteRun(row.id)">删除</el-button>
+            </template>
+          </el-table-column>
         </el-table>
         <el-empty v-else description="暂无评测记录" :image-size="64" />
       </el-tab-pane>
+
+      <!-- ═══ Run detail dialog ═══ -->
+      <el-dialog v-model="showRunDetail" title="评测运行详情" width="92%" top="3vh" destroy-on-close>
+        <template v-if="viewingRun && !viewingResult">
+          <el-descriptions :column="4" border size="small">
+            <el-descriptions-item label="Run ID">{{ viewingRun.id }}</el-descriptions-item>
+            <el-descriptions-item label="状态">
+              <el-tag size="small" :type="statusTagType(viewingRun.status)">{{ viewingRun.statusLabel || formatStatus(viewingRun.status) }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="Runtime">{{ viewingRun.runtimeEngineLabel || formatRuntimeEngine(viewingRun.runtimeEngine) }}</el-descriptions-item>
+            <el-descriptions-item label="数据集">{{ viewingRun.datasetName }} v{{ viewingRun.datasetVersion }}</el-descriptions-item>
+            <el-descriptions-item label="评测目标">{{ viewingRun.datasetTypeLabel || formatDatasetType(viewingRun.contractType) }}</el-descriptions-item>
+            <el-descriptions-item label="图 / 版本">{{ viewingRun.graphName || '-' }} / {{ viewingRun.graphVersion || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="LLM 模型">{{ viewingRun.llmModel || '（默认）' }}</el-descriptions-item>
+            <el-descriptions-item label="提示词版本">{{ viewingRun.promptVersion || '（默认）' }}</el-descriptions-item>
+            <el-descriptions-item label="风险召回">{{ formatMetric(viewingRun, 'highRiskRecall') }}</el-descriptions-item>
+            <el-descriptions-item label="双引用率">{{ formatMetric(viewingRun, 'dualCitationRate') }}</el-descriptions-item>
+            <el-descriptions-item label="误报率">{{ formatMetric(viewingRun, 'falsePositiveRate') }}</el-descriptions-item>
+            <el-descriptions-item label="Schema 有效率">{{ formatMetric(viewingRun, 'schemaValidRate') }}</el-descriptions-item>
+            <el-descriptions-item label="用例数">{{ viewingRun.caseCount }}</el-descriptions-item>
+            <el-descriptions-item label="成功执行">{{ viewingRun.passedCount }}</el-descriptions-item>
+            <el-descriptions-item label="当前步">{{ viewingRun.currentStep || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="排队位置">{{ viewingRun.queuePosition ?? '-' }}</el-descriptions-item>
+            <el-descriptions-item label="环境状态">{{ viewingRun.environmentStatus || '-' }}</el-descriptions-item>
+            <el-descriptions-item label="开始时间" :span="2">{{ formatDate(viewingRun.startedAt) }}</el-descriptions-item>
+            <el-descriptions-item label="结束时间" :span="2">{{ formatDate(viewingRun.finishedAt) }}</el-descriptions-item>
+            <el-descriptions-item label="创建时间" :span="2">{{ formatDate(viewingRun.createTime) }}</el-descriptions-item>
+          </el-descriptions>
+
+          <el-collapse style="margin-top:12px">
+            <el-collapse-item title="功能特性 (featuresJson)" name="features">
+              <pre class="json-block">{{ formatJson(viewingRun.featuresJson) }}</pre>
+            </el-collapse-item>
+            <el-collapse-item title="汇总指标 (summaryJson)" name="summary">
+              <pre class="json-block">{{ formatJson(viewingRun.summaryJson) }}</pre>
+            </el-collapse-item>
+            <el-collapse-item title="环境快照 (environmentSnapshotJson)" name="env">
+              <pre class="json-block">{{ formatJson(viewingRun.environmentSnapshotJson) }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+
+          <h4 style="margin:16px 0 8px;color:#303133">逐用例结果 ({{ (viewingRun.results || []).length }})</h4>
+          <el-table :data="viewingRun.results" stripe size="small" v-if="viewingRun.results?.length">
+            <el-table-column prop="caseId" label="Case" width="60" align="center" />
+            <el-table-column prop="caseKey" label="Key" width="110" show-overflow-tooltip />
+            <el-table-column prop="caseTitle" label="标题" min-width="160" show-overflow-tooltip />
+            <el-table-column label="模式" width="95" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="analysisModeTagType(row.analysisMode)">{{ row.analysisModeLabel || formatAnalysisMode(row.analysisMode) }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="召回" width="75" align="center">
+              <template #default="{ row }">{{ formatMetric(row, 'highRecall') }}</template>
+            </el-table-column>
+            <el-table-column label="双引用" width="75" align="center">
+              <template #default="{ row }">{{ formatMetric(row, 'dualCitationRate') }}</template>
+            </el-table-column>
+            <el-table-column label="误报" width="60" align="center">
+              <template #default="{ row }">{{ row.falsePositives ?? 0 }}</template>
+            </el-table-column>
+            <el-table-column label="风险分" width="70" align="center">
+              <template #default="{ row }">{{ row.riskScore ?? '-' }}</template>
+            </el-table-column>
+            <el-table-column label="发现数" width="70" align="center">
+              <template #default="{ row }">{{ row.findingCount }}</template>
+            </el-table-column>
+            <el-table-column label="Schema" width="70" align="center">
+              <template #default="{ row }">{{ formatMetric(row, 'schemaValidRate') }}</template>
+            </el-table-column>
+            <el-table-column label="操作" width="80" align="center" fixed="right">
+              <template #default="{ row }">
+                <el-button size="small" type="primary" text @click="showResultDetail(row)">查看</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="暂无用例结果" :image-size="48" />
+        </template>
+
+        <template v-else-if="viewingResult">
+          <el-button size="small" text @click="backToRunDetail()">← 返回运行详情</el-button>
+          <el-descriptions :column="3" border size="small" style="margin-top:8px">
+            <el-descriptions-item label="Case ID">{{ viewingResult.caseId }}</el-descriptions-item>
+            <el-descriptions-item label="Case Key">{{ viewingResult.caseKey }}</el-descriptions-item>
+            <el-descriptions-item label="标题" :span="2">{{ viewingResult.caseTitle }}</el-descriptions-item>
+            <el-descriptions-item label="场景">{{ scenarioLabel(viewingResult.scenario) }}</el-descriptions-item>
+            <el-descriptions-item label="难度">{{ difficultyLabel(viewingResult.difficulty) }}</el-descriptions-item>
+            <el-descriptions-item label="噪声">{{ noiseLabel(viewingResult.noiseLevel) }}</el-descriptions-item>
+            <el-descriptions-item label="分析模式">
+              <el-tag size="small" :type="analysisModeTagType(viewingResult.analysisMode)">{{ viewingResult.analysisModeLabel || formatAnalysisMode(viewingResult.analysisMode) }}</el-tag>
+            </el-descriptions-item>
+            <el-descriptions-item label="召回">{{ formatMetric(viewingResult, 'highRecall') }}</el-descriptions-item>
+            <el-descriptions-item label="双引用">{{ formatMetric(viewingResult, 'dualCitationRate') }}</el-descriptions-item>
+            <el-descriptions-item label="误报">{{ viewingResult.falsePositives ?? 0 }}</el-descriptions-item>
+            <el-descriptions-item label="风险分">{{ viewingResult.riskScore ?? '-' }}</el-descriptions-item>
+            <el-descriptions-item label="发现数">{{ viewingResult.findingCount }}</el-descriptions-item>
+            <el-descriptions-item label="Schema 有效">{{ formatMetric(viewingResult, 'schemaValidRate') }}</el-descriptions-item>
+            <el-descriptions-item label="成功">{{ viewingResult.success ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item v-if="viewingResult.errorMessage" label="错误信息" :span="3">
+              <span style="color:#c0392b">{{ viewingResult.errorMessage }}</span>
+            </el-descriptions-item>
+          </el-descriptions>
+
+          <h4 style="margin:16px 0 8px;color:#303133">预期发现 (expectedFindingsJson)</h4>
+          <pre class="json-block">{{ formatJson(viewingResult.expectedFindingsJson) }}</pre>
+          <h4 style="margin:12px 0 8px;color:#303133">不应发现 (shouldNotFindJson)</h4>
+          <pre class="json-block">{{ formatJson(viewingResult.shouldNotFindJson) }}</pre>
+
+          <h4 style="margin:12px 0 8px;color:#303133">实际发现 ({{ actualFindings.length }})</h4>
+          <el-table :data="actualFindings" stripe size="small" v-if="actualFindings.length">
+            <el-table-column prop="severity" label="级别" width="80" align="center">
+              <template #default="{ row }">
+                <el-tag size="small" :type="severityTagType(row.severity)">{{ row.severity }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="title" label="标题" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="riskDimension" label="维度" width="120" show-overflow-tooltip />
+            <el-table-column label="证据" width="140" align="center">
+              <template #default="{ row }">
+                <el-tag v-if="row.contractCitation || (row.contractCitationIds || []).length" size="small" effect="plain" type="success">合同引用</el-tag>
+                <el-tag v-if="row.policyCitation || (row.policyCitationIds || []).length" size="small" effect="plain" type="warning">制度引用</el-tag>
+                <span v-if="!row.contractCitation && !(row.contractCitationIds || []).length && !row.policyCitation && !(row.policyCitationIds || []).length">-</span>
+              </template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else description="无发现" :image-size="48" />
+
+          <el-collapse style="margin-top:12px">
+            <el-collapse-item title="完整产物 (resultJson)" name="artifact">
+              <pre class="json-block artifact-block">{{ formatJson(viewingResult.resultJson) }}</pre>
+            </el-collapse-item>
+          </el-collapse>
+        </template>
+        <template #footer>
+          <el-button @click="closeRunDetail()">关闭</el-button>
+        </template>
+      </el-dialog>
 
       <!-- ═══ Compare Tab ═══ -->
       <el-tab-pane label="版本对比" name="compare">
@@ -318,7 +559,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../api/index.js'
 
@@ -330,17 +571,23 @@ const cases = ref([])
 const selectedDataset = ref(null)
 const showCreateDataset = ref(false)
 const showAddCase = ref(false)
+const showCaseDetail = ref(false)
+const viewingCase = ref(null)
 const compareId1 = ref(null)
 const compareId2 = ref(null)
 const compareDiffs = ref([])
 
 const newDataset = ref({ name: '', version: 'v1', contractType: 'CONTRACT_REVIEW', description: '' })
-const newCase = ref({ caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0 })
+const newCase = ref({ caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0 })
 const showStartRun = ref(false)
 const startRunDs = ref(null)
 const startRunRuntime = ref('legacy')
 const startRunFeatures = ref({ rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0 })
 const showRetrievalOpts = ref(false)
+const startingRun = ref(false)
+const showRunDetail = ref(false)
+const viewingRun = ref(null)
+const viewingResult = ref(null)
 
 onMounted(() => { loadAll() })
 
@@ -375,6 +622,19 @@ async function deleteDataset(id) {
   }
 }
 
+async function deleteRun(id) {
+  try {
+    await ElMessageBox.confirm('确定删除此评测记录？将同时删除关联的结果数据。', '确认删除', { type: 'warning' })
+  } catch { return }
+  try {
+    await api.delete(`/api/admin/eval/runs/${id}`)
+    ElMessage.success('评测记录已删除')
+    loadAll()
+  } catch (err) {
+    ElMessage.error(err.response?.data?.message || '删除失败')
+  }
+}
+
 async function addCase() {
   if (!newCase.value.caseKey || !newCase.value.title || !newCase.value.contractText) {
     ElMessage.warning('用例Key、标题和合同全文为必填')
@@ -384,14 +644,21 @@ async function addCase() {
     await api.post(`/api/admin/eval/datasets/${selectedDataset.value.id}/cases`, {
       caseKey: newCase.value.caseKey,
       title: newCase.value.title,
+      contractType: selectedDataset.value.contractType || '',
       contractText: newCase.value.contractText,
       expectedFindingsJson: newCase.value.expectedFindingsJson,
       shouldNotFindJson: newCase.value.shouldNotFindJson,
       expectedCitationCount: newCase.value.expectedCitationCount,
+      scenario: newCase.value.scenario,
+      industry: newCase.value.industry,
+      difficulty: newCase.value.difficulty,
+      noiseLevel: newCase.value.noiseLevel,
+      mustHaveContractCitation: newCase.value.mustHaveContractCitation,
+      mustHavePolicyCitation: newCase.value.mustHavePolicyCitation,
     })
     ElMessage.success('用例已添加')
     showAddCase.value = false
-    newCase.value = { caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0 }
+    newCase.value = { caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0 }
     viewCases(selectedDataset.value)
   } catch (err) {
     ElMessage.error(err.response?.data?.message || '添加失败')
@@ -412,6 +679,8 @@ async function startRun(ds) {
 }
 
 async function doStartRun() {
+  if (startingRun.value) return
+  startingRun.value = true
   try {
     await api.post('/api/admin/eval/runs', {
       datasetId: startRunDs.value.id,
@@ -423,7 +692,62 @@ async function doStartRun() {
     loadAll()
   } catch (err) {
     ElMessage.error(err.response?.data?.message || '发起失败')
+  } finally {
+    startingRun.value = false
   }
+}
+
+async function viewCaseDetail(caseId) {
+  try {
+    viewingCase.value = (await api.get(`/api/admin/eval/cases/${caseId}`)).data.data || null
+    showCaseDetail.value = true
+  } catch (err) {
+    ElMessage.error(err.response?.data?.message || '获取用例详情失败')
+  }
+}
+
+function scenarioLabel(v) {
+  return {
+    SERVICE_PROCUREMENT: '服务采购', ENGINEERING_EPC: '工程/EPC',
+    GOODS_PROCUREMENT: '货物采购', SOFTWARE_IT: '软件/IT',
+    NDA: '保密协议', OPS_MAINTENANCE: '运维/物业', MIXED: '混合',
+  }[v] || v || '-'
+}
+
+function difficultyLabel(v) {
+  return {
+    EASY: '明确', FUZZY: '模糊', MISSING_CLAUSE: '缺失',
+    CONFLICTING: '冲突', OCR_NOISE: 'OCR噪声', AMBIGUITY: '歧义',
+    CROSS_PARAGRAPH: '跨段落', ATTACHMENT_ONLY: '仅附件',
+  }[v] || v || '-'
+}
+
+function noiseLabel(v) {
+  return { NONE:'无', LOW:'低', MEDIUM:'中', HIGH:'高' }[v] || v || '无'
+}
+
+function difficultyTagType(v) {
+  return {
+    EASY: 'success', FUZZY: 'warning', MISSING_CLAUSE: 'danger',
+    CONFLICTING: 'danger', OCR_NOISE: 'info', AMBIGUITY: 'warning',
+    CROSS_PARAGRAPH: '', ATTACHMENT_ONLY: 'info',
+  }[v] || ''
+}
+
+function formatJson(v) {
+  if (!v) return '（空）'
+  let obj
+  try { obj = JSON.parse(v) } catch { return v }
+  return JSON.stringify(obj, null, 2)
+}
+
+function renderedContractText() {
+  if (!viewingCase.value?.contractText) return '<span style="color:#909399">（无合同文本）</span>'
+  return viewingCase.value.contractText
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\n/g, '<br>')
 }
 
 async function deleteCase(id) {
@@ -449,8 +773,41 @@ async function doCompare() {
   }
 }
 
+async function viewRunDetail(runId) {
+  try {
+    const r = await api.get(`/api/admin/eval/runs/${runId}`)
+    viewingRun.value = r.data.data || null
+    viewingResult.value = null
+    showRunDetail.value = true
+  } catch (err) {
+    ElMessage.error(err.response?.data?.message || '获取评测详情失败')
+  }
+}
+
+function showResultDetail(row) {
+  viewingResult.value = row
+}
+
+function backToRunDetail() {
+  viewingResult.value = null
+}
+
+function closeRunDetail() {
+  showRunDetail.value = false
+  viewingRun.value = null
+  viewingResult.value = null
+}
+
+const actualFindings = computed(() => {
+  if (!viewingResult.value?.resultJson) return []
+  let artifact
+  try { artifact = JSON.parse(viewingResult.value.resultJson) } catch { return [] }
+  return Array.isArray(artifact?.findings) ? artifact.findings : []
+})
+
 function formatDate(v) { return v ? String(v).replace('T', ' ').slice(0, 16) : '' }
 function parseFeatures(v) { try { return JSON.parse(v) || {} } catch { return {} } }
+function parseSummary(v) { try { return JSON.parse(v) || {} } catch { return {} } }
 function formatDatasetType(v) {
   return {
     CONTRACT_REVIEW: '风险审查',
@@ -470,12 +827,70 @@ function formatRuntimeEngine(v) {
     langgraph: 'LangGraph',
   }[v] || v || '-'
 }
+function formatMetric(row, key) {
+  if (['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status)) return row.caseCount ? '计算中' : '待汇总'
+  if (['FAILED', 'ENVIRONMENT_UNAVAILABLE'].includes(row?.status)) return '-'
+  const value = Number(row?.[key])
+  return Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '-'
+}
+function evalPercent(row) {
+  const summary = parseSummary(row?.summaryJson)
+  const value = Number(summary.percent ?? 0)
+  if (Number.isFinite(value) && value > 0) return Math.max(0, Math.min(100, Math.round(value)))
+  const total = Number(row?.caseCount ?? summary.caseCount ?? 0)
+  const current = Number(row?.currentCaseIndex ?? summary.completedCases ?? 0)
+  if (Number.isFinite(total) && total > 0) return Math.max(0, Math.min(100, Math.round((current / total) * 100)))
+  return ['COMPLETED', 'DEGRADED'].includes(row?.status) ? 100 : 0
+}
+function progressText(row) {
+  const summary = parseSummary(row?.summaryJson)
+  if (row?.status === 'QUEUED') return row.queuePosition ? `排队 #${row.queuePosition}` : '排队中'
+  if (row?.status === 'PRECHECKING') return '环境检查中'
+  if (row?.status === 'ENVIRONMENT_UNAVAILABLE') return '环境不可用'
+  const total = Number(row?.caseCount ?? summary.caseCount ?? 0)
+  const current = Number(row?.currentCaseIndex ?? summary.completedCases ?? 0)
+  if (row?.status === 'RUNNING' && total > 0) return `${current}/${total} ${row.currentCaseKey || ''}`.trim()
+  if (summary.infraFailedCount) return `完成，环境失败 ${summary.infraFailedCount}`
+  return row.currentStep || formatStatus(row.status)
+}
+function formatEffectiveCases(row) {
+  const summary = parseSummary(row?.summaryJson)
+  const total = Number(row?.caseCount ?? summary.caseCount ?? 0)
+  if (!Number.isFinite(total) || total <= 0) return '-'
+  if (['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status)) return `${Number(row?.passedCount ?? 0)}/${total}`
+  const failed = Number(summary.failedCount ?? Math.max(total - Number(row?.passedCount ?? 0), 0))
+  const limited = Number(summary.limitedCount ?? (Number(summary.limitedReportRate) > 0 ? Math.round(Number(summary.limitedReportRate) * total) : 0))
+  const infra = Number(summary.infraFailedCount ?? summary.infraFailedCases ?? 0)
+  const valid = Math.max(0, total - (Number.isFinite(failed) ? failed : 0) - (Number.isFinite(limited) ? limited : 0) - (Number.isFinite(infra) ? infra : 0))
+  return `${valid}/${total}`
+}
+function formatExecutedCases(row) {
+  const summary = parseSummary(row?.summaryJson)
+  const total = Number(row?.caseCount ?? summary.caseCount ?? 0)
+  if (!Number.isFinite(total) || total <= 0) return '-'
+  const executed = Number(row?.passedCount ?? summary.passedCount ?? 0)
+  return `${Number.isFinite(executed) ? executed : 0}/${total}`
+}
+function rerankExecution(row) {
+  const summary = parseSummary(row?.summaryJson)
+  const methods = Array.isArray(summary.rerankActualMethods) ? summary.rerankActualMethods : []
+  if (!methods.length || ['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status)) return { label: '', type: 'info' }
+  if (methods.length === 1 && methods[0] === 'MODEL_RERANK') return { label: '模型重排序已执行', type: 'success' }
+  if (methods.length === 1 && methods[0] === 'DISABLED') return { label: '重排序已关闭', type: 'info' }
+  if (methods.every(method => method === 'NOT_USED')) return { label: '未触发重排序', type: 'info' }
+  if (methods.includes('KEYWORD_FALLBACK') || methods.includes('MIXED')) return { label: '重排序降级为关键词', type: 'warning' }
+  return { label: '混合重排序', type: 'warning' }
+}
 function formatStatus(v) {
   return {
     ACTIVE: '启用',
     DRAFT: '草稿',
+    QUEUED: '排队中',
+    PRECHECKING: '环境检查',
     RUNNING: '运行中',
     COMPLETED: '已完成',
+    DEGRADED: '结果降级',
+    ENVIRONMENT_UNAVAILABLE: '环境不可用',
     FAILED: '失败',
     CANCELLED: '已取消',
   }[v] || v || '-'
@@ -485,7 +900,35 @@ function formatAnalysisMode(v) {
     FULL: '完整分析',
     LIMITED: '范围受限',
     RULE_ONLY: '规则兜底',
+    INFRA_FAILED: '环境失败',
   }[v] || v || '-'
+}
+function statusTagType(v) {
+  return {
+    COMPLETED: 'success',
+    QUEUED: 'info',
+    PRECHECKING: 'info',
+    RUNNING: 'primary',
+    DEGRADED: 'warning',
+    ENVIRONMENT_UNAVAILABLE: 'danger',
+    FAILED: 'danger',
+    CANCELLED: 'info',
+  }[v] || 'info'
+}
+function analysisModeTagType(v) {
+  return {
+    FULL: 'success',
+    LIMITED: 'warning',
+    RULE_ONLY: 'info',
+    INFRA_FAILED: 'danger',
+  }[v] || 'info'
+}
+function severityTagType(v) {
+  return {
+    HIGH: 'danger',
+    MEDIUM: 'warning',
+    LOW: 'info',
+  }[String(v || '').toUpperCase()] || 'info'
 }
 </script>
 
@@ -513,6 +956,19 @@ function formatAnalysisMode(v) {
 .cases-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
 .cases-head h3 { margin: 0; color: #1f2d3d; font-size: 15px; }
 .back-btn { margin-top: 14px; }
+
+/* Case detail */
+.contract-text-viewer {
+  max-height: 300px; overflow-y: auto;
+  padding: 14px; background: #f5f7fa; border: 1px solid #e4e7ed; border-radius: 4px;
+  font-size: 13px; line-height: 1.8; color: #303133; white-space: normal; word-break: break-all;
+}
+.json-block {
+  max-height: 200px; overflow-y: auto;
+  padding: 12px; background: #f5f7fa; border: 1px solid #e4e7ed; border-radius: 4px;
+  font-size: 12px; line-height: 1.6; color: #303133; margin: 0; white-space: pre-wrap; word-break: break-all;
+}
+.artifact-block { max-height: 420px; }
 
 /* Compare */
 .compare-controls { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
