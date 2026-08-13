@@ -376,3 +376,111 @@ def test_score_eval_artifact_vacuous_recall_without_expected_high():
         "CONTRACT_REVIEW",
     )
     assert result["highRecall"] == 1.0
+
+
+def test_score_eval_artifact_registry_routes_risk_review():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "付款周期过长", "severity": "HIGH"},
+        ])
+    }
+    artifact = {
+        "findings": [{
+            "title": "付款周期过长",
+            "severity": "HIGH",
+            "contractCitation": {"snippet": "180日"},
+            "policyCitation": {"snippet": "制度要求"},
+        }]
+    }
+    result = _score_eval_artifact(case, artifact, "CONTRACT_REVIEW")
+    assert result["highRecall"] == 1.0
+    assert result["dualCitationRate"] == 1.0
+    assert result["schemaValid"] == 1
+
+
+def test_score_eval_artifact_element_extraction_scores_elements_and_missing():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "甲方:北京某某科技有限公司", "severity": "LOW", "riskDimension": "PARTY"},
+            {"title": "总价:3,600,000元/月", "severity": "LOW", "riskDimension": "PAYMENT"},
+            {"title": "开工日期:缺失", "severity": "HIGH", "riskDimension": "DATE"},
+        ])
+    }
+    artifact = {
+        "analysisMode": "FULL",
+        "evaluationStages": {
+            "CONTRACT_ELEMENT_EXTRACTION": {
+                "summary": "已从 6 个合同条款中提取了 1 个合同要素",
+                "elements": [{
+                    "elementKey": "payment_terms",
+                    "category": "FINANCIAL",
+                    "rawValue": "月度支付：每月15日前支付服务费150,000元",
+                    "citations": [{"sourceId": "CONTRACT_CLAUSE:1"}],
+                }],
+                "contractProfile": {
+                    "baseFields": [
+                        {"key": "party_a", "label": "甲方", "value": "北京某某科技有限公司", "citations": []},
+                    ],
+                    "groups": [{
+                        "groupKey": "project_schedule",
+                        "reason": "缺少开工日期和中间验收节点，请关注",
+                        "fields": [],
+                    }],
+                },
+            }
+        },
+    }
+    result = _score_eval_artifact(case, artifact, "CONTRACT_ELEMENT_EXTRACTION")
+    # 甲方 matched via profile field; 总价 unmatched (wrong amount extracted);
+    # 开工日期:缺失 detected via group reason → 2/3
+    assert result["highRecall"] == pytest.approx(2 / 3)
+    # citation coverage: 1 cited element of 2 extracted items
+    assert result["dualCitationRate"] == pytest.approx(0.5)
+    assert result["schemaValid"] == 1
+    assert result["findingCount"] == 2
+
+
+def test_score_eval_artifact_element_missing_not_detected_scores_zero():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "验收节点:缺失", "severity": "HIGH", "riskDimension": "ACCEPTANCE"},
+        ])
+    }
+    artifact = {
+        "evaluationStages": {
+            "CONTRACT_ELEMENT_EXTRACTION": {
+                "summary": "已提取全部要素，无异常",
+                "elements": [],
+                "contractProfile": {
+                    "baseFields": [],
+                    "groups": [{"groupKey": "x", "reason": "合同要素齐全", "fields": []}],
+                },
+            }
+        }
+    }
+    result = _score_eval_artifact(case, artifact, "CONTRACT_ELEMENT_EXTRACTION")
+    assert result["highRecall"] == 0.0
+
+
+def test_score_eval_artifact_unregistered_mode_keeps_placeholder():
+    from app.api.routes import _score_eval_artifact
+
+    result = _score_eval_artifact({}, {}, "FULFILLMENT_CHECK")
+    assert result["success"] is True
+    assert result["highRecall"] == 1
+
+
+def test_legacy_task_support_guard():
+    from app.agent_runtime.runtime import is_legacy_task_supported
+
+    assert is_legacy_task_supported("CONTRACT_REVIEW")
+    assert is_legacy_task_supported("FULFILLMENT_CHECK")
+    assert not is_legacy_task_supported("CONTRACT_ELEMENT_EXTRACTION")
+    assert not is_legacy_task_supported("TIMELINE_EXTRACTION")
+    assert not is_legacy_task_supported("")

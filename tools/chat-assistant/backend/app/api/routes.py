@@ -2215,10 +2215,30 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                     (dataset_id,),
                 )
                 cases = cur.fetchall()
+                cur.execute(
+                    "SELECT contract_type FROM agent_eval_dataset WHERE id=%s",
+                    (dataset_id,),
+                )
+                dataset_row = cur.fetchone()
 
         if not cases:
             _fail_eval_run(eval_run_id, "No active cases in dataset")
             return
+
+        if runtime == "legacy":
+            # Fail the whole run up front instead of one cryptic failure per
+            # case: the legacy pipeline cannot produce extraction artifacts.
+            from app.agent_runtime.runtime import is_legacy_task_supported
+
+            probe_task = _eval_task_type(
+                str((dataset_row or {}).get("contract_type") or "CONTRACT_REVIEW")
+            )
+            if not is_legacy_task_supported(probe_task):
+                _fail_eval_run(
+                    eval_run_id,
+                    f"传统流水线引擎不支持任务类型 {probe_task}，请改用 LangGraph 引擎重新发起",
+                )
+                return
 
         with _conn() as conn:
             with conn.cursor() as cur:
@@ -2345,49 +2365,15 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                         eval_run_id, idx + 1, len(cases), error,
                     )
                     continue
-                expected_json = case["expected_findings_json"] or "[]"
+                # ── Per-case metrics: shared scorer registry (same entry as
+                # the LangGraph worker — no duplicate scoring logic) ─────
                 import json as _json
-                try:
-                    expected = _json.loads(expected_json) if isinstance(expected_json, str) else expected_json
-                except Exception:
-                    expected = []
-
-                # ── Per-case metrics ──────────────────────────────────
-                expected_high = [f for f in expected if str(f.get("severity", "")).upper() == "HIGH"]
-                actual_high = [f for f in findings if str(f.get("severity", "")).upper() == "HIGH"]
-                if expected_high:
-                    high_recall = len([h for h in expected_high if any(
-                        _risk_finding_matches(h, a) for a in actual_high
-                    )]) / len(expected_high)
-                else:
-                    # Vacuous recall: the case expects no HIGH finding, so there
-                    # is nothing to miss. Scoring 0 here would drag the run
-                    # average down for cases that cannot fail.
-                    high_recall = 1.0
-
-                # dualCitationRate: findings with BOTH contract AND policy citations
-                dual_cited = sum(
-                    1 for f in findings
-                    if (f.get("contractCitation") or f.get("contractCitationIds"))
-                    and (f.get("policyCitation") or f.get("policyCitationIds"))
-                )
-                dual_rate = dual_cited / max(len(findings), 1)
-
-                # falsePositives: count findings whose title matches should_not_find substrings
-                should_not_json = case.get("should_not_find_json") or "[]"
-                try:
-                    should_not_list = _json.loads(should_not_json) if isinstance(should_not_json, str) else should_not_json
-                except Exception:
-                    should_not_list = []
-                false_pos = sum(
-                    1 for f in findings
-                    for s in (should_not_list if isinstance(should_not_list, list) else [])
-                    if str(s).lower() in str(f.get("title", "")).lower()
-                )
-
-                analysis_mode = artifact.get("analysisMode", "FULL")
-                # schema_valid: 1 if report produced structured output (has findings array), 0 otherwise
-                schema_valid = 1 if isinstance(findings, list) else 0
+                score = _score_eval_artifact(case, artifact, task_type)
+                high_recall = score["highRecall"]
+                dual_rate = score["dualCitationRate"]
+                false_pos = score["falsePositives"]
+                analysis_mode = score["analysisMode"]
+                schema_valid = score["schemaValid"]
 
                 with _conn() as conn:
                     with conn.cursor() as cur:
@@ -2410,8 +2396,8 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                             eval_run_id, case_id,
                             high_recall, dual_rate, false_pos,
                             analysis_mode,
-                            artifact.get("riskScore", 0),
-                            len(findings),
+                            score["riskScore"],
+                            score["findingCount"],
                             _json.dumps(artifact, ensure_ascii=False, default=str),
                         ))
                         conn.commit()
@@ -2565,6 +2551,7 @@ _EVAL_BUSINESS_TYPES = {
     "SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA",
     "ENGINEERING_EPC", "SOFTWARE_IT", "OPS_MAINTENANCE", "MIXED", "OTHER",
 }
+_EVAL_FIXTURE_CHUNKING_VERSION = "eval-split-v2"
 
 
 def _eval_business_contract_type(case: dict[str, Any]) -> str:
@@ -2585,6 +2572,62 @@ def _eval_business_contract_type(case: dict[str, Any]) -> str:
     if candidate in _EVAL_BUSINESS_TYPES:
         return candidate
     return "OTHER"
+
+
+def _eval_fixture_key(case: dict[str, Any]) -> tuple[str, str]:
+    """Stable cache key for reusable evaluation contract fixtures."""
+    contract_text = str(case.get("contract_text") or "")
+    payload = {
+        "contractTextHash": hashlib.sha256(contract_text.encode("utf-8")).hexdigest(),
+        "title": str(case.get("title") or ""),
+        "businessType": _eval_business_contract_type(case),
+        "embeddingModel": str(settings.embedding_model or ""),
+        "embeddingDim": int(settings.embedding_dim or 0),
+        "chunkingVersion": _EVAL_FIXTURE_CHUNKING_VERSION,
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"EVAL-FIX-{digest[:40]}", digest
+
+
+def _eval_fixture_ready(cur, case_id: int) -> bool:
+    """Return true when DB chunks and the latest ES indexing pass are reusable."""
+    cur.execute(
+        """SELECT COUNT(*) AS total,
+                  SUM(CASE WHEN embedding_status IN ('DONE','SKIPPED') THEN 1 ELSE 0 END) AS embedded,
+                  SUM(CASE WHEN index_status='DONE' THEN 1 ELSE 0 END) AS indexed,
+                  MAX(document_id) AS document_id
+           FROM contract_clause_chunk
+           WHERE case_id=%s""",
+        (case_id,),
+    )
+    row = cur.fetchone() or {}
+    total = int(row.get("total") or 0)
+    if total <= 0:
+        return False
+    embedded = int(row.get("embedded") or 0)
+    indexed = int(row.get("indexed") or 0)
+    if embedded < total:
+        return False
+    # MySQL keyword retrieval remains usable when ES is unavailable, but when
+    # ES is available the fixture should already have a ready private index.
+    try:
+        es = ESService()
+        if es.ping():
+            if indexed < total:
+                return False
+            document_id = int(row.get("document_id") or 0)
+            if document_id:
+                response = es.client.count(
+                    index=es.contract_index,
+                    body={"query": {"term": {"document_id": document_id}}},
+                )
+                if int(response.get("count") or 0) < total:
+                    return False
+    except Exception:
+        return False
+    return True
 
 
 def _eval_expected_dimensions(case: dict[str, Any]) -> list[str]:
@@ -2611,22 +2654,80 @@ def _create_eval_temp_case(eval_run_id: int, case: dict[str, Any], idx: int, tem
     )
 
     contract_text = str(case.get("contract_text") or "")
+    fixture_key, fixture_hash = _eval_fixture_key(case)
     with _conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
+                """SELECT id
+                   FROM contract_case
+                   WHERE case_key=%s AND is_evaluation=1 AND deleted=0
+                   ORDER BY id DESC LIMIT 1""",
+                (fixture_key,),
+            )
+            cached = cur.fetchone()
+            if cached:
+                cached_case_id = int(cached["id"])
+                if _eval_fixture_ready(cur, cached_case_id):
+                    logger.info(
+                        "Eval run %s case %s/%s reusing fixture case %s (%s)",
+                        eval_run_id, idx + 1, case.get("case_key") or case.get("id"), cached_case_id, fixture_hash[:12],
+                    )
+                    return cached_case_id
+                cur.execute(
+                    """SELECT id FROM contract_document
+                       WHERE case_id=%s AND parse_status='READY'
+                       ORDER BY version DESC, id DESC LIMIT 1""",
+                    (cached_case_id,),
+                )
+                cached_doc = cur.fetchone()
+                if cached_doc:
+                    conn.commit()
+                    _index_contract_chunks(cur, None, int(cached_doc["id"]), commit_callback=conn.commit)
+                    if _eval_fixture_ready(cur, cached_case_id):
+                        logger.info(
+                            "Eval run %s case %s/%s repaired fixture case %s (%s)",
+                            eval_run_id, idx + 1, case.get("case_key") or case.get("id"), cached_case_id, fixture_hash[:12],
+                        )
+                        return cached_case_id
+                cur.execute(
+                    "UPDATE contract_case SET deleted=1, case_key=%s WHERE id=%s",
+                    (f"EVAL-STALE-{cached_case_id}-{fixture_hash[:24]}", cached_case_id),
+                )
+                conn.commit()
+
+            cur.execute(
                 """INSERT INTO contract_case
-                   (case_key, title, contract_type, status, counterparty, is_evaluation)
-                   VALUES (%s,%s,%s,'MATERIAL_PENDING','Evaluation Counterparty',1)""",
-                (f"EVAL-{eval_run_id}-{idx}", case.get("title") or "", _eval_business_contract_type(case)),
+                   (case_key, title, contract_type, status, counterparty, description, is_evaluation)
+                   VALUES (%s,%s,%s,'MATERIAL_PENDING','Evaluation Counterparty',%s,1)""",
+                (
+                    fixture_key,
+                    case.get("title") or "",
+                    _eval_business_contract_type(case),
+                    json.dumps({
+                        "evalFixture": True,
+                        "evalFixtureHash": fixture_hash,
+                        "evalCaseId": int(case.get("id") or 0),
+                        "evalCaseKey": str(case.get("case_key") or ""),
+                        "chunkingVersion": _EVAL_FIXTURE_CHUNKING_VERSION,
+                        "embeddingModel": settings.embedding_model,
+                        "embeddingDim": settings.embedding_dim,
+                    }, ensure_ascii=False),
+                ),
             )
             temp_case_id = int(cur.lastrowid)
-            temp_case_ids.append(temp_case_id)
             if contract_text.strip():
+                content_hash = hashlib.sha256(contract_text.encode("utf-8")).hexdigest()
                 cur.execute(
                     """INSERT INTO contract_document
-                       (case_id, document_type, file_name, file_path, version, parse_status, content_text)
-                       VALUES (%s,'MAIN',%s,'eval://text',1,'READY',%s)""",
-                    (temp_case_id, str(case.get("title") or "evaluation") + ".txt", contract_text),
+                       (case_id, document_type, file_name, file_path, version, parse_status, content_hash, content_text)
+                       VALUES (%s,'MAIN',%s,%s,1,'READY',%s,%s)""",
+                    (
+                        temp_case_id,
+                        str(case.get("title") or "evaluation") + ".txt",
+                        f"eval://fixture/{fixture_hash}",
+                        content_hash,
+                        contract_text,
+                    ),
                 )
                 doc_id = int(cur.lastrowid)
                 clauses = _split_eval_contract_clauses(
@@ -2672,6 +2773,10 @@ def _create_eval_temp_case(eval_run_id: int, case: dict[str, Any], idx: int, tem
             conn.commit()
             if contract_text.strip():
                 _index_contract_chunks(cur, None, doc_id, commit_callback=conn.commit)
+                logger.info(
+                    "Eval run %s case %s/%s built fixture case %s (%s)",
+                    eval_run_id, idx + 1, case.get("case_key") or case.get("id"), temp_case_id, fixture_hash[:12],
+                )
             return temp_case_id
 
 
@@ -2857,23 +2962,12 @@ def _eval_rerank_observation(artifact: dict[str, Any]) -> dict[str, Any]:
     return {"actualMethod": actual, "methods": sorted(normalized)}
 
 
-def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_mode: str) -> dict[str, Any]:
+def _score_risk_review(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """Score a CONTRACT_REVIEW artifact: HIGH-risk recall against expected
+    HIGH findings, dual citation coverage, and should-not-find false positives."""
     findings = artifact.get("findings") or []
     if not isinstance(findings, list):
         findings = []
-    if score_mode != "CONTRACT_REVIEW":
-        return {
-            "success": True,
-            "highRecall": 1,
-            "dualCitationRate": 1,
-            "falsePositives": 0,
-            "schemaValid": 1 if isinstance(artifact, dict) else 0,
-            "analysisMode": artifact.get("analysisMode", "FULL"),
-            "riskScore": artifact.get("riskScore", 0),
-            "findingCount": len(findings),
-            "artifact": artifact,
-        }
-
     try:
         expected = json.loads(case.get("expected_findings_json") or "[]")
     except Exception:
@@ -2913,6 +3007,190 @@ def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_m
         "schemaValid": 1,
         "analysisMode": artifact.get("analysisMode", "FULL"),
         "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(findings),
+        "artifact": artifact,
+    }
+
+
+_MISSING_ELEMENT_MARKERS = (
+    "缺失", "缺少", "空白", "不明确", "未定义", "未约定", "无法判断", "待确认",
+)
+
+
+def _intake_extraction_surfaces(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten the element-extraction artifact into matchable surfaces.
+
+    Each surface is a dict carrying a `_surface` text (elementKey/category/
+    rawValue or profile field label/value) so the shared title matcher can
+    compare expected entries against what the agent actually extracted.
+    """
+    stages = artifact.get("evaluationStages") or {}
+    stage = stages.get("CONTRACT_ELEMENT_EXTRACTION") if isinstance(stages, dict) else None
+    if not isinstance(stage, dict):
+        stage = artifact if isinstance(artifact.get("elements"), list) else {}
+    items: list[dict[str, Any]] = []
+    for element in stage.get("elements") or []:
+        if not isinstance(element, dict):
+            continue
+        normalized = element.get("normalizedValue")
+        if isinstance(normalized, dict):
+            normalized = json.dumps(normalized, ensure_ascii=False)
+        item = dict(element)
+        item["_surface"] = " ".join(str(element.get(key) or "") for key in (
+            "elementKey", "category", "rawValue",
+        )) + (f" {normalized}" if normalized else "")
+        items.append(item)
+    profile = stage.get("contractProfile") or {}
+    for field in (profile.get("baseFields") or []):
+        if not isinstance(field, dict):
+            continue
+        item = dict(field)
+        item["_surface"] = " ".join(str(field.get(key) or "") for key in (
+            "key", "label", "value", "displayValue",
+        ))
+        items.append(item)
+    for group in (profile.get("groups") or []):
+        if not isinstance(group, dict):
+            continue
+        for field in (group.get("fields") or []):
+            if not isinstance(field, dict):
+                continue
+            item = dict(field)
+            item["_surface"] = " ".join(str(field.get(key) or "") for key in (
+                "key", "label", "value", "displayValue",
+            ))
+            items.append(item)
+    return items
+
+
+def _element_expectation_matches(expected: dict[str, Any], surface: str) -> bool:
+    """Strict element matching — the shared `_risk_finding_matches` bigram
+    overlap is too loose for element values: digit-heavy expectations (amounts,
+    dates) collapse to few unique bigrams, and two coincidental shared pairs
+    ("00", "0元") push unrelated values over the 0.28 threshold. Extracted
+    element values are copied from the contract, so containment is the reliable
+    signal; fuzzy sequence similarity applies only to long descriptive titles.
+    """
+    expected_text = _normalize_eval_text(str(expected.get("title") or ""))
+    actual_text = _normalize_eval_text(surface or "")
+    if not expected_text or not actual_text:
+        return False
+    if expected_text in actual_text or actual_text in expected_text:
+        return True
+    if len(expected_text) >= 12:
+        return SequenceMatcher(None, expected_text, actual_text).ratio() >= 0.5
+    return False
+
+
+def _score_element_extraction(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """Score a CONTRACT_ELEMENT_EXTRACTION artifact.
+
+    Expected entries come in two flavors (both share the same
+    expected_findings_json shape):
+      - element expectations (e.g. "甲方:北京xx公司"): matched against the
+        extracted elements/profile fields via the shared title matcher.
+      - missing-clause detections (e.g. "开工日期:缺失", HIGH): the agent must
+        flag the absence in profile group reasons/summary, otherwise the case
+        would score 1.0 without ever detecting anything.
+
+    dualCitationRate is reused as citation coverage: the fraction of extracted
+    items that carry at least one contract citation.
+    """
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        expected = []
+    if not isinstance(expected, list):
+        expected = []
+    items = _intake_extraction_surfaces(artifact)
+    stages = artifact.get("evaluationStages") or {}
+    stage = stages.get("CONTRACT_ELEMENT_EXTRACTION") if isinstance(stages, dict) else None
+    if not isinstance(stage, dict):
+        stage = artifact if isinstance(artifact.get("elements"), list) else {}
+    profile = stage.get("contractProfile") or {}
+    reason_texts = [
+        str(group.get("reason"))
+        for group in (profile.get("groups") or [])
+        if isinstance(group, dict) and group.get("reason")
+    ]
+    context = "\n".join(reason_texts) + "\n" + str(stage.get("summary") or "")
+
+    matched = 0
+    for entry in expected:
+        if not isinstance(entry, dict):
+            continue
+        title = str(entry.get("title") or "")
+        if any(marker in title for marker in _MISSING_ELEMENT_MARKERS):
+            # Missing-clause detection: the subject must be named and a
+            # missing marker must appear in the artifact's own account.
+            subject = title.split(":", 1)[0].strip() if ":" in title else title
+            if (
+                subject
+                and subject in context
+                and any(marker in context for marker in _MISSING_ELEMENT_MARKERS)
+            ):
+                matched += 1
+            continue
+        if any(
+            _element_expectation_matches(entry, str(item.get("_surface") or ""))
+            for item in items
+        ):
+            matched += 1
+
+    try:
+        should_not = json.loads(case.get("should_not_find_json") or "[]")
+    except Exception:
+        should_not = []
+    false_pos = sum(
+        1 for item in items
+        for s in (should_not if isinstance(should_not, list) else [])
+        if str(s).lower() in str(item.get("_surface", "")).lower()
+    )
+    return {
+        "success": True,
+        "highRecall": matched / max(len(expected), 1),
+        "dualCitationRate": sum(1 for item in items if item.get("citations")) / max(len(items), 1),
+        "falsePositives": false_pos,
+        "schemaValid": 1 if (
+            isinstance(stage.get("elements"), list)
+            and isinstance(stage.get("contractProfile"), dict)
+        ) else 0,
+        "analysisMode": stage.get("analysisMode") or artifact.get("analysisMode", "FULL"),
+        "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(items),
+        "artifact": artifact,
+    }
+
+
+_EVAL_SCORERS = {
+    "CONTRACT_REVIEW": _score_risk_review,
+    "RISK_REVIEW": _score_risk_review,
+    "CONTRACT_ELEMENT_EXTRACTION": _score_element_extraction,
+    "INTAKE": _score_element_extraction,
+    "ELEMENT_EXTRACTION": _score_element_extraction,
+}
+
+
+def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_mode: str) -> dict[str, Any]:
+    """Score one eval case through the per-task-type scorer registry.
+
+    Unregistered task types (FULFILLMENT_CHECK / TIMELINE_EXTRACTION) keep
+    the placeholder pass-through until a real scorer is written for them.
+    """
+    scorer = _EVAL_SCORERS.get(str(score_mode or "").upper())
+    if scorer:
+        return scorer(case, artifact or {})
+    findings = (artifact or {}).get("findings") or []
+    if not isinstance(findings, list):
+        findings = []
+    return {
+        "success": True,
+        "highRecall": 1,
+        "dualCitationRate": 1,
+        "falsePositives": 0,
+        "schemaValid": 1 if isinstance(artifact, dict) else 0,
+        "analysisMode": (artifact or {}).get("analysisMode", "FULL"),
+        "riskScore": (artifact or {}).get("riskScore", 0),
         "findingCount": len(findings),
         "artifact": artifact,
     }

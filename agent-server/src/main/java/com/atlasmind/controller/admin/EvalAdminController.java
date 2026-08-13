@@ -137,6 +137,19 @@ public class EvalAdminController {
         String runtime = str(request, "runtime"); // legacy | langgraph
         String featuresJson = str(request, "features");
         if (featuresJson.isEmpty()) featuresJson = "{}";
+        if ("legacy".equalsIgnoreCase(runtime)) {
+            // The legacy pipeline cannot produce extraction/timeline artifacts.
+            // Reject up front instead of failing every case at runtime.
+            String datasetType = jdbc.queryForObject(
+                    "SELECT contract_type FROM agent_eval_dataset WHERE id=?",
+                    String.class, datasetId);
+            String legacyTask = normalizeLegacyTask(datasetType);
+            if (!Set.of("CONTRACT_REVIEW", "COMPREHENSIVE", "FULFILLMENT_CHECK")
+                    .contains(legacyTask)) {
+                throw new IllegalArgumentException(
+                        "传统流水线引擎不支持该数据集的任务类型（" + legacyTask + "），请改用 LangGraph 引擎");
+            }
+        }
         Integer activeCount = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM agent_eval_run
                 WHERE dataset_id=?
@@ -369,6 +382,18 @@ public class EvalAdminController {
             case "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION" -> "FULFILLMENT_CHECK";
             case "COMPREHENSIVE" -> "COMPREHENSIVE";
             default -> "CONTRACT_REVIEW";
+        };
+    }
+
+    private static String normalizeLegacyTask(String value) {
+        String v = value == null ? "" : value.trim().toUpperCase(Locale.ROOT);
+        if (v.isBlank()) return "CONTRACT_REVIEW";
+        // Mirror the Python legacy worker's _eval_task_type mapping.
+        return switch (v) {
+            case "INTAKE", "ELEMENT_EXTRACTION", "CONTRACT_ELEMENT_EXTRACTION" -> "CONTRACT_ELEMENT_EXTRACTION";
+            case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "TIMELINE_EXTRACTION";
+            case "RISK_REVIEW" -> "CONTRACT_REVIEW";
+            default -> v;
         };
     }
 

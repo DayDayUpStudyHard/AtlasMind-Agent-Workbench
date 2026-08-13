@@ -168,3 +168,42 @@ builder.add_edge("targeted_retrieval", "compose_limited_report")
 
 - `EvalAdminController.java` — getRun 字段别名 + 结果关联用例元数据
 - `EvalCenter.vue` — 详情入口 + 双层详情对话框 + 标签类型辅助函数
+
+---
+
+## 2026-08-14：评测计分器统一注册表 + 要素提取真计分 + legacy 引擎守卫
+
+### 问题
+
+要素提取回归集（IN-*，20 case）首跑出现两个假象分数：
+- run 23（LangGraph）：全指标 100%，但逐用例 `finding_count` 全为 0 —— 计分器只有 CONTRACT_REVIEW 分支，其余任务类型一律无条件满分（`_score_eval_artifact` 占位分支），且 INTAKE 产物是 `elements` 而非 `findings`，计分器根本没看提取结果。case IN-007 期望 2 个 HIGH（缺失检测），Agent 提取 0 个要素，召回仍记 1.0。
+- run 24（legacy）：20/20 FAILED，逐 case 抛 `unsupported project task type: CONTRACT_ELEMENT_EXTRACTION` —— 强制 legacy 模式绕过了 runtime.py `_resolve` 里"提取类任务默认走 LangGraph"的保护，落进项目任务的 LLM 方法。
+
+### 修复
+
+1. **计分器收敛为注册表**（[routes.py](tools/chat-assistant/backend/app/api/routes.py)）：`_EVAL_SCORERS` 按任务类型注册计分器，`_score_eval_artifact` 统一分发。删除 legacy worker 内联的那份重复计分逻辑（此前空真召回等修复都要两处同步改），两引擎共用同一入口。未注册任务类型（FULFILLMENT_CHECK/TIMELINE_EXTRACTION）保留占位分支，待补真实计分器。
+2. **新增要素提取计分器** `_score_element_extraction`：
+   - 提取面 = `elements` + `contractProfile.baseFields/groups.fields` 展平（elementKey/类别/rawValue 与字段 label/value）
+   - 期望条目分两类：含缺失标记（缺失/缺少/空白/不明确/未定义/未约定/无法判断/待确认）→ 校验产物 group reason/summary 是否点名该要素并出现缺失标记；其余 → 与提取面做**严格匹配**（专用 `_element_expectation_matches`：包含匹配为准，≥12 字长标题才允许 SequenceMatcher≥0.5）。不复用 `_risk_finding_matches` 的 bigram 重叠——数字型期望（金额/日期）唯一 bigram 少，两个巧合共享对（"00"/"0元"）就会误过 0.28 阈值（实测复现）
+   - `dual_citation_rate` 列复用为"引用覆盖率"（带引用的提取项占比）；`finding_count` 记提取项数
+3. **legacy 引擎三层守卫**：
+   - [runtime.py](tools/chat-assistant/backend/app/agent_runtime/runtime.py)：`LEGACY_SUPPORTED_TASK_TYPES` + `is_legacy_task_supported()`；`dispatch_with_mode` 强制 legacy 遇到不支持任务类型直接抛清晰错误，不再逐 case 落进 `run_project_task`
+   - eval worker 启动前 fail-fast：legacy × 提取/日程数据集整单 FAILED 并给出明确提示，不再产出 20 条重复谜之失败
+   - [EvalAdminController.java](agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java) `startEvalRun` 服务端拒绝；[EvalCenter.vue](agent-admin/src/views/EvalCenter.vue) 前端置灰 legacy 选项 + 默认切 LangGraph + 提交前拦截
+
+### 验证结果
+
+- 测试套件 119/119 通过（新增 6 用例：注册表路由、要素计分正例 2/3、缺失未检出记 0、占位分支、legacy 支持集守卫）
+- Vue 构建通过；Java 编译通过（exit 0）
+
+### 影响范围
+
+- `routes.py` — 计分器注册表 + 要素计分器 + legacy worker 共用计分入口 + fail-fast
+- `runtime.py` — legacy 支持任务集合 + 强制模式守卫
+- `EvalAdminController.java` / `EvalCenter.vue` — 非法引擎×数据集组合拦截
+- `tests/test_evaluation.py` — 6 个新用例
+
+### 遗留
+
+- FULFILLMENT_CHECK / TIMELINE_EXTRACTION 仍走占位计分（100%），待补真实计分器
+- IN-* 中"争议/不一致"类期望（如 IN-164）依赖产物中有显式 discrepancy 报告才能计分，当前 group reason 未纳入提取面

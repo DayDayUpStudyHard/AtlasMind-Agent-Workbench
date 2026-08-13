@@ -201,9 +201,12 @@
             </el-form-item>
             <el-form-item label="Runtime">
               <el-select v-model="startRunRuntime" style="width: 100%">
-                <el-option label="Legacy (六阶段流水线)" value="legacy" />
+                <el-option label="Legacy (六阶段流水线)" value="legacy" :disabled="legacyBlocked" />
                 <el-option label="LangGraph (状态图)" value="langgraph" />
               </el-select>
+              <small v-if="legacyBlocked" style="color:#e6a23c;display:block;margin-top:4px">
+                Legacy 引擎不支持该数据集的任务类型，仅可选用 LangGraph
+              </small>
             </el-form-item>
             <el-divider content-position="left" style="margin:12px 0">模型与提示词</el-divider>
             <el-form-item label="模型">
@@ -582,6 +585,11 @@ const newCase = ref({ caseKey: '', title: '', contractText: '', expectedFindings
 const showStartRun = ref(false)
 const startRunDs = ref(null)
 const startRunRuntime = ref('legacy')
+// Legacy 引擎无提取/日程任务的实现，这些数据集只能跑 LangGraph
+const legacyBlocked = computed(() => {
+  const t = (startRunDs.value?.contractType || '').toUpperCase()
+  return ['INTAKE', 'ELEMENT_EXTRACTION', 'FULFILLMENT_TIMELINE', 'TIMELINE_EXTRACTION'].includes(t)
+})
 const startRunFeatures = ref({ rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0 })
 const showRetrievalOpts = ref(false)
 const startingRun = ref(false)
@@ -672,7 +680,7 @@ async function viewCases(ds) {
 
 async function startRun(ds) {
   startRunDs.value = ds
-  startRunRuntime.value = 'legacy'
+  startRunRuntime.value = legacyBlocked.value ? 'langgraph' : 'legacy'
   startRunFeatures.value = { rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0 }
   showRetrievalOpts.value = false
   showStartRun.value = true
@@ -680,6 +688,10 @@ async function startRun(ds) {
 
 async function doStartRun() {
   if (startingRun.value) return
+  if (startRunRuntime.value === 'legacy' && legacyBlocked.value) {
+    ElMessage.error('Legacy 引擎不支持该数据集的任务类型，请改用 LangGraph')
+    return
+  }
   startingRun.value = true
   try {
     await api.post('/api/admin/eval/runs', {

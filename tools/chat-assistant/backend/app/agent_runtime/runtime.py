@@ -31,6 +31,23 @@ _GRAPH_PROMPT_VERSIONS = {
     "CONTRACT_ELEMENT_EXTRACTION": "contract-elements-v1",
 }
 
+# Task types the legacy pipeline (AgentRunner) can actually produce artifacts
+# for. Extraction/timeline tasks have no legacy implementation — forcing them
+# through the legacy adapter falls into run_project_task and fails per case.
+LEGACY_SUPPORTED_TASK_TYPES = frozenset({
+    "HEALTH_ANALYSIS",
+    "PROJECT_ONBOARDING",
+    "ENGINEERING_DECISION",
+    "CONTRACT_REVIEW",
+    "CONTRACT_INTAKE",
+    "APPROVAL_DECISION",
+    "FULFILLMENT_CHECK",
+})
+
+
+def is_legacy_task_supported(task_type: str) -> bool:
+    return str(task_type or "").upper() in LEGACY_SUPPORTED_TASK_TYPES
+
 
 def _runtime_model_metadata(task_type: str) -> tuple[str, str]:
     """Return the configured model and stable prompt version for a graph.
@@ -593,6 +610,13 @@ class RuntimeRouter:
             }.get(context.task_type, "")
             adapter = self._adapters.get(graph_name) if graph_name else None
         else:
+            if not is_legacy_task_supported(context.task_type):
+                # Forcing legacy on extraction/timeline tasks used to fall
+                # through to run_project_task and fail per case with a cryptic
+                # "unsupported project task type". Reject it up front instead.
+                raise ValueError(
+                    f"legacy 引擎不支持任务类型 {context.task_type}，请使用 langgraph 引擎"
+                )
             adapter = self._adapters.get("legacy")
 
         if adapter is None:
