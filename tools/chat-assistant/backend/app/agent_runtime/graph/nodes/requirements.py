@@ -2,7 +2,41 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+
+# PRD Phase 7, task 2: 合同后果 is extracted by deterministic sentence rules
+# over the clause text — code only, never LLM (same policy as Phase 6 date
+# calculation). The matched sentence is returned verbatim as the citation.
+_CONSEQUENCE_RULES = (
+    ("LIQUIDATED_DAMAGES", (r"逾期|迟延|未按时|未按期|未能及时", r"违约|赔偿|万分|罚息|滞纳|利息")),
+    ("RESCISSION", (r"解除|终止合同|有权终止|有权解除",)),
+    ("DEEMED_PASSED", (r"视为|视同|默认|视为通过|视为同意",)),
+)
+
+_SENTENCE_SPLIT = re.compile(r"[。；;\n]+")
+
+
+def extract_contract_consequence(clause_content: str) -> dict[str, Any]:
+    """Find the contract-stated consequence of failing this node (pure).
+
+    Returns ``{"ruleKey": ..., "sentence": "原文句子", "source": "RULE_EXTRACTED"}``
+    or ``{"ruleKey": "NOT_SPECIFIED", "sentence": "", "source": "NOT_FOUND"}``.
+    """
+    text = str(clause_content or "")
+    if not text.strip():
+        return {"ruleKey": "NOT_SPECIFIED", "sentence": "", "source": "NOT_FOUND"}
+    sentences = [sentence.strip() for sentence in _SENTENCE_SPLIT.split(text) if sentence.strip()]
+    for rule_key, groups in _CONSEQUENCE_RULES:
+        for sentence in sentences:
+            if all(re.search(pattern, sentence) for pattern in groups):
+                return {
+                    "ruleKey": rule_key,
+                    "sentence": sentence[:800],
+                    "source": "RULE_EXTRACTED",
+                }
+    return {"ruleKey": "NOT_SPECIFIED", "sentence": "", "source": "NOT_FOUND"}
 
 
 def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
@@ -20,6 +54,8 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
                               n.node_type AS nodeType, n.label,
                               n.business_meaning AS businessMeaning,
                               n.responsible_party AS responsibleParty,
+                              n.node_date AS nodeDate,
+                              n.condition_text AS conditionText,
                               n.citation_json AS citationJson,
                               c.clause_number AS clauseNumber, c.content AS clauseContent
                        FROM contract_timeline_node n
@@ -117,6 +153,13 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
             "evidenceExpected": item_hints,
             "ambiguity": "",
             "supportingFacts": _supporting_facts(text),
+            # PRD Phase 7, task 2: 截止条件和合同后果 are part of the
+            # requirement definition — the deadline comes from the timeline
+            # node (code-computed, Phase 6); the consequence is extracted
+            # from the clause by sentence rules, never by the LLM.
+            "deadline": str(node.get("nodeDate") or "") or None,
+            "deadlineCondition": str(node.get("conditionText") or "") or None,
+            "contractConsequence": extract_contract_consequence(clause_content),
         })
 
     if node_type == "PAYMENT":
@@ -163,6 +206,10 @@ def decompose_requirements(state: dict[str, Any]) -> dict[str, Any]:
             "output": {
                 "supportingFactCount": sum(len(item.get("supportingFacts") or []) for item in items),
                 "requirementCount": len(items),
+                "consequenceExtractedCount": sum(
+                    1 for item in items
+                    if (item.get("contractConsequence") or {}).get("source") == "RULE_EXTRACTED"
+                ),
                 "citationPolicy": "合同条款引用仍是必需项依据；提取事实仅作辅助上下文",
             },
             "status": "DONE",

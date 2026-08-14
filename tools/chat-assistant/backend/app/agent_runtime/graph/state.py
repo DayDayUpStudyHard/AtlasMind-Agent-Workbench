@@ -107,6 +107,14 @@ class BaseGraphState(TypedDict, total=False):
     manual_result: str
     note: str
     operator_id: str
+    # Phase 7 fulfillment verification (evidence rules → LLM suggestion →
+    # rerun scope). Declared in the schema for the same reason as the
+    # Phase 5/6 channels: LangGraph silently drops undeclared node-output
+    # keys, so these must be typed here to survive a compiled run.
+    evidence_rules: dict[str, Any]
+    rerun_scope: dict[str, Any]
+    fulfillment_ai: dict[str, Any]
+    fulfillment_validation: dict[str, Any]
 
     # ── Accumulated data ──
     observations: Annotated[list[dict[str, Any]], _add_observations]

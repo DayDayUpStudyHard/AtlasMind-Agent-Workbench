@@ -410,6 +410,9 @@ def test_graph_state_schema_keeps_cross_node_channels():
         "base_identity_fields", "carried_elements", "element_coverage_audit",
         "timeline_scope", "timeline_clauses", "timeline_candidates",
         "timeline_enrichment", "timeline_validation", "timeline_audit",
+        # Phase 7 fulfillment channels (evidence rules → LLM suggestion →
+        # rerun scope → validation metrics) must survive a compiled run too.
+        "evidence_rules", "rerun_scope", "fulfillment_ai", "fulfillment_validation",
     }
     assert emitted_keys <= set(BaseGraphState.__annotations__)
 
@@ -421,6 +424,10 @@ def test_graph_state_schema_keeps_cross_node_channels():
             "carried_elements": [{"elementKey": "payment_terms"}],
             "element_coverage_audit": {"totalElements": 1},
             "timeline_candidates": [{"label": "验收"}],
+            "evidence_rules": {"ruleVersion": "evidence-rules-v1"},
+            "rerun_scope": {"mode": "ALL"},
+            "fulfillment_ai": {"status": "LLM_ENRICHED"},
+            "fulfillment_validation": {"warningCount": 0},
         }
 
     def read(state):
@@ -428,6 +435,10 @@ def test_graph_state_schema_keeps_cross_node_channels():
         assert state.get("base_identity_fields") == [{"key": "partyA"}]
         assert state.get("element_coverage_audit") == {"totalElements": 1}
         assert state.get("timeline_candidates") == [{"label": "验收"}]
+        assert state.get("evidence_rules") == {"ruleVersion": "evidence-rules-v1"}
+        assert state.get("rerun_scope") == {"mode": "ALL"}
+        assert state.get("fulfillment_ai") == {"status": "LLM_ENRICHED"}
+        assert state.get("fulfillment_validation") == {"warningCount": 0}
         return {}
 
     builder.add_node("emit", emit)

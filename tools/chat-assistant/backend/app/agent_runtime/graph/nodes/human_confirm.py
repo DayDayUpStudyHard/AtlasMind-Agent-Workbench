@@ -35,9 +35,13 @@ def _build_wait_state(state: dict[str, Any]) -> tuple[dict[str, Any], list[dict[
             "supportedCount": assessment.get("supportedCount", 0),
             "partialCount": assessment.get("partialCount", 0),
             "insufficientCount": assessment.get("insufficientCount", 0),
+            "carriedForwardCount": assessment.get("carriedForwardCount", 0),
+            "rerunMode": assessment.get("rerunMode", "ALL"),
+            "aiSuggestion": assessment.get("aiSuggestion") or {},
         },
         "judgements": [
             {
+                "requirementId": j.get("requirementId", ""),
                 "requirement": j.get("requirement", ""),
                 "judgement": j.get("judgement", ""),
                 "proofStatus": j.get("proofStatus", ""),
@@ -45,6 +49,17 @@ def _build_wait_state(state: dict[str, Any]) -> tuple[dict[str, Any], list[dict[
                 "gap": j.get("gap", ""),
                 "reason": j.get("reason", ""),
                 "nextStep": j.get("nextStep", ""),
+                "carriedForward": bool(j.get("carriedForward")),
+                "deadline": j.get("deadline"),
+                "deadlineCondition": j.get("deadlineCondition"),
+                "contractConsequence": j.get("contractConsequence") or {},
+                # Task 5: the AI suggestion is shown to the operator, clearly
+                # separated from the rule judgement and the human decision.
+                "aiSuggestion": {
+                    "conclusion": (j.get("aiSuggestion") or {}).get("conclusion"),
+                    "status": (j.get("aiSuggestion") or {}).get("status"),
+                    "gap": (j.get("aiSuggestion") or {}).get("gap", ""),
+                },
             }
             for j in judgements
         ],
@@ -129,6 +144,13 @@ def apply_human_result(state: dict[str, Any]) -> dict[str, Any]:
             "manualNote": note,
             "operatorId": state.get("operator_id", ""),
             "fulfillmentAssessment": assessment,
+            # PRD Phase 7, tasks 8/9: the judgement rows (with their
+            # evidenceSnapshot + aiSuggestion) are persisted inside content
+            # so the next run can diff new material against this history —
+            # each run INSERTs its own report row, history is never
+            # overwritten.
+            "timelineNodeId": int(state.get("task_input", {}).get("timelineNodeId", 0)),
+            "requirements": judgements,
         },
     }
 

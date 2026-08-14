@@ -1,13 +1,40 @@
-"""Fulfillment judgement - per requirement assessment with evidence matching."""
+"""Fulfillment judgement - per requirement assessment with evidence matching.
+
+PRD Phase 7: the rule layer (deterministic keyword matching, tasks 1/4)
+stays the conservative base — it never claims completion. The LLM adds a
+separate aiSuggestion layer (task 5: 已履约 / 未履约 / 证据不足 / 存在冲突
+四种建议), which is advisory only: the final status is written exclusively
+from the human confirmation (task 6).
+"""
 
 from __future__ import annotations
 
-from typing import Any
 import re
+import time
+from typing import Any
+
+# Task 6: conclusions the AI may never produce — not even as a suggestion.
+_FORBIDDEN_AI_CONCLUSIONS = {"COMPLETED", "FAILED", "ACCEPTED", "REJECTED"}
+_ALLOWED_AI_CONCLUSIONS = {
+    "BASICALLY_SATISFIED", "HAS_ISSUES", "INSUFFICIENT_EVIDENCE",
+    "UNCLEAR_TERMS", "NEEDS_REVIEW",
+}
+# Task 5 mapping: the LLM's per-requirement judgement vocabulary → the four
+# suggestion conclusions (存在冲突/条款不明 folds into UNCLEAR_TERMS).
+_LLM_JUDGEMENT_MAP = {
+    "满足": "BASICALLY_SATISFIED",
+    "已履约": "BASICALLY_SATISFIED",
+    "不满足": "HAS_ISSUES",
+    "未履约": "HAS_ISSUES",
+    "证据不足": "INSUFFICIENT_EVIDENCE",
+    "存在冲突": "UNCLEAR_TERMS",
+    "需复核": "NEEDS_REVIEW",
+    "条款不明确": "UNCLEAR_TERMS",
+}
 
 
 def _normalize_terms(text: str) -> list[str]:
-    return [term for term in re.findall(r"[\u4e00-\u9fff]{2,}|[A-Za-z0-9]{2,}", text)]
+    return [term for term in re.findall(r"[一-鿿]{2,}|[A-Za-z0-9]{2,}", text)]
 
 
 def _material_hints(requirement: str, acceptance: str, node: dict[str, Any], evidence_text: str) -> list[str]:
@@ -66,6 +93,119 @@ def _proof_status(score: int, evidence_count: int, ambiguity: str) -> str:
     return "INSUFFICIENT"
 
 
+def normalize_ai_suggestion(artifact: Any) -> dict[str, Any]:
+    """Validate and normalize the LLM suggestion envelope (task 5).
+
+    Schema violations are recorded, never silently accepted: a conclusion
+    outside the four-suggestion vocabulary — or one of the forbidden final
+    statuses (task 6) — is demoted to NEEDS_REVIEW.
+    """
+    if not isinstance(artifact, dict):
+        return {
+            "status": "FALLBACK_RULE",
+            "schemaErrors": ["LLM 返回不是 JSON 对象，已回退规则判断"],
+        }
+    schema_errors: list[str] = []
+    if artifact.get("reportType") != "FULFILLMENT_REPORT":
+        schema_errors.append(f"reportType 非 FULFILLMENT_REPORT：{artifact.get('reportType')!r}")
+    conclusion = artifact.get("conclusion")
+    if conclusion in _FORBIDDEN_AI_CONCLUSIONS:
+        schema_errors.append(f"LLM 输出禁止的终态结论 {conclusion}，已降级为 NEEDS_REVIEW")
+        conclusion = "NEEDS_REVIEW"
+    if conclusion not in _ALLOWED_AI_CONCLUSIONS:
+        schema_errors.append(f"结论不在四建议词表内：{conclusion!r}，已降级为 NEEDS_REVIEW")
+        conclusion = "NEEDS_REVIEW"
+    raw_requirements = artifact.get("requirements")
+    if not isinstance(raw_requirements, list):
+        schema_errors.append("requirements 不是列表")
+        raw_requirements = []
+    per_requirement: list[dict[str, Any]] = []
+    for row in raw_requirements:
+        if not isinstance(row, dict):
+            continue
+        judgement = str(row.get("judgement") or "")
+        if judgement in _FORBIDDEN_AI_CONCLUSIONS:
+            schema_errors.append(f"子项输出禁止终态 {judgement}，已降级为 NEEDS_REVIEW")
+            judgement = "NEEDS_REVIEW"
+        per_requirement.append({
+            "requirement": str(row.get("requirement") or ""),
+            "conclusion": _LLM_JUDGEMENT_MAP.get(judgement, "NEEDS_REVIEW"),
+            "evidence": str(row.get("evidence") or ""),
+            "gap": str(row.get("gap") or ""),
+            "required": bool(row.get("required", True)),
+        })
+    suggested_actions = artifact.get("suggestedActions")
+    return {
+        "status": "LLM_ENRICHED",
+        "conclusion": conclusion,
+        "riskLevel": str(artifact.get("riskLevel") or "MEDIUM"),
+        "confidenceLevel": str(artifact.get("confidenceLevel") or "MEDIUM"),
+        "requirements": per_requirement,
+        "missingEvidence": [str(item) for item in (artifact.get("missingEvidence") or [])],
+        "explicitConsequence": str(artifact.get("explicitConsequence") or ""),
+        "aiRisk": str(artifact.get("aiRisk") or "AI 推断，仅供参考，不代表最终履约结论"),
+        "suggestedActions": suggested_actions if isinstance(suggested_actions, list) else [],
+        "schemaErrors": schema_errors,
+    }
+
+
+def _suggest_with_llm(state: dict[str, Any], rule_results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Task 5: call the fulfillment-check LLM for the four-suggestion layer.
+
+    A failure never breaks the run — the rule layer's conservative rows are
+    kept, the suggestion is marked FALLBACK_RULE and the human gate still
+    decides. This is deliberately different from the timeline graph's strict
+    LLM gate: here the LLM output is advisory, not the published artifact.
+    """
+    started = time.monotonic()
+    if not rule_results:
+        return {"status": "SKIPPED_EMPTY", "durationMs": int((time.monotonic() - started) * 1000)}
+    try:
+        from ....services.llm_service import LLMService
+
+        case_snapshot = state.get("case_snapshot") or {}
+        fulfillment_context = state.get("fulfillment_context") or {}
+        verification = dict(fulfillment_context.get("verification") or {})
+        verification.setdefault("requirements", rule_results)
+        verification.setdefault(
+            "evidenceDocuments", fulfillment_context.get("evidenceDocuments") or []
+        )
+        case = {
+            "ourSide": str(case_snapshot.get("ourSide") or ""),
+            "ourEntity": str(case_snapshot.get("ourEntity") or case_snapshot.get("ourName") or ""),
+            "counterparty": str(case_snapshot.get("counterparty") or ""),
+        }
+        task_input = state.get("task_input") or {}
+        artifact = LLMService().contract_fulfillment_check(
+            case=case,
+            verification=verification,
+            citations=(state.get("citations") or [])[:10],
+            task_input=task_input,
+            run_id=int(state.get("run_id") or 0),
+        )
+        normalized = normalize_ai_suggestion(artifact)
+        normalized["durationMs"] = int((time.monotonic() - started) * 1000)
+        return normalized
+    except Exception as exc:
+        return {
+            "status": "FALLBACK_RULE",
+            "error": str(exc)[:300],
+            "schemaErrors": ["LLM 建议层调用失败，已回退规则判断"],
+            "durationMs": int((time.monotonic() - started) * 1000),
+        }
+
+
+def _carried_row(previous: dict[str, Any], requirement_id: str,
+                 requirement_text: str) -> dict[str, Any] | None:
+    """Task 8: reuse the previous run's judgement row for an unaffected
+    requirement. The row keeps its historical evidence and aiSuggestion."""
+    row = dict(previous)
+    row["requirementId"] = row.get("requirementId") or requirement_id
+    row["requirement"] = row.get("requirement") or requirement_text
+    row["carriedForward"] = True
+    return row
+
+
 def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
     """Judge each requirement item against available evidence."""
     requirements = state.get("fulfillment_requirements") or state.get("domain_tasks") or []
@@ -118,17 +258,52 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 best_matched = matched
         return best_item, best_matched, max(best_score, 0)
 
+    # ── Task 8 rerun scope: carry forward unaffected requirements ──
+    rerun_scope = state.get("rerun_scope") or {}
+    rerun_mode = str(rerun_scope.get("mode") or "ALL")
+    affected_ids = {str(value) for value in (rerun_scope.get("affectedRequirementIds") or [])}
+    previous_judgements: dict[str, dict[str, Any]] = {}
+    for prev in rerun_scope.get("previousJudgements") or []:
+        if not isinstance(prev, dict):
+            continue
+        key = str(prev.get("requirementId") or prev.get("requirement") or "")
+        if key:
+            previous_judgements.setdefault(key, prev)
+
+    # Task 4 evidence rule compliance, keyed by requirement id / text.
+    compliance_map: dict[str, dict[str, Any]] = {}
+    for item in ((state.get("evidence_rules") or {}).get("requirementCompliance") or []):
+        if isinstance(item, dict):
+            compliance_map[str(item.get("requirementId") or item.get("requirement") or "")] = item
+
     results = []
     for req in requirements:
+        if not isinstance(req, dict):
+            continue
         requirement_text = str(req.get("requirement", "")).strip()
+        requirement_id = str(req.get("requirementId") or "")
         acceptance = str(req.get("acceptanceCriteria") or "").strip()
         required = bool(req.get("required", True))
         ambiguity = str(req.get("ambiguity") or "").strip()
+
+        carried = None
+        if rerun_mode == "UNCHANGED":
+            carried = previous_judgements.get(requirement_id) or previous_judgements.get(requirement_text)
+        elif rerun_mode == "AFFECTED_ONLY" and requirement_id not in affected_ids:
+            carried = previous_judgements.get(requirement_id) or previous_judgements.get(requirement_text)
+        if carried:
+            results.append(_carried_row(carried, requirement_id, requirement_text))
+            continue
+
         best_evidence, matched_terms, score = _best_evidence(requirement_text, acceptance)
+        compliance = compliance_map.get(requirement_id) or compliance_map.get(requirement_text) or {}
+        hard_flags = [flag for flag in (compliance.get("hardFlags") or []) if isinstance(flag, dict)]
+        soft_flags = [flag for flag in (compliance.get("softFlags") or []) if isinstance(flag, dict)]
 
         if not evidence_items or not best_evidence:
             material_hints = _material_hints(requirement_text, acceptance, node, "")
             result = {
+                "requirementId": requirement_id,
                 "requirement": requirement_text,
                 "required": required,
                 "contractCitationIds": req.get("sourceCitationIds") or [],
@@ -147,6 +322,12 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 "missingItems": material_hints,
                 "nextStep": "上传对应履约证明后重新核验",
                 "evidenceSnapshot": [],
+                "evidenceRuleFlags": {"hard": [], "soft": soft_flags},
+                # PRD Phase 7, task 2: 截止条件和合同后果 travel with the
+                # requirement into the judgement and the human wait state.
+                "deadline": req.get("deadline"),
+                "deadlineCondition": req.get("deadlineCondition"),
+                "contractConsequence": req.get("contractConsequence") or {},
             }
         else:
             file_name = str(best_evidence.get("fileName") or best_evidence.get("title") or "")
@@ -162,7 +343,18 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 f"已匹配到 {file_name or '证据材料'}，匹配词：{', '.join(matched_terms[:5])}" if matched_terms
                 else f"已找到 {file_name or '证据材料'}，但与合同要求的匹配度有限"
             )
+            # Task 4: hard rule flags contradict the claim the evidence is
+            # supposed to prove — the proof status must not stay SUPPORTED.
+            if hard_flags and proof_status == "SUPPORTED":
+                proof_status = "PARTIAL"
+                node_usability = "LIMITED"
+            gap_parts = list(missing_items)
+            for flag in hard_flags:
+                detail = str(flag.get("detail") or "")
+                if detail and detail not in gap_parts:
+                    gap_parts.append(f"证据规则检查：{detail}")
             result = {
+                "requirementId": requirement_id,
                 "requirement": requirement_text,
                 "required": required,
                 "contractCitationIds": req.get("sourceCitationIds") or [],
@@ -172,7 +364,7 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                 "evidence": snippet[:300] or file_name,
                 "judgement": judgement,
                 "reason": support_summary,
-                "gap": "、".join(missing_items) if missing_items else "暂无明显缺口，但仍需人工确认",
+                "gap": "、".join(gap_parts) if gap_parts else "暂无明显缺口，但仍需人工确认",
                 "riskLevel": risk_level,
                 "confidenceLevel": confidence,
                 "nodeUsability": node_usability,
@@ -194,6 +386,12 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
                     }
                 ],
                 "evidenceMatchReason": best_evidence.get("matchReason") or "按履约子项检索到候选证据",
+                "evidenceRuleFlags": {"hard": hard_flags, "soft": soft_flags},
+                # PRD Phase 7, task 2: 截止条件和合同后果 travel with the
+                # requirement into the judgement and the human wait state.
+                "deadline": req.get("deadline"),
+                "deadlineCondition": req.get("deadlineCondition"),
+                "contractConsequence": req.get("contractConsequence") or {},
             }
 
         if our_side == "A":
@@ -203,6 +401,29 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
 
         results.append(result)
 
+    # ── Task 5: LLM four-suggestion layer (advisory only, task 6) ──
+    ai = _suggest_with_llm(state, results)
+    per_map = {
+        str(row.get("requirement") or ""): row
+        for row in (ai.get("requirements") or []) if isinstance(row, dict)
+    }
+    for row in results:
+        if row.get("carriedForward"):
+            # The previous run's aiSuggestion travels with the carried row.
+            continue
+        matched = per_map.get(str(row.get("requirement") or ""))
+        row["aiSuggestion"] = {
+            "status": ai.get("status"),
+            "conclusion": (matched or {}).get("conclusion"),
+            "evidence": (matched or {}).get("evidence") or "",
+            "gap": (matched or {}).get("gap") or "",
+        } if matched else {
+            "status": ai.get("status"),
+            "conclusion": None,
+            "evidence": "",
+            "gap": "LLM 未覆盖该子项，仅规则判断有效",
+        }
+
     overall_missing = sorted({
         item
         for row in results
@@ -210,18 +431,32 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
         if str(item).strip()
     })
 
+    assessment = {
+        "evidenceCount": len(evidence_items),
+        "requirementCount": len(results),
+        "supportedCount": sum(1 for row in results if row.get("proofStatus") == "SUPPORTED"),
+        "partialCount": sum(1 for row in results if row.get("proofStatus") == "PARTIAL"),
+        "insufficientCount": sum(1 for row in results if row.get("proofStatus") == "INSUFFICIENT"),
+        "unclearCount": sum(1 for row in results if row.get("proofStatus") == "UNCLEAR"),
+        "carriedForwardCount": sum(1 for row in results if row.get("carriedForward")),
+        "rerunMode": rerun_mode,
+        "aiSuggestion": {
+            "status": ai.get("status"),
+            "conclusion": ai.get("conclusion"),
+            "riskLevel": ai.get("riskLevel"),
+            "confidenceLevel": ai.get("confidenceLevel"),
+            "schemaErrors": ai.get("schemaErrors") or [],
+            "durationMs": ai.get("durationMs"),
+        },
+    }
+
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "judge_each_requirement",
         "artifacts": {
             "judgements": results,
             "missingEvidence": overall_missing,
-            "fulfillmentAssessment": {
-                "evidenceCount": len(evidence_items),
-                "requirementCount": len(results),
-                "supportedCount": sum(1 for row in results if row.get("proofStatus") == "SUPPORTED"),
-                "partialCount": sum(1 for row in results if row.get("proofStatus") == "PARTIAL"),
-                "insufficientCount": sum(1 for row in results if row.get("proofStatus") == "INSUFFICIENT"),
-            },
+            "fulfillmentAssessment": assessment,
         },
+        "fulfillment_ai": ai,
     }

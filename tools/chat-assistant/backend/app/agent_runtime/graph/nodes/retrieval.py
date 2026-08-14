@@ -9,6 +9,7 @@ from typing import Any
 
 from ...harness.budget import record_unit_usage
 from ...harness.retrieval import dedupe_pool, normalize_hit, run_async
+from .fulfillment_judge import _match_score
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +215,136 @@ def run_deterministic_rules(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compute_rerun_scope(
+    previous_judgements: list[dict[str, Any]],
+    current_documents: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """PRD Phase 7, task 8: derive which requirements a new evidence set
+    actually changes, so a rerun only re-judges the affected ones.
+
+    Pure and conservative: whenever attribution fails (unmapped new/changed
+    documents), the scope degrades to ALL instead of silently skipping
+    requirements that may be affected.
+    """
+    if not previous_judgements:
+        return {
+            "mode": "ALL", "affectedRequirementIds": [], "changedEvidence": [],
+            "newEvidence": [], "removedEvidence": [], "previousJudgements": [],
+        }
+
+    prev_docs: dict[str, dict[str, Any]] = {}
+    for req in previous_judgements:
+        if not isinstance(req, dict):
+            continue
+        for snap in req.get("evidenceSnapshot") or []:
+            if not isinstance(snap, dict):
+                continue
+            doc_id = str(snap.get("documentId") or "")
+            if doc_id:
+                prev_docs.setdefault(doc_id, {
+                    "version": snap.get("version"),
+                    "contentHash": snap.get("contentHash"),
+                })
+
+    current_docs: dict[str, dict[str, Any]] = {}
+    for doc in current_documents:
+        if not isinstance(doc, dict):
+            continue
+        doc_id = str(doc.get("documentId") or doc.get("id") or "")
+        if doc_id:
+            current_docs[doc_id] = doc
+
+    def _changed(prev: dict[str, Any] | None, cur: dict[str, Any]) -> bool:
+        if not prev:
+            return False
+        if prev.get("contentHash") and cur.get("contentHash") and prev["contentHash"] != cur["contentHash"]:
+            return True
+        if prev.get("version") is not None and cur.get("version") is not None and prev["version"] != cur["version"]:
+            return True
+        return False
+
+    changed = [did for did, meta in prev_docs.items()
+               if did in current_docs and _changed(meta, current_docs[did])]
+    new_docs = [did for did in current_docs if did not in prev_docs]
+    removed = [did for did in prev_docs if did not in current_docs]
+
+    if not changed and not new_docs and not removed:
+        return {
+            "mode": "UNCHANGED", "affectedRequirementIds": [], "changedEvidence": [],
+            "newEvidence": [], "removedEvidence": [],
+            "previousJudgements": previous_judgements,
+        }
+
+    affected: set[str] = set()
+    for req in previous_judgements:
+        if not isinstance(req, dict):
+            continue
+        cited = {
+            str(snap.get("documentId") or "")
+            for snap in (req.get("evidenceSnapshot") or [])
+            if isinstance(snap, dict) and snap.get("documentId")
+        }
+        if cited & (set(changed) | set(removed)):
+            affected.add(str(req.get("requirementId") or req.get("requirement") or ""))
+
+    unmapped_new = 0
+    for did in new_docs:
+        doc = current_docs[did]
+        matched = [
+            req for req in previous_judgements
+            if isinstance(req, dict)
+            and _match_score(str(req.get("requirement") or ""), doc)[0] >= 2
+        ]
+        if matched:
+            for req in matched:
+                affected.add(str(req.get("requirementId") or req.get("requirement") or ""))
+        else:
+            unmapped_new += 1
+
+    # Conservative degradation: evidence changed but attribution failed —
+    # re-judge everything rather than silently skip affected requirements.
+    if unmapped_new or ((changed or removed) and not affected):
+        mode = "ALL"
+    else:
+        mode = "AFFECTED_ONLY"
+
+    return {
+        "mode": mode,
+        "affectedRequirementIds": sorted(affected),
+        "changedEvidence": changed,
+        "newEvidence": new_docs,
+        "removedEvidence": removed,
+        "previousJudgements": previous_judgements,
+    }
+
+
+def _load_previous_fulfillment_judgements(case_id: int, timeline_node_id: int) -> list[dict[str, Any]]:
+    """Load the latest previous FULFILLMENT_REPORT requirements for this
+    timeline node (task 8's diff baseline). Missing history → empty list."""
+    try:
+        from ...persistence import _conn, _json_object, _normalize_value
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT content_json FROM agent_report
+                       WHERE subject_type='CONTRACT_CASE' AND subject_id=%s
+                         AND report_type='FULFILLMENT_REPORT'
+                       ORDER BY id DESC LIMIT 3""",
+                    (case_id,),
+                )
+                rows = cur.fetchall() or []
+        for row in rows:
+            content = _json_object(_normalize_value(row.get("content_json")))
+            if int(content.get("timelineNodeId") or 0) == timeline_node_id:
+                requirements = content.get("requirements")
+                return requirements if isinstance(requirements, list) else []
+        return []
+    except Exception as exc:
+        logger.warning("Previous fulfillment report load failed: %s", exc)
+        return []
+
+
 def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
     """Retrieve the timeline clause and uploaded proof before judging it."""
     case_id = int(state.get("subject_id") or 0)
@@ -258,6 +389,12 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
 
     normalized_contract_hits = _deduplicate_evidence(contract_hits, limit=8)
     citations = evidence_documents + normalized_contract_hits
+
+    # PRD Phase 7, task 8: diff the uploaded evidence against the previous
+    # run's snapshot — new material only re-runs the requirements it affects.
+    previous_judgements = _load_previous_fulfillment_judgements(case_id, timeline_node_id)
+    rerun_scope = compute_rerun_scope(previous_judgements, evidence_documents)
+
     observation = {
         "callId": f"graph-fulfillment-retrieval-{case_id}-{timeline_node_id}",
         "planStepId": "retrieve_fulfillment_evidence",
@@ -272,6 +409,13 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "timelineNode": node,
                 "verification": verification,
             },
+            "rerunScope": {
+                "mode": rerun_scope["mode"],
+                "affectedRequirementIds": rerun_scope["affectedRequirementIds"],
+                "changedEvidence": rerun_scope["changedEvidence"],
+                "newEvidence": rerun_scope["newEvidence"],
+                "removedEvidence": rerun_scope["removedEvidence"],
+            },
         },
         "status": "DONE" if not verification.get("error") else "FAILED",
     }
@@ -285,6 +429,7 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
             "contractEvidence": normalized_contract_hits,
         },
         "citations": citations,
+        "rerun_scope": rerun_scope,
         "retrieval_validation": {
             "fulfillment": {
                 "mode": "CONTRACT_CLAUSE_PLUS_UPLOADED_EVIDENCE",

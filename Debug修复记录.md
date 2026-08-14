@@ -318,3 +318,35 @@ PRD §Phase 5（迁移合同要素提取）要求 8 项改造：①基础身份�
 - `services/llm_service.py`（完整条款载荷 + _complete_timeline_candidate_for_llm）
 - `tests/test_timeline_v2.py`（新增）、`tests/test_contract_extraction_phase5.py`、`tests/test_llm_service.py`
 - 未动 v2 检索/分析逻辑；未动 Java 显示过滤（source='AGENT_FINAL' OR manual_override=1 不变）
+
+---
+
+## 2026-08-15：PRD Phase 7 迁移履约核验 — 证据规则 / AI 建议 / 局部重跑 / 人工终审
+
+### 问题
+
+旧履约核验是黑盒单体（`fulfillment_check.py` 单节点拼接），PRD §Phase 7 九项任务现状盘点：①③⑦已有雏形（时间节点拆 Requirements、检索材料、Interrupt/Resume）；②缺截止条件/合同后果字段；④⑤⑧⑨缺失（证据规则、LLM 四建议、局部重跑、追加式保存）。**期间发现生产级 bug**：`fulfillment_judge._suggest_with_llm` 的 LLMService 导入深度写错（`...services` 解析到不存在的 `app.agent_runtime.services`），LLM 建议层从未真正执行、一直被 FALLBACK_RULE 静默吞掉——回退路径太优雅反而掩盖了主路径失效，测试断言建议层结论时暴露。
+
+### 修复
+
+1. **TaskSpec DAG**（[fulfillment_check.py](tools/chat-assistant/backend/app/agent_runtime/graph/fulfillment_check.py) 重写，10 阶段，走公共 `build_task_graph`）：context（load_run_context+freeze_case_snapshot）→ planner（decompose_requirements）→ retriever（retrieve_fulfillment_evidence + 重跑范围计算）→ analyzer（check_evidence_rules → judge_each_requirement）→ validator → coverage_auditor → composer（prepare）→ `wait_human_confirmation`（`_FulfillmentHumanGate(HumanGate)` 子类，spec.human_gate 与节点同一对象，§6.1 identity 契约）→ apply_human_result → persist_report。
+2. **任务②**（[requirements.py](tools/chat-assistant/backend/app/agent_runtime/graph/nodes/requirements.py)）：`extract_contract_consequence` 纯函数按句子提取合同后果（LIQUIDATED_DAMAGES/RESCISSION/DEEMED_PASSED/NOT_SPECIFIED）；SELECT 补 `nodeDate`/`conditionText`，分解项携带 `deadline`/`deadlineCondition`/`contractConsequence`。
+3. **任务④**（[evidence_rules.py](tools/chat-assistant/backend/app/agent_runtime/graph/nodes/evidence_rules.py) 新增）：五组确定性规则（文件类型/日期/金额/签章/内容），每条结果带稳定 code；硬旗标集合 `_HARD_FLAG_CODES`（日期越界、金额不符、缺签章、内容零匹配等）在 judge 层将 SUPPORTED 降级 PARTIAL 并把原因写入 gap。
+4. **任务⑤**（fulfillment_judge 重写）：LLM 四建议层 **advisory 不 strict**（与 Phase 6 相反——此处人工门禁是最终权威，LLM 失败回退 FALLBACK_RULE 保留规则行，人工照常决策）；修复 LLMService 导入深度（`....services`）；`normalize_ai_suggestion` 校验 Schema、映射 `满足/不满足/证据不足/存在冲突` 词表到四建议结论。
+5. **任务⑥**（三层防护）：`normalize_ai_suggestion` 降级禁止终态（COMPLETED/FAILED/ACCEPTED/REJECTED）→ NEEDS_REVIEW；`validate_fulfillment_judgement` 图级兜底再降级并打 `demotedByValidator`；`apply_human_result` 的最终结论只由 manual_result 映射（SATISFIED→BASICALLY_SATISFIED / NOT_SATISFIED→HAS_ISSUES / PENDING→NEEDS_REVIEW）。
+6. **任务⑦**：Interrupt/Resume 经 GraphAdapter 保留（GraphInterrupt → WAITING_HUMAN，resume 命令带 manual_result/note/operator_id）。
+7. **任务⑧**（[retrieval.py](tools/chat-assistant/backend/app/agent_runtime/graph/nodes/retrieval.py)）：`compute_rerun_scope` 纯函数按 (documentId, contentHash/version) 差分计算 UNCHANGED/ALL/AFFECTED_ONLY；新文档按 `_match_score>=2` 归属需求；**归属失败一律保守降级 ALL，绝不静默跳过**；上一次判定行（含 evidenceSnapshot+aiSuggestion）持久化在 `content.requirements` + `content.timelineNodeId`，UNCHANGED/AFFECTED_ONLY 下未受影响需求 carriedForward。
+8. **任务⑨**：`MySqlReportStore._save_sync` 对 agent_report 仅 INSERT（每轮一行，历史追加不覆盖）；锁定测试断言 SQL 含 INSERT INTO agent_report 且无 UPDATE/DELETE。
+
+### 验证结果
+
+- Python **359/359**（新增 `tests/test_fulfillment_check_v2.py` 20 项：spec 编译/阶段序/门禁 identity、后果提取、分解字段、五组证据规则+汇总、建议层附加/FALLBACK、硬旗标降级、重跑范围三模式+保守 ALL、carry-forward、validator 降级、wait_state 载荷、manual_result 唯一终审、INSERT-only；schema 探针补 4 个 Phase 7 通道；adapter 真图 resume 三态回归），`git diff --check` 通过
+- 验收门槛（证据不足克制率 ≥98%、AI 建议 Schema 通过率 ≥99%、AI 自动确认路径为零、局部重跑 ≥99%、Resume ≥99%）为评测门禁，待 Phase 8 统一评测跑分，**当前未声称达标**；AI 自动确认路径为零与 Resume 机制已由测试证明
+
+### 影响范围
+
+- `agent_runtime/graph/fulfillment_check.py`（重写为 TaskSpec DAG）
+- `agent_runtime/graph/nodes/`：`evidence_rules.py`、`fulfillment_audit.py`（新增）；`fulfillment_judge.py`（重写）、`requirements.py`、`retrieval.py`、`human_confirm.py`、`fulfillment_validate.py`（扩展）
+- `agent_runtime/graph/state.py`（evidence_rules/rerun_scope/fulfillment_ai/fulfillment_validation 四通道补 schema）
+- `tests/test_fulfillment_check_v2.py`（新增）、`tests/test_graph_runtime_adapter.py`（真图 resume 重写）、`tests/test_contract_extraction_phase5.py`（探针扩展）
+- 未动 legacy `_fulfillment_check` 旧路径代码；未动 v2 检索/分析逻辑；履约最终判定仍 100% 由人工确认写入

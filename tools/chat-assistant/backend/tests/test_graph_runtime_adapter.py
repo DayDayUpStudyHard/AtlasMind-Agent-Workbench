@@ -87,71 +87,106 @@ def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):
 
 
 def test_fulfillment_graph_resume_preserves_human_result(monkeypatch):
-    """The real HITL graph must carry manual_result through checkpoint resume."""
+    """The real HITL graph must carry manual_result through checkpoint resume.
+
+    The fulfillment graph is compiled from its TaskSpec (Phase 7), so node
+    functions are captured by identity at import time. The test therefore
+    stubs the DB / store / LLM boundaries the real nodes call — the full
+    node chain (context → decompose → retrieve → rules → judge → validate →
+    audit → human gate → apply → persist) runs for real.
+    """
     import app.agent_runtime.graph.fulfillment_check as fulfillment_graph
+    import app.agent_runtime.graph.nodes.context as context_nodes
+    import app.agent_runtime.persistence as persistence
+    import app.agent_runtime.contract_store as contract_store_module
+    from app.services.llm_service import LLMService
 
-    def load_context(state):
-        return {"state_revision": state.get("state_revision", 0) + 1}
+    class _FakeCursor:
+        def __init__(self):
+            self.last_sql = ""
 
-    def freeze_snapshot(state):
-        return {"state_revision": state.get("state_revision", 0) + 1}
+        def execute(self, sql, params=None):
+            self.last_sql = sql
 
-    def decompose(state):
+        def fetchone(self):
+            return {
+                "id": 9, "clauseId": 1, "nodeType": "ACCEPTANCE",
+                "label": "Acceptance", "businessMeaning": "完成验收",
+                "responsibleParty": "COUNTERPARTY",
+                "nodeDate": "2026-03-01", "conditionText": None,
+                "citationJson": "{}", "clauseNumber": "5",
+                "clauseContent": "乙方应于2026年3月1日前完成验收并取得验收单。",
+            }
+
+        def fetchall(self):
+            return []  # no previous fulfillment reports → rerun scope ALL
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    class _FakeConn:
+        def __init__(self):
+            self._cursor = _FakeCursor()
+
+        def cursor(self):
+            return self._cursor
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    def fake_snapshot(case_id, requested_document_id=None, include_content_text=False):
         return {
-            "state_revision": state.get("state_revision", 0) + 1,
-            "fulfillment_requirements": [{
-                "requirement": "Submit acceptance record",
-                "required": True,
-                "sourceCitationIds": ["CONTRACT_CLAUSE:1"],
-                "acceptanceCriteria": "Signed acceptance record",
-            }],
+            "case": {"id": 1, "ourSide": "A"},
+            "extractionSnapshot": {},
+            "documents": [],
+            "currentDocument": {},
+            "documentQuality": {},
+            "snapshot_hash": "test-hash",
+            "clauseCount": 0,
         }
 
-    def retrieve(state):
-        return {
-            "state_revision": state.get("state_revision", 0) + 1,
-            "fulfillment_context": {
-                "timelineNode": {"id": 9, "label": "Acceptance"},
-                "evidenceDocuments": [],
-                "contractEvidence": [],
-            },
-        }
-
-    def judge(state):
-        return {
-            "state_revision": state.get("state_revision", 0) + 1,
-            "artifacts": {
-                "judgements": [{
-                    "requirement": "Submit acceptance record",
-                    "required": True,
-                    "judgement": "EVIDENCE_INSUFFICIENT",
-                    "proofStatus": "INSUFFICIENT",
-                    "gap": "Signed acceptance record",
-                    "reason": "No evidence uploaded",
-                }],
-                "fulfillmentAssessment": {
-                    "requirementCount": 1,
-                    "evidenceCount": 0,
-                    "supportedCount": 0,
-                    "partialCount": 0,
-                    "insufficientCount": 1,
+    class _FakeStore:
+        async def verify_evidence(self, case_id, timeline_node_id=None):
+            return {
+                "node": {
+                    "id": 9, "label": "Acceptance", "nodeType": "ACCEPTANCE",
+                    "businessMeaning": "完成验收", "conditionText": "",
+                    "clauseContent": "乙方应于2026年3月1日前完成验收并取得验收单。",
                 },
-            },
+                "evidenceDocuments": [],
+                "missingEvidence": [],
+            }
+
+        async def search_contract_clause(self, case_id, payload):
+            return []
+
+    def fake_llm_fulfillment(self, case, verification, citations, task_input, run_id=0):
+        return {
+            "reportType": "FULFILLMENT_REPORT",
+            "conclusion": "INSUFFICIENT_EVIDENCE",
+            "riskLevel": "HIGH",
+            "confidenceLevel": "LOW",
+            "requirements": [],
+            "missingEvidence": [],
+            "suggestedActions": [],
         }
 
-    def validate(state):
-        return {"state_revision": state.get("state_revision", 0) + 1}
-
-    def persist(state):
-        return {"state_revision": state.get("state_revision", 0) + 1}
-
-    monkeypatch.setattr(fulfillment_graph, "load_run_context", load_context)
-    monkeypatch.setattr(fulfillment_graph, "freeze_case_snapshot", freeze_snapshot)
-    monkeypatch.setattr(fulfillment_graph, "decompose_requirements", decompose)
-    monkeypatch.setattr(fulfillment_graph, "retrieve_fulfillment_evidence", retrieve)
-    monkeypatch.setattr(fulfillment_graph, "judge_each_requirement", judge)
-    monkeypatch.setattr(fulfillment_graph, "validate_fulfillment_judgement", validate)
-    monkeypatch.setattr(fulfillment_graph, "persist_report", persist)
+    monkeypatch.setattr(
+        context_nodes, "load_contract_evidence_snapshot", fake_snapshot
+    )
+    monkeypatch.setattr(persistence, "_conn", lambda: _FakeConn())
+    monkeypatch.setattr(contract_store_module, "ContractStore", _FakeStore)
+    # LLMService() raises without an API key in this env — stub construction
+    # so the advisory suggestion layer (task 5) runs instead of falling back.
+    monkeypatch.setattr(LLMService, "__init__", lambda self: None)
+    monkeypatch.setattr(LLMService, "contract_fulfillment_check", fake_llm_fulfillment)
+    monkeypatch.setattr(persistence.MySqlReportStore, "_save_sync", lambda *a, **kw: 1)
 
     graph = fulfillment_graph.build_fulfillment_check_graph(checkpointer=MemorySaver())
     adapter = GraphAdapter(graph, graph_name="fulfillment_check", graph_version="v1")
@@ -176,6 +211,10 @@ def test_fulfillment_graph_resume_preserves_human_result(monkeypatch):
             )
             paused = await adapter.run(context)
             assert paused.status == "WAITING_HUMAN"
+            # GraphInterrupt path: the adapter falls back to the generic wait
+            # state type; the full HITL payload lives in the checkpoint.
+            wait_state = paused.graph_info.get("waitState") or {}
+            assert wait_state.get("type") in ("WAITING_HUMAN", "WAITING_HUMAN_CONFIRMATION")
 
             resumed = await adapter.resume(
                 run_id,
@@ -189,6 +228,9 @@ def test_fulfillment_graph_resume_preserves_human_result(monkeypatch):
             assert resumed.status == "COMPLETED"
             assert resumed.artifact["content"]["manualResult"] == manual_result
             assert resumed.artifact["conclusion"] == expected_conclusion
+            # Task 6: the final conclusion comes exclusively from the human
+            # result — the persisted content carries no AI-written final.
+            assert resumed.artifact["content"]["manualConfirmationRequired"] is False
             results.append((manual_result, resumed.artifact))
         return results
 
