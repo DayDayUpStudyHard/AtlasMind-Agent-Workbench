@@ -25,6 +25,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Awaitable, Protocol
@@ -39,21 +40,34 @@ logger = logging.getLogger(__name__)
 # concurrent bursts (solo ~0.3s → 9–15s or read timeouts at ~6 concurrent).
 # The orchestrator fans out up to ~24 calls per work unit, so a process-wide
 # semaphore keeps provider pressure under the cliff while queueing the rest.
+#
+# Must be a *threading* semaphore, not asyncio: graph nodes call retrieve_sync
+# from different threads, each with its own fresh event loop (see _run_async);
+# an asyncio.Semaphore binds to the first loop that uses it and then rejects
+# every later call from another loop ("bound to a different event loop").
 _CHANNEL_FANOUT_LIMIT = 3
-_fanout_semaphore: asyncio.Semaphore | None = None
+_fanout_semaphore: threading.Semaphore | None = None
+_fanout_init_lock = threading.Lock()
 
 
-def _fanout_gate() -> asyncio.Semaphore:
+def _fanout_gate() -> threading.Semaphore:
     global _fanout_semaphore
-    if _fanout_semaphore is None:
-        _fanout_semaphore = asyncio.Semaphore(_CHANNEL_FANOUT_LIMIT)
-    return _fanout_semaphore
+    with _fanout_init_lock:
+        if _fanout_semaphore is None:
+            _fanout_semaphore = threading.Semaphore(_CHANNEL_FANOUT_LIMIT)
+        return _fanout_semaphore
 
 
 async def _gated_retrieve(adapter: ChannelAdapter, case_id: int, query: str,
                           arguments: dict[str, Any]) -> ChannelResult:
-    async with _fanout_gate():
+    sem = _fanout_gate()
+    # acquire off-loop: a blocking acquire would freeze the owning event loop
+    # (and deadlock the holders, whose continuations run on that same loop).
+    await asyncio.get_running_loop().run_in_executor(None, sem.acquire)
+    try:
         return await adapter.retrieve(case_id, query, arguments)
+    finally:
+        sem.release()
 
 
 # ─────────────────────────────── channel protocol ───────────────────────────

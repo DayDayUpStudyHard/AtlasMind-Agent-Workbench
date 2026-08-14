@@ -457,3 +457,66 @@ def test_fanout_concurrency_stays_under_provider_safe_limit():
         assert 2 <= peak <= _CHANNEL_FANOUT_LIMIT
 
     _run(exercise())
+
+
+def test_fanout_gate_survives_cross_loop_usage():
+    """Production topology: graph nodes call retrieve_sync from different
+    threads, each running its own fresh event loop (see _run_async). The gate
+    must keep working across loops — an asyncio.Semaphore would bind to the
+    first loop and reject every later call (2026-08-14 regression)."""
+    import threading
+
+    from app.agent_runtime.harness.retrieval import (
+        ChannelResult,
+        _CHANNEL_FANOUT_LIMIT,
+    )
+
+    active = 0
+    peak = 0
+
+    class _SlowContractAdapter:
+        channel_key = "contract"
+
+        async def retrieve(self, case_id: int, query: str,
+                           arguments: dict) -> ChannelResult:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.05)  # hold the gate slot
+            finally:
+                active -= 1
+            return ChannelResult({"hits": [], "stats": {}, "warnings": []})
+
+    orchestrator = RetrievalOrchestrator(
+        adapters=(
+            _SlowContractAdapter(),
+            FakeChannelAdapter("clause_type", []),
+            FakeChannelAdapter("policy", []),
+            FakeChannelAdapter("historical", []),
+        ),
+        reranker=FakeReranker(),
+    )
+    request = default_retrieval_request(
+        1, fake_snapshot(), "wu-1", ["查询意图"],
+        require_counter_evidence=True,
+    )
+    results: list[bool] = []
+    errors: list[BaseException] = []
+
+    def worker():
+        try:
+            bundle = orchestrator.retrieve_sync(fake_snapshot(), request)
+            results.append(bool(bundle))
+        except BaseException as exc:  # noqa: BLE001 - gather any loop-binding error
+            errors.append(exc)
+
+    threads = [threading.Thread(target=worker) for _ in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"cross-loop gate failed: {errors}"
+    assert len(results) == 3
+    assert peak <= _CHANNEL_FANOUT_LIMIT
