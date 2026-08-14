@@ -2,8 +2,8 @@
 
 Deterministic nodes only — no DB, no ES, no LLM:
 
-* fixed sub-item baseline table (§15.2) — every domain decomposes into
-  WorkUnits with ≥2 query intents and the five grounding checks;
+* fixed domain baseline (§15.2) — detailed sub-checks share six bounded
+  WorkUnits with at most two query intents and the five grounding checks;
 * adjacent-clause expansion from the snapshot catalog (§15.3(5));
 * counter-evidence classification (EXCEPTION/LIMITATION/EXEMPTION/CONFLICT);
 * candidate merge (LLM findings + unmatched deterministic rules);
@@ -122,21 +122,21 @@ def _wu(work_unit_id="price_payment_tax.wu_a", *, label="付款条件",
 def test_plan_work_units_fixed_baseline_table():
     result = _plan_result()
     work_units = result["work_units"]
-    # party_authority 2 + price_payment_tax 10 + scope_delivery_acceptance 9
-    # + liability_remedies 7 + term_change_termination 7 + confidentiality 7
-    assert len(work_units) == 42
+    assert len(work_units) == 6
 
     ids = {unit["work_unit_id"] for unit in work_units}
-    assert len(ids) == 42  # unique
-    assert "price_payment_tax.total_price" in ids
-    assert "scope_delivery_acceptance.acceptance_criteria" in ids
-    assert "confidentiality_data_ip.ip_ownership" in ids
+    assert len(ids) == 6  # unique
+    assert "price_payment_tax" in ids
+    assert "scope_delivery_acceptance" in ids
+    assert "confidentiality_data_ip" in ids
 
     for unit in work_units:
-        assert len(unit["query_intents"]) >= 2
+        assert 1 <= len(unit["query_intents"]) <= 2
         assert unit["required_clause_types"]
         assert unit["priority"] in {"HIGH", "MEDIUM", "LOW"}
         assert unit["negative_claim_allowed"] is True
+        assert unit["category"] == "risk_domain"
+        assert unit["sub_check_items"]
         assert set(unit["required_checks"]) >= {
             "CITATION_EXISTS", "CITATION_FROM_SNAPSHOT", "CLAIM_SUPPORTED",
             "VALUE_CONSISTENCY", "NEGATIVE_CLAIM_BAR",
@@ -148,7 +148,13 @@ def test_plan_work_units_fixed_baseline_table():
     assert all(task["source"] == "V2_WORK_UNITS" for task in domain_tasks)
     assert result["retry_budget"] == 2
     assert result["observations"][0]["toolName"] == "planWorkUnits"
-    assert result["observations"][0]["output"]["workUnitCount"] == 42
+    output = result["observations"][0]["output"]
+    assert output["workUnitCount"] == 6
+    assert output["baselineWorkUnitCount"] == 6
+    assert output["fixedItemCount"] == 42
+    assert output["dynamicCount"] == 0
+    assert output["maxWorkUnitCount"] == 10
+    assert sum(len(unit["sub_check_items"]) for unit in work_units) == 42
 
 
 def test_plan_work_units_dynamic_domains_bounded(monkeypatch):
@@ -169,7 +175,9 @@ def test_plan_work_units_dynamic_domains_bounded(monkeypatch):
     dynamic = [unit for unit in result["work_units"]
                if unit["work_unit_id"].split(".")[-1] == "dynamic"]
     assert len(dynamic) == 4
-    assert all(len(unit["query_intents"]) >= 2 for unit in dynamic)
+    assert len(result["work_units"]) == 10
+    assert all(1 <= len(unit["query_intents"]) <= 2 for unit in dynamic)
+    assert dynamic[0]["query_intents"] == ["查询0A", "查询0B"]
     # key normalization strips whitespace
     assert dynamic[0]["work_unit_id"] == "custom_0.dynamic"
     assert result["observations"][0]["output"]["dynamicCount"] == 4

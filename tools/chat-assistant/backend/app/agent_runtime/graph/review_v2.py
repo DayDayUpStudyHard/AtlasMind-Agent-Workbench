@@ -2,8 +2,9 @@
 
 Five changes over v1:
 
-1. Domain tasks decompose into sub-item WorkUnits (总价/调价/开票条件/…) —
-   one retrieval + analysis round per WorkUnit, per-intent query variants.
+1. Each review domain is one bounded WorkUnit. Detailed checks (总价/调价/
+   开票条件/…) stay inside the WorkUnit as a checklist and share one evidence
+   bundle instead of multiplying retrieval calls.
 2. First-round and targeted evidence are UNIONed per WorkUnit; a limited
    report is only composed when the retry budget is exhausted, never as an
    immediate reaction to one retrieval round.
@@ -47,11 +48,14 @@ logger = logging.getLogger(__name__)
 
 MAX_TARGETED_ROUNDS = 2   # PRD §15.4: 默认最多 2 轮回补
 MAX_REANALYSIS_TARGETS = 8
+MAX_DYNAMIC_WORK_UNITS = 4
+MAX_TOTAL_WORK_UNITS = 10
+MAX_QUERY_INTENTS_PER_WORK_UNIT = 2
 
-# ─────────────────────────── fixed sub-item baseline ─────────────────────────
-# PRD §15.2 — each baseline domain decomposes into sub-check items. Items are
-# the WorkUnit granularity of v2: every item gets its own query variants,
-# retrieval round, analysis and coverage entry.
+# ─────────────────────────── fixed domain baseline ───────────────────────────
+# PRD §15.2 provides the detailed review checklist. The fast runtime keeps each
+# domain as one WorkUnit and carries these items inside that unit, so the checks
+# remain visible to the model while retrieval and analysis are shared.
 
 _SUB_ITEM_BASELINE: list[dict[str, Any]] = [
     {
@@ -281,18 +285,60 @@ def build_contract_map(state: dict[str, Any]) -> dict[str, Any]:
 # ─────────────────────────── 5. plan work units ───────────────────────────
 
 
-def _normalize_work_unit(domain: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+def _domain_query_intents(domain: dict[str, Any]) -> list[str]:
+    explicit = [
+        str(value).strip()[:240]
+        for value in domain.get("queryIntents") or []
+        if str(value).strip()
+    ]
+    if explicit:
+        return list(dict.fromkeys(explicit))[:MAX_QUERY_INTENTS_PER_WORK_UNIT]
+
+    items = list(domain.get("items") or [])
+    labels = [str(item.get("label") or "").strip() for item in items]
+    labels = [label for label in labels if label]
+    primary = f"{domain.get('domainName') or ''} {' '.join(labels)}".strip()[:240]
+
+    high_priority_terms: list[str] = []
+    for item in items:
+        if str(item.get("priority") or "MEDIUM").upper() != "HIGH":
+            continue
+        intents = [str(value).strip() for value in item.get("intents") or [] if str(value).strip()]
+        if intents:
+            high_priority_terms.append(intents[0])
+    secondary = " ".join(high_priority_terms).strip()[:240]
+
+    return list(dict.fromkeys(
+        value for value in (primary, secondary) if value
+    ))[:MAX_QUERY_INTENTS_PER_WORK_UNIT]
+
+
+def _normalize_domain_work_unit(
+    domain: dict[str, Any],
+    *,
+    work_unit_id: str | None = None,
+) -> dict[str, Any]:
     domain_key = str(domain["domainKey"])
-    item_key = str(item["itemKey"])
+    items = list(domain.get("items") or [])
+    sub_checks = [
+        {
+            "itemKey": str(item.get("itemKey") or "")[:64],
+            "label": str(item.get("label") or "")[:80],
+            "priority": str(item.get("priority") or domain.get("priority") or "MEDIUM"),
+        }
+        for item in items
+        if str(item.get("label") or "").strip()
+    ]
+    labels = "、".join(item["label"] for item in sub_checks)
     return {
-        "work_unit_id": f"{domain_key}.{item_key}"[:100],
+        "work_unit_id": str(work_unit_id or domain_key)[:100],
         "task_type": "CONTRACT_REVIEW",
-        "category": "risk_subitem",
-        "label": str(item["label"]),
-        "objective": f"检查“{item['label']}”在合同中的约定、例外与缺失情况",
+        "category": "risk_domain",
+        "label": str(domain["domainName"]),
+        "objective": str(domain.get("objective") or f"综合检查：{labels}")[:800],
         "applicability": "ALWAYS",
-        "priority": str(item.get("priority") or domain.get("priority") or "MEDIUM"),
-        "query_intents": [str(value) for value in item["intents"] if str(value).strip()],
+        "priority": str(domain.get("priority") or "MEDIUM"),
+        "query_intents": _domain_query_intents(domain),
         "required_clause_types": list(domain["requiredClauseTypes"]),
         "required_source_types": ["CONTRACT_CLAUSE"],
         "expected_output_schema": "",
@@ -304,20 +350,17 @@ def _normalize_work_unit(domain: dict[str, Any], item: dict[str, Any]) -> dict[s
         "human_review_policy": "STANDARD",
         "domainKey": domain_key,
         "domainName": str(domain["domainName"]),
+        "sub_check_items": sub_checks,
     }
 
 
 def plan_work_units(state: dict[str, Any]) -> dict[str, Any]:
-    """Decompose the fixed baseline into sub-item WorkUnits (PRD §15.2).
+    """Build a fast, domain-level WorkUnit plan from the detailed checklist.
 
-    Dynamic LLM-selected domains (v1 planner) are kept as one extra WorkUnit
-    each — bounded by the v1 planner's own cap — but the fixed baseline can
-    never be removed, which protects recall when the model overlooks items.
+    The six fixed domains are always retained. Dynamic LLM-selected domains
+    may add at most four units, and the total plan is hard-capped at ten.
     """
-    work_units: list[dict[str, Any]] = []
-    for domain in _SUB_ITEM_BASELINE:
-        for item in domain["items"]:
-            work_units.append(_normalize_work_unit(domain, item))
+    work_units = [_normalize_domain_work_unit(domain) for domain in _SUB_ITEM_BASELINE]
 
     # v1-compatible domain_tasks so reused nodes and the report keep working.
     domain_tasks: list[dict[str, Any]] = []
@@ -352,7 +395,7 @@ def plan_work_units(state: dict[str, Any]) -> dict[str, Any]:
             [dict(item) for item in domain_tasks],
             int(state.get("run_id") or 0),
         )
-        seen = {unit["work_unit_id"].split(".dynamic")[0] for unit in work_units}
+        seen = {str(unit["domainKey"]) for unit in work_units}
         added = 0
         for index, raw in enumerate((result or {}).get("domains") or []):
             if not isinstance(raw, dict):
@@ -364,13 +407,27 @@ def plan_work_units(state: dict[str, Any]) -> dict[str, Any]:
             queries = [str(value).strip()[:240] for value in (raw.get("queries") or []) if str(value).strip()]
             if not queries:
                 continue
-            work_units.append(_normalize_work_unit(
-                {"domainKey": key, "domainName": name, "requiredClauseTypes": ["OTHER"], "priority": "MEDIUM"},
-                {"itemKey": "dynamic", "label": name, "intents": queries[:3], "priority": "MEDIUM"},
+            dynamic_domain = {
+                "domainKey": key,
+                "domainName": name,
+                "objective": str(raw.get("objective") or "")[:800],
+                "requiredClauseTypes": ["OTHER"],
+                "priority": str(raw.get("priority") or "MEDIUM").upper(),
+                "queryIntents": queries,
+                "items": [{
+                    "itemKey": "dynamic",
+                    "label": name,
+                    "intents": queries[:MAX_QUERY_INTENTS_PER_WORK_UNIT],
+                    "priority": str(raw.get("priority") or "MEDIUM").upper(),
+                }],
+            }
+            work_units.append(_normalize_domain_work_unit(
+                dynamic_domain,
+                work_unit_id=f"{key}.dynamic",
             ))
             seen.add(key)
             added += 1
-            if added >= 4:
+            if added >= MAX_DYNAMIC_WORK_UNITS or len(work_units) >= MAX_TOTAL_WORK_UNITS:
                 break
     except Exception as exc:
         planner_error = str(exc)
@@ -381,6 +438,8 @@ def plan_work_units(state: dict[str, Any]) -> dict[str, Any]:
     max_retries = _retry_limit_override.get()
     if max_retries < 0:
         max_retries = MAX_TARGETED_ROUNDS
+    fixed_check_count = sum(len(domain["items"]) for domain in _SUB_ITEM_BASELINE)
+    baseline_work_unit_count = len(_SUB_ITEM_BASELINE)
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "plan_work_units",
@@ -397,8 +456,11 @@ def plan_work_units(state: dict[str, Any]) -> dict[str, Any]:
             "arguments": {"baselineDomainCount": len(_SUB_ITEM_BASELINE)},
             "output": {
                 "workUnitCount": len(work_units),
-                "fixedItemCount": sum(len(d["items"]) for d in _SUB_ITEM_BASELINE),
-                "dynamicCount": len(work_units) - sum(len(d["items"]) for d in _SUB_ITEM_BASELINE),
+                "baselineWorkUnitCount": baseline_work_unit_count,
+                "fixedItemCount": fixed_check_count,
+                "dynamicCount": len(work_units) - baseline_work_unit_count,
+                "maxWorkUnitCount": MAX_TOTAL_WORK_UNITS,
+                "compressionRatio": round(len(work_units) / max(1, fixed_check_count), 3),
                 "retryBudget": int(max_retries),
                 "plannerFallback": bool(planner_error),
             },
@@ -571,11 +633,12 @@ def _analyze_one_work_unit(
         if str(rule.get("clauseType") or "OTHER").upper() in allowed_types
     ]
     wu_task = {
-        "domainKey": work_unit["work_unit_id"],
+        "domainKey": work_unit["domainKey"],
         "domainName": work_unit.get("label") or work_unit.get("objective") or "",
         "objective": work_unit.get("objective") or "",
         "queries": list(work_unit.get("query_intents") or []),
         "subItemKey": work_unit.get("label") or "",
+        "subCheckItems": list(work_unit.get("sub_check_items") or []),
         "requiredClauseTypes": list(work_unit.get("required_clause_types") or []),
     }
     needs: list[dict] = []
@@ -597,7 +660,7 @@ def _analyze_one_work_unit(
             normalized = _normalize_finding(raw, wu_task, evidence, index)
             if normalized:
                 findings.append(normalized)
-        findings = findings[:4]
+        findings = findings[:6]
         seen_rule_keys = {
             str(item.get("ruleKey") or "").strip()
             for item in findings if str(item.get("ruleKey") or "").strip()

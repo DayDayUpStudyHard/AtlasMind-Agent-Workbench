@@ -15,9 +15,9 @@ from typing import Any, TypedDict
 class WorkUnit(TypedDict):
     """The shared scheduling granularity of the harness (PRD §10.2).
 
-    A WorkUnit is NOT a risk domain and is not bound to one task type —
-    risk review uses sub-item units (总价/调价/开票条件/…), extraction uses
-    element packs, fulfillment uses requirements.
+    A WorkUnit is not bound to one task type. Risk review uses bounded domain
+    units with an internal sub-check list, extraction uses element packs, and
+    fulfillment uses requirements.
     """
 
     work_unit_id: str
