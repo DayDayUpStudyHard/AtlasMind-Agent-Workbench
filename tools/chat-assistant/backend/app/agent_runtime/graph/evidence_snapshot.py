@@ -129,6 +129,32 @@ def _select_main_document(documents: list[dict[str, Any]], requested_document_id
 
 
 def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
+    """Latest CONFIRMED intake, with human-confirmed field values merged in.
+
+    Contract for human-confirmed values entering the snapshot (PRD §14-3,
+    Phase 5 tasks 5/8 — 人工确认值在所有后续 Graph 中可见，不被静默覆盖):
+
+    * ``fields`` is the canonical field view every graph consumes. It starts
+      from the AI-validated proposal (``validated_json.fields``) and is then
+      overlaid per field by the human's recorded decisions in
+      ``contract_intake_fact_decision`` (same ``case_id`` + ``intake_id``):
+
+        - ``ACCEPTED``      → value stays as proposed, stamped
+          ``decisionType``/``humanConfirmed``
+        - ``EDITED``        → value replaced by the human-confirmed value
+        - ``USER_SUPPLIED`` → human filled a field the model left empty
+        - ``CLEARED``       → human explicitly emptied the field (value=None)
+
+    * Legacy fallback: a CONFIRMED intake without fact-decision rows (written
+      before per-field decisions existed) takes direct-key values from
+      ``confirmed_json`` for keys that already exist in the field space, so
+      old confirmations still propagate their values.
+
+    * ``confirmed`` stays the raw ``confirmed_json`` payload, unmodified.
+
+    The snapshot hash covers the merged ``fields`` (decision *values*, not
+    decision metadata) — see ``_compute_snapshot_hash``.
+    """
     from ..persistence import _normalize_value
 
     cur.execute(
@@ -146,6 +172,47 @@ def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
         return {}
     validated = _parse_json(row.get("validatedJson"), {})
     confirmed = _parse_json(row.get("confirmedJson"), {})
+    fields = dict(validated.get("fields")) if isinstance(validated, dict) and isinstance(validated.get("fields"), dict) else {}
+
+    # Per-field human decisions recorded at confirmation time (Java
+    # recordIntakeFactDecisions). Filtered to THIS intake so a newer or older
+    # confirmation never leaks its decisions into this one.
+    cur.execute(
+        """SELECT field_key AS fieldKey, confirmed_value_json AS confirmedValue,
+                  decision_type AS decisionType
+           FROM contract_intake_fact_decision
+           WHERE case_id=%s AND intake_id=%s
+           ORDER BY id ASC""",
+        (case_id, row.get("id")),
+    )
+    decisions = [_normalize_value(item) for item in cur.fetchall()]
+    for decision in decisions:
+        field_key = decision.get("fieldKey")
+        decision_type = str(decision.get("decisionType") or "").upper()
+        if not field_key:
+            continue
+        existing = fields.get(field_key)
+        entry = dict(existing) if isinstance(existing, dict) else {}
+        entry["decisionType"] = decision_type
+        entry["humanConfirmed"] = True
+        if decision_type == "CLEARED":
+            entry["value"] = None
+        else:
+            wrapper = _parse_json(decision.get("confirmedValue"), {})
+            entry["value"] = wrapper.get("value") if isinstance(wrapper, dict) else None
+        fields[field_key] = entry
+
+    # Legacy fallback: no decision rows at all → overlay direct-key matches
+    # from the flat confirmed_json payload (old confirmations).
+    if not decisions and isinstance(confirmed, dict):
+        for field_key, entry in fields.items():
+            if field_key in confirmed and confirmed.get(field_key) not in (None, ""):
+                overlaid = dict(entry)
+                overlaid["value"] = confirmed[field_key]
+                overlaid["decisionType"] = "LEGACY_CONFIRMED"
+                overlaid["humanConfirmed"] = True
+                fields[field_key] = overlaid
+
     return {
         "id": row.get("id"),
         "contentHash": row.get("contentHash"),
@@ -153,7 +220,7 @@ def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
         "promptVersion": row.get("promptVersion"),
         "model": row.get("model"),
         "confirmedAt": row.get("confirmedAt"),
-        "fields": validated.get("fields") if isinstance(validated, dict) else {},
+        "fields": fields,
         "confirmed": confirmed,
     }
 
@@ -257,9 +324,12 @@ def _compute_snapshot_hash(
     """Stable snapshot hash (PRD Phase 1 invariants).
 
     Changes the hash: document version / content, clause content, confirmed
-    intake, extraction snapshot, knowledge scope.
+    intake (including human-confirmed field *values*), extraction snapshot,
+    knowledge scope.
     Does NOT change the hash: clause row order, ``include_content_text``,
-    parse diagnostics.
+    parse diagnostics, decision metadata (``decisionType``/``humanConfirmed``)
+    — a human confirmation that ACCEPTs every proposed value leaves the hash
+    untouched, while EDITED/USER_SUPPLIED/CLEARED values change it.
     """
     payload = {
         "schema": _SNAPSHOT_SCHEMA_VERSION,
@@ -272,7 +342,14 @@ def _compute_snapshot_hash(
             "id": confirmed_intake.get("id"),
             "content_hash": confirmed_intake.get("contentHash"),
             "fields": json.dumps(
-                confirmed_intake.get("fields") or {},
+                {
+                    key: (
+                        {k: v for k, v in entry.items()
+                         if k not in ("decisionType", "humanConfirmed")}
+                        if isinstance(entry, dict) else entry
+                    )
+                    for key, entry in (confirmed_intake.get("fields") or {}).items()
+                },
                 ensure_ascii=False, sort_keys=True, default=str,
             ),
         },

@@ -11,6 +11,10 @@ Invariants under test (user Phase 1 spec):
   never a silently different structure
 * EvidenceContextBuilder TTL cache: same object within TTL, evict() drops it
 * requested_document_id that is not a READY MAIN → ValueError, no silent fallback
+* human-confirmed values enter ``fields`` via fact decisions (PRD §14-3):
+  EDITED/USER_SUPPLIED override, CLEARED empties, ACCEPTED keeps value and
+  hash, decision metadata never moves the hash, legacy confirmed_json
+  direct-key values overlay when no decisions exist
 """
 
 import asyncio
@@ -137,6 +141,37 @@ def _intake_row(fields=None):
     }
 
 
+def _validated_intake_row(validated_fields, confirmed_payload=None):
+    """Intake row shaped like the real extractor output: validated_json has
+    {fieldKey: {value, ...}} entries, confirmed_json is the flat confirmation
+    payload (empty unless given — the Java side stores the caseRequest map)."""
+    payload = {
+        "fields": {
+            key: {"value": value, "confidence": 0.9, "citations": []}
+            for key, value in validated_fields.items()
+        }
+    }
+    return {
+        "id": 9,
+        "contentHash": "h1",
+        "schemaVersion": "s1",
+        "promptVersion": "p1",
+        "model": "m",
+        "confirmedAt": "2025-01-01T00:00:00",
+        "validatedJson": _dump(payload),
+        "confirmedJson": _dump(confirmed_payload if confirmed_payload is not None else {}),
+    }
+
+
+def _decision(field_key, decision_type, value):
+    """One contract_intake_fact_decision row (Java recordIntakeFactDecisions)."""
+    return {
+        "fieldKey": field_key,
+        "confirmedValue": _dump({"value": value}),
+        "decisionType": decision_type,
+    }
+
+
 def _extraction_row():
     return {
         "id": 7, "documentId": 1, "documentVersion": 1, "contentHash": "h1",
@@ -162,17 +197,32 @@ def _dump(obj):
 
 
 # Canonical execute() order inside EvidenceContextBuilder._build:
-#   case, documents, clauses, intake, extraction-snapshot,
-#   elements (only when a snapshot row exists), knowledge-scope.
+#   case, documents, clauses, intake, fact-decisions (only when an intake row
+#   exists), extraction-snapshot, elements (only when a snapshot row exists),
+#   knowledge-scope.
 def _base_resultsets(*, with_intake=False, with_extraction=False, with_elements=False):
     sets = [_case_row(), [_document(1)], [_clause()]]
     if with_intake:
         sets.append([_intake_row()])
+        sets.append([])  # fact decisions — none
     else:
         sets.append([])
     if with_extraction:
         sets.append([_extraction_row()])
         sets.append([_element_row()] if with_elements else [])
+    else:
+        sets.append([])
+    sets.append([_knowledge_row()])
+    return sets
+
+
+def _intake_resultsets(intake_row, decisions, *, with_extraction=False):
+    """Resultsets for the human-confirmation contract tests (real-shaped
+    intake row + explicit fact-decision rows)."""
+    sets = [_case_row(), [_document(1)], [_clause()], [intake_row], list(decisions)]
+    if with_extraction:
+        sets.append([_extraction_row()])
+        sets.append([])  # elements
     else:
         sets.append([])
     sets.append([_knowledge_row()])
@@ -501,6 +551,7 @@ def test_load_snapshot_parses_intake_and_extraction_json(monkeypatch):
         [_document(1)],
         [_clause()],
         [_intake_row()],
+        [],  # fact decisions — none
         [_extraction_row()],
         [_element_row()],
         [_knowledge_row()],
@@ -517,3 +568,101 @@ def test_load_snapshot_parses_intake_and_extraction_json(monkeypatch):
     assert snap["confirmed_intake_fields"]["fields"] == {"party": "A"}
     assert snap["latest_confirmed_extraction_snapshot"]["id"] == 7
     assert snap["missing_inputs"] == []
+
+
+# ───────────── human-confirmed values enter the snapshot (PRD §14-3) ────────
+
+
+def test_edited_decision_overrides_field_and_moves_hash(monkeypatch):
+    """A human EDITED value replaces the AI-proposed value in the canonical
+    ``fields`` view and changes the snapshot hash (证据内容变了)."""
+    validated = {"amount": 100, "currency": "CNY"}
+    before = _load_snapshot(monkeypatch, _intake_resultsets(_validated_intake_row(validated), []))
+    after = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row(validated), [_decision("amount", "EDITED", 999)]))
+
+    assert before["confirmed_intake_fields"]["fields"]["amount"]["value"] == 100
+    edited = after["confirmed_intake_fields"]["fields"]["amount"]
+    assert edited["value"] == 999
+    assert edited["decisionType"] == "EDITED"
+    assert edited["humanConfirmed"] is True
+    assert edited["confidence"] == 0.9  # proposal metadata survives the overlay
+    assert after["confirmed_intake_fields"]["fields"]["currency"]["value"] == "CNY"
+    assert before["snapshot_hash"] != after["snapshot_hash"]
+
+
+def test_accepted_decision_stamps_without_moving_hash(monkeypatch):
+    """ACCEPTED confirmation keeps the proposed value; the decision stamp is
+    metadata only and must not churn the hash (hash = evidence content, not
+    the event stream)."""
+    validated = {"amount": 100}
+    before = _load_snapshot(monkeypatch, _intake_resultsets(_validated_intake_row(validated), []))
+    after = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row(validated), [_decision("amount", "ACCEPTED", 100)]))
+
+    accepted = after["confirmed_intake_fields"]["fields"]["amount"]
+    assert accepted["value"] == 100
+    assert accepted["decisionType"] == "ACCEPTED"
+    assert accepted["humanConfirmed"] is True
+    assert before["snapshot_hash"] == after["snapshot_hash"]
+
+
+def test_user_supplied_decision_fills_empty_field(monkeypatch):
+    """USER_SUPPLIED fills a field the model left empty; the new value enters
+    the hash."""
+    before = _load_snapshot(monkeypatch, _intake_resultsets(_validated_intake_row({"amount": None}), []))
+    after = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row({"amount": None}), [_decision("amount", "USER_SUPPLIED", 500)]))
+
+    assert before["confirmed_intake_fields"]["fields"]["amount"]["value"] is None
+    supplied = after["confirmed_intake_fields"]["fields"]["amount"]
+    assert supplied["value"] == 500
+    assert supplied["decisionType"] == "USER_SUPPLIED"
+    assert before["snapshot_hash"] != after["snapshot_hash"]
+
+
+def test_cleared_decision_empties_field(monkeypatch):
+    """CLEARED is the human's explicit 'this is empty' — value becomes None
+    (not silently dropped, not kept as the proposal)."""
+    validated = {"amount": 100}
+    before = _load_snapshot(monkeypatch, _intake_resultsets(_validated_intake_row(validated), []))
+    after = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row(validated), [_decision("amount", "CLEARED", None)]))
+
+    cleared = after["confirmed_intake_fields"]["fields"]["amount"]
+    assert cleared["value"] is None
+    assert cleared["decisionType"] == "CLEARED"
+    assert cleared["humanConfirmed"] is True
+    assert before["snapshot_hash"] != after["snapshot_hash"]
+
+
+def test_legacy_confirmed_json_overlays_matching_field_keys(monkeypatch):
+    """A CONFIRMED intake without fact-decision rows (legacy) takes direct-key
+    values from the flat confirmed_json payload — but only for keys already in
+    the field space (title ≠ contractTitle, so no fragile mapping)."""
+    intake = _validated_intake_row(
+        {"amount": None, "currency": None, "contractTitle": "AI提的标题"},
+        confirmed_payload={"amount": 888, "currency": "USD", "title": "人工标题"},
+    )
+    snap = _load_snapshot(monkeypatch, _intake_resultsets(intake, []))
+    fields = snap["confirmed_intake_fields"]["fields"]
+    assert fields["amount"]["value"] == 888
+    assert fields["amount"]["decisionType"] == "LEGACY_CONFIRMED"
+    assert fields["currency"]["value"] == "USD"
+    assert fields["contractTitle"]["value"] == "AI提的标题"  # 无同键可回退，保留提议值
+    assert "title" not in fields
+    # raw confirmed payload stays available under its own key, unmangled
+    assert snap["confirmed_intake_fields"]["confirmed"] == {
+        "amount": 888, "currency": "USD", "title": "人工标题",
+    }
+
+
+def test_confirmed_payload_passthrough_alongside_decisions(monkeypatch):
+    """``confirmed`` keeps the raw confirmed_json payload even when per-field
+    decisions exist — consumers needing the whole confirmation record find it
+    unmangled next to the merged ``fields``."""
+    snap = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row({"amount": 100}, confirmed_payload={"amount": 999}),
+        [_decision("amount", "EDITED", 999)]))
+    assert snap["confirmed_intake_fields"]["confirmed"] == {"amount": 999}
+    assert snap["confirmed_intake_fields"]["fields"]["amount"]["value"] == 999
