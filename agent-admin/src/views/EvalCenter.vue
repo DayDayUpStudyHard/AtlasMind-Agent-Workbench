@@ -356,8 +356,13 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column prop="statusLabel" label="状态" width="90" align="center">
-            <template #default="{ row }">{{ row.statusLabel || formatStatus(row.status) }}</template>
+          <el-table-column prop="statusLabel" label="状态" width="100" align="center">
+            <template #default="{ row }">
+              <el-tooltip v-if="stopReason(row)" :content="stopReason(row)" placement="top">
+                <el-tag type="warning" effect="plain" size="small">部分（中止）</el-tag>
+              </el-tooltip>
+              <template v-else>{{ row.statusLabel || formatStatus(row.status) }}</template>
+            </template>
           </el-table-column>
           <el-table-column label="进度" width="180" align="center">
             <template #default="{ row }">
@@ -373,8 +378,15 @@
           <el-table-column label="完整报告" width="90" align="center">
             <template #default="{ row }">{{ formatEffectiveCases(row) }}</template>
           </el-table-column>
-          <el-table-column label="风险召回" width="100" align="center">
-            <template #default="{ row }">{{ formatMetric(row, 'highRiskRecall') }}</template>
+          <el-table-column label="风险召回" width="110" align="center">
+            <template #default="{ row }">
+              <div style="display:flex;flex-direction:column;gap:2px;align-items:center">
+                <span>{{ formatMetric(row, 'highRiskRecall') }}</span>
+                <el-tooltip v-if="rescoreInfo(row).official !== null" :content="rescoreInfo(row).tip" placement="top">
+                  <el-tag type="warning" effect="plain" size="small">重算</el-tag>
+                </el-tooltip>
+              </div>
+            </template>
           </el-table-column>
           <el-table-column label="引用率" width="90" align="center">
             <template #default="{ row }">{{ formatMetric(row, 'dualCitationRate') }}</template>
@@ -403,6 +415,9 @@
             <el-descriptions-item label="状态">
               <el-tag size="small" :type="statusTagType(viewingRun.status)">{{ viewingRun.statusLabel || formatStatus(viewingRun.status) }}</el-tag>
             </el-descriptions-item>
+            <el-descriptions-item v-if="stopReason(viewingRun)" label="中止原因" :span="2">
+              <span style="color:#e6a23c">{{ stopReason(viewingRun) }}</span>
+            </el-descriptions-item>
             <el-descriptions-item label="Runtime">{{ viewingRun.runtimeEngineLabel || formatRuntimeEngine(viewingRun.runtimeEngine) }}</el-descriptions-item>
             <el-descriptions-item v-if="viewingRun.runtimeEngineMismatch" label="实际执行引擎">
               <el-tag type="danger" size="small">{{ viewingRun.actualRuntimeEngineLabel || viewingRun.actualRuntimeEngine }}</el-tag>
@@ -413,6 +428,9 @@
             <el-descriptions-item label="LLM 模型">{{ viewingRun.llmModel || '（默认）' }}</el-descriptions-item>
             <el-descriptions-item label="提示词版本">{{ viewingRun.promptVersion || '（默认）' }}</el-descriptions-item>
             <el-descriptions-item label="风险召回">{{ formatMetric(viewingRun, 'highRiskRecall') }}</el-descriptions-item>
+            <el-descriptions-item v-if="rescoreInfo(viewingRun).official !== null" label="官方原值召回" :span="2">
+              <span style="color:#e6a23c">{{ (Number(rescoreInfo(viewingRun).official) * 100).toFixed(0) }}%（评分器修复前，已重算）</span>
+            </el-descriptions-item>
             <el-descriptions-item label="双引用率">{{ formatMetric(viewingRun, 'dualCitationRate') }}</el-descriptions-item>
             <el-descriptions-item label="误报率">{{ formatMetric(viewingRun, 'falsePositiveRate') }}</el-descriptions-item>
             <el-descriptions-item label="Schema 有效率">{{ formatMetric(viewingRun, 'schemaValidRate') }}</el-descriptions-item>
@@ -881,9 +899,28 @@ function formatRuntimeEngine(v) {
 }
 function formatMetric(row, key) {
   if (['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status)) return row.caseCount ? '计算中' : '待汇总'
-  if (['FAILED', 'ENVIRONMENT_UNAVAILABLE'].includes(row?.status)) return '-'
+  if (['FAILED', 'ENVIRONMENT_UNAVAILABLE'].includes(row?.status)) {
+    // 手动中止的部分评测：指标列可能为空，真实值在 summary_json.partialMetrics
+    const summary = parseSummary(row?.summaryJson)
+    const value = Number(row?.[key] ?? summary.partialMetrics?.[key])
+    if (summary.partialMetrics && Number.isFinite(value)) return `${(value * 100).toFixed(0)}%（部分）`
+    return '-'
+  }
   const value = Number(row?.[key])
   return Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '-'
+}
+function stopReason(row) {
+  return parseSummary(row?.summaryJson).stopReason || ''
+}
+function rescoreInfo(row) {
+  const summary = parseSummary(row?.summaryJson)
+  const official = summary.officialHighRiskRecall
+  if (official === undefined || official === null) return { official: null, tip: '' }
+  const note = summary.rescore?.note || '评分器维度规范化修复后重算（未重跑用例，官方原值保留）'
+  return {
+    official,
+    tip: `官方原值 ${(Number(official) * 100).toFixed(0)}% → 重算 ${note}`,
+  }
 }
 function evalPercent(row) {
   const summary = parseSummary(row?.summaryJson)
@@ -910,6 +947,10 @@ function formatEffectiveCases(row) {
   const total = Number(row?.caseCount ?? summary.caseCount ?? 0)
   if (!Number.isFinite(total) || total <= 0) return '-'
   if (['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status)) return `${Number(row?.passedCount ?? 0)}/${total}`
+  if (summary.partialMetrics) {
+    const done = Number(summary.partialMetrics.metricCaseCount ?? row?.passedCount ?? 0)
+    return `${done}/${total}（部分）`
+  }
   const failed = Number(summary.failedCount ?? Math.max(total - Number(row?.passedCount ?? 0), 0))
   const limited = Number(summary.limitedCount ?? (Number(summary.limitedReportRate) > 0 ? Math.round(Number(summary.limitedReportRate) * total) : 0))
   const infra = Number(summary.infraFailedCount ?? summary.infraFailedCases ?? 0)
