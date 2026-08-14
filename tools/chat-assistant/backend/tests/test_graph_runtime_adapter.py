@@ -281,3 +281,67 @@ def test_graph_adapter_without_heartbeat_store_skips_loop(monkeypatch):
         assert result.status == "COMPLETED"
 
     asyncio.run(exercise())
+
+
+class _ConfigCapturingGraph(_CompletedGraph):
+    """Records the ainvoke config so tests can assert the checkpoint thread."""
+
+    def __init__(self):
+        super().__init__()
+        self.config = None
+
+    async def ainvoke(self, state, config):
+        self.initial_state = dict(state)
+        self.config = dict(config)
+        return {**state, "artifact": {"reportType": "CONTRACT_REVIEW"}}
+
+
+class _ShadowRecordingStore(_RecordingRunStore):
+    def __init__(self):
+        super().__init__()
+        self.heartbeats: list[int] = []
+
+    async def heartbeat(self, run_id):
+        self.heartbeats.append(run_id)
+
+
+def test_graph_adapter_shadow_mode_skips_run_writes_and_uses_shadow_thread(monkeypatch):
+    """Shadow runs (PRD §26.2) must not write run metadata or heartbeats and
+    must checkpoint under a shadow- thread so the primary run's checkpoint
+    stream stays clean."""
+    import app.agent_runtime.runtime as runtime
+
+    monkeypatch.setattr(runtime, "GRAPH_HEARTBEAT_INTERVAL", 0.01)
+    monkeypatch.setattr(
+        runtime,
+        "_runtime_model_metadata",
+        lambda _task_type: ("test-llm", "test-prompt"),
+    )
+
+    async def exercise():
+        graph = _ConfigCapturingGraph()
+        store = _ShadowRecordingStore()
+        adapter = GraphAdapter(
+            graph,
+            graph_name="contract_review",
+            graph_version="v2",
+            run_store=store,
+        )
+        context = AgentTaskContext(
+            run_id=903,
+            project_id=1,
+            task_type="CONTRACT_REVIEW",
+            question="",
+            subject_type="CONTRACT_CASE",
+            subject_id=1,
+            shadow_mode=True,
+        )
+        result = await adapter.run(context)
+        assert result.status == "COMPLETED"
+        assert graph.initial_state["shadow_mode"] is True
+        assert graph.config["configurable"]["thread_id"] == "shadow-run-903"
+        assert store.runtime_metadata == [], "shadow run must not write start metadata"
+        await asyncio.sleep(0.05)  # allow heartbeat ticks if one were started
+        assert store.heartbeats == [], "shadow run must not heartbeat"
+
+    asyncio.run(exercise())

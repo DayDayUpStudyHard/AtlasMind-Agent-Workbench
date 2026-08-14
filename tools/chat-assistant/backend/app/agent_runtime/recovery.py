@@ -76,11 +76,15 @@ class RunRecovery:
         except Exception:
             logger.exception("Stuck-CREATED recovery scan failed")
 
-        # 2. Timed-out active runs
+        # 2. Timed-out active runs. Heartbeat-aware: a run that keeps beating
+        # is alive even past the timeout (v2 pilot cases legitimately exceed
+        # 900s); only runs whose heartbeat is also stale are killed here.
+        # Runs without any heartbeat keep the create_time-based judgment.
         try:
             timed_out = await self._run_store.find_timed_out_runs(
                 self._timeout,
                 statuses=("CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING"),
+                require_stale_heartbeat=True,
             )
             for run_id in timed_out:
                 logger.warning("Recovery: marking run %s as FAILED (timeout %ss)",

@@ -120,6 +120,10 @@ class AgentTaskContext:
     subject_id: int = 0
     project: dict = field(default_factory=dict)
     task_input: dict = field(default_factory=dict)
+    # Shadow runs (PRD §26.2) execute a second graph beside the primary one
+    # for comparison. The shadow graph must not write run rows, reports or
+    # traces — it only produces a result to diff against.
+    shadow_mode: bool = False
 
     @classmethod
     def from_request(cls, run_id: int, request: StartRunRequest) -> "AgentTaskContext":

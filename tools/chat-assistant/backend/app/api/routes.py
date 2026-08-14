@@ -1984,6 +1984,12 @@ def _update_eval_progress(
         if value is not None:
             sets.append(f"{column}=%s")
             params.append(value)
+    if status not in (None, "QUEUED"):
+        # First driver touch = real start. Rows created by direct DB insert sit
+        # QUEUED with started_at NULL; COALESCE keeps a pre-set value if one
+        # exists and stamps NOW() on the QUEUED -> first-active transition, so
+        # the UI never shows row-creation time as the run's start.
+        sets.append("started_at=COALESCE(started_at, NOW())")
     if finished:
         sets.append("finished_at=NOW()")
     if not sets and summary_patch is None:

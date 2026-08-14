@@ -217,7 +217,14 @@ class RunStore(ABC):
         self,
         timeout_seconds: int,
         statuses: tuple[str, ...] | None = None,
+        require_stale_heartbeat: bool = False,
     ) -> list[int]:
+        """Return runs older than *timeout_seconds* in *statuses*.
+
+        With *require_stale_heartbeat*, a run whose heartbeat is still fresh
+        is considered alive regardless of age — long graph runs (e.g. the v2
+        pilot's >900s cases) are only killed when their heartbeat is lost.
+        """
         ...
 
     @abstractmethod
@@ -522,19 +529,31 @@ class MySqlRunStore(RunStore):
         self,
         timeout_seconds: int,
         statuses: tuple[str, ...] | None = None,
+        require_stale_heartbeat: bool = False,
     ) -> list[int]:
         def _find():
             selected_statuses = statuses or (
                 "CREATED", "CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING",
             )
             placeholders = ",".join(["%s"] * len(selected_statuses))
+            heartbeat_clause = ""
+            if require_stale_heartbeat:
+                # Alive-if-heartbeating: only runs without a heartbeat at all
+                # (pre-heartbeat dispatch paths) or with a lost heartbeat are
+                # eligible. Runs actively heartbeating are never "timed out".
+                heartbeat_clause = (
+                    "AND (last_heartbeat_at IS NULL"
+                    " OR last_heartbeat_at < DATE_SUB(NOW(), INTERVAL %s SECOND))"
+                )
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         f"""SELECT id FROM agent_run
                             WHERE status IN ({placeholders})
-                              AND create_time < DATE_SUB(NOW(), INTERVAL %s SECOND)""",
-                        (*selected_statuses, timeout_seconds),
+                              AND create_time < DATE_SUB(NOW(), INTERVAL %s SECOND)
+                              {heartbeat_clause}""",
+                        (*selected_statuses, timeout_seconds,
+                         *((timeout_seconds,) if require_stale_heartbeat else ())),
                     )
                     return [row["id"] for row in cur.fetchall()]
 

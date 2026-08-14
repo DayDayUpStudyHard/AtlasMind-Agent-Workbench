@@ -255,6 +255,12 @@ class MySqlCheckpointSaver:
             except ValueError:
                 pass
 
+        # Shadow runs (PRD §26.2) checkpoint under a "shadow-" thread and must
+        # not touch the primary run's row, traces or tool-call records — the
+        # primary graph owns those. Checkpoint rows themselves stay separate
+        # per thread, which also keeps the primary's resume history clean.
+        shadow_thread = thread_id.startswith("shadow-")
+
         try:
             from ..persistence import _conn
 
@@ -278,7 +284,7 @@ class MySqlCheckpointSaver:
                             state_json, state_hash,
                         ),
                     )
-                    if run_id > 0 and node_name in _NODE_PROGRESS:
+                    if run_id > 0 and not shadow_thread and node_name in _NODE_PROGRESS:
                         run_status, progress, step_label = _NODE_PROGRESS[node_name]
                         cur.execute(
                             """UPDATE agent_run
@@ -291,7 +297,7 @@ class MySqlCheckpointSaver:
                             (run_status, progress, step_label, run_id),
                         )
 
-                    if run_id > 0:
+                    if run_id > 0 and not shadow_thread:
                         # Keep the business run self-describing. These
                         # columns are optional for older databases, so a
                         # missing metadata column must not prevent checkpoint

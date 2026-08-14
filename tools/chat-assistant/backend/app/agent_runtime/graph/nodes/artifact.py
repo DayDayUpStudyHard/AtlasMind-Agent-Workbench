@@ -293,6 +293,23 @@ def persist_report(state: dict[str, Any]) -> dict[str, Any]:
     run_id = state.get("run_id", 0)
     subject_id = state.get("subject_id", 0)
 
+    if state.get("shadow_mode"):
+        # PRD §26.2: a shadow run must not overwrite the official report. Its
+        # artifact is only consumed for the SHADOW_DIFF comparison.
+        logger.info("Shadow run %s: report not persisted (shadow_mode)", run_id)
+        return {
+            "state_revision": state.get("state_revision", 0) + 1,
+            "current_node": "persist_report",
+            "observations": state.get("observations", []) + [{
+                "callId": f"shadow-skip-persist-{run_id}",
+                "planStepId": "persist_report",
+                "toolName": "persistReport",
+                "arguments": {"shadowMode": True},
+                "output": {"skipped": True},
+                "status": "DONE",
+            }],
+        }
+
     try:
         from ...persistence import MySqlReportStore
 

@@ -47,10 +47,12 @@ def main() -> int:
                     else:
                         print(f"run {run_id}: exists, features unchanged")
                     continue
+                # started_at left NULL while QUEUED — the driver stamps the
+                # real start on first touch (see _update_eval_progress).
                 cur.execute(
                     "INSERT INTO agent_eval_run "
-                    "(id, dataset_id, runtime_engine, status, started_at, features_json) "
-                    "VALUES (%s, %s, %s, 'QUEUED', NOW(), %s)",
+                    "(id, dataset_id, runtime_engine, status, features_json) "
+                    "VALUES (%s, %s, %s, 'QUEUED', %s)",
                     (run_id, dataset_id, runtime, features_json),
                 )
                 print(f"run {run_id}: created (dataset {dataset_id}, {runtime}, {features})")

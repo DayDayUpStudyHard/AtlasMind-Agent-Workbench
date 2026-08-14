@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import json
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
@@ -198,7 +199,11 @@ class GraphAdapter:
 
     async def run(self, context: Any) -> AgentResult:
         """Execute the graph for a new run."""
-        thread_id = f"run-{context.run_id}"
+        shadow_mode = bool(getattr(context, "shadow_mode", False))
+        # Shadow runs get their own checkpoint thread so the primary graph's
+        # checkpoint stream (and resume history) stays untouched; checkpoint
+        # persistence skips run-row/trace writes for shadow- threads.
+        thread_id = f"{'shadow-' if shadow_mode else ''}run-{context.run_id}"
         graph_name = self._graph_name or getattr(context, "graph_name", "unknown")
         graph_version = self._graph_version or getattr(context, "graph_version", "v1")
         model, prompt_version = _runtime_model_metadata(context.task_type)
@@ -219,6 +224,7 @@ class GraphAdapter:
             "observations": [],
             "citations": [],
             "errors": [],
+            "shadow_mode": shadow_mode,
         }
 
         config = {
@@ -227,21 +233,22 @@ class GraphAdapter:
                 "run_id": context.run_id,
             }
         }
-        await self._persist_start_metadata(
-            context.run_id,
-            graph_name,
-            graph_version,
-            model,
-            prompt_version,
-        )
-        # Keep the run row heartbeating while the graph executes: the
-        # RunRecovery sweeper (this process's or the API server's) marks runs
-        # in active statuses with a stale heartbeat as FAILED. The legacy
-        # AgentRunner beats from its dispatch path; graph dispatches did not,
-        # so any run whose event loop stays responsive (e.g. the v2 pilot's
-        # async retrieval) could be flagged mid-run.
-        if callable(getattr(self._run_store, "heartbeat", None)):
-            asyncio.create_task(self._heartbeat_loop(context.run_id))
+        if not shadow_mode:
+            await self._persist_start_metadata(
+                context.run_id,
+                graph_name,
+                graph_version,
+                model,
+                prompt_version,
+            )
+            # Keep the run row heartbeating while the graph executes: the
+            # RunRecovery sweeper (this process's or the API server's) marks runs
+            # in active statuses with a stale heartbeat as FAILED. The legacy
+            # AgentRunner beats from its dispatch path; graph dispatches did not,
+            # so any run whose event loop stays responsive (e.g. the v2 pilot's
+            # async retrieval) could be flagged mid-run.
+            if callable(getattr(self._run_store, "heartbeat", None)):
+                asyncio.create_task(self._heartbeat_loop(context.run_id))
         try:
             final_state = await self._graph.ainvoke(initial_state, config)
         except Exception as exc:
@@ -450,8 +457,10 @@ class GraphAdapter:
 class ShadowAdapter:
     """Runs two adapters in parallel, compares results, returns primary.
 
-    Shadow result is saved for evaluation. Always returns primary result to user.
-    Only enabled when AGENT_RUNTIME_SHADOW_ENABLED=true.
+    PRD §26.1/§26.2 (`shadow_v2`): the shadow graph executes beside the
+    production graph on the same case. The user-visible result is always the
+    primary's; the shadow result is recorded as a SHADOW_DIFF trace for
+    evaluation and never persisted as the official report.
     """
 
     def __init__(self, primary: AgentRuntime, shadow: AgentRuntime):
@@ -459,16 +468,34 @@ class ShadowAdapter:
         self._shadow = shadow
 
     async def run(self, context: Any) -> AgentResult:
-        import asyncio
+        import dataclasses
+        import time
 
+        # The shadow executes on a copy of the context flagged shadow_mode so
+        # GraphAdapter uses a separate checkpoint thread and skips run-row,
+        # trace and report writes (the primary owns those).
+        shadow_context = context
+        if dataclasses.is_dataclass(context) and not isinstance(context, type):
+            try:
+                shadow_context = dataclasses.replace(context, shadow_mode=True)
+            except TypeError:
+                shadow_context = context
+
+        started = time.monotonic()
         primary_task = asyncio.create_task(self._primary.run(context))
-        shadow_task = asyncio.create_task(self._shadow.run(context))
+        shadow_task = asyncio.create_task(self._shadow.run(shadow_context))
 
         primary_result = await primary_task
+        primary_elapsed = time.monotonic() - started
         try:
             shadow_result = await shadow_task
+            shadow_elapsed = time.monotonic() - started
             # Log differences for evaluation
-            _log_shadow_diff(context.run_id, primary_result, shadow_result)
+            _log_shadow_diff(
+                context.run_id, primary_result, shadow_result,
+                primary_elapsed_s=primary_elapsed,
+                shadow_elapsed_s=shadow_elapsed,
+            )
         except Exception as exc:
             logger.warning("Shadow run failed for run %s: %s", context.run_id, exc)
 
@@ -478,8 +505,20 @@ class ShadowAdapter:
         return await self._primary.resume(run_id, command)
 
 
-def _log_shadow_diff(run_id: int, primary: AgentResult, shadow: AgentResult) -> None:
-    """Compare primary and shadow results, log key differences."""
+def _log_shadow_diff(
+    run_id: int,
+    primary: AgentResult,
+    shadow: AgentResult,
+    *,
+    primary_elapsed_s: float = 0.0,
+    shadow_elapsed_s: float = 0.0,
+) -> None:
+    """Compare primary and shadow results, log and record key differences.
+
+    The comparison (PRD §26.2: 发现/引用/遗漏/延迟差异) is appended to the
+    primary run's trace as one SHADOW_DIFF event so the management UI shows it
+    beside the official result.
+    """
     p_artifact = primary.artifact or {}
     s_artifact = shadow.artifact or {}
 
@@ -489,25 +528,76 @@ def _log_shadow_diff(run_id: int, primary: AgentResult, shadow: AgentResult) -> 
     p_score = p_artifact.get("riskScore") or p_artifact.get("risk_score") or 0
     s_score = s_artifact.get("riskScore") or s_artifact.get("risk_score") or 0
     if p_score != s_score:
-        diffs.append(f"riskScore: legacy={p_score} graph={s_score}")
+        diffs.append(f"riskScore: primary={p_score} shadow={s_score}")
 
     # Compare finding counts
     p_findings = p_artifact.get("findings") or []
     s_findings = s_artifact.get("findings") or []
     if len(p_findings) != len(s_findings):
-        diffs.append(f"findingCount: legacy={len(p_findings)} graph={len(s_findings)}")
+        diffs.append(f"findingCount: primary={len(p_findings)} shadow={len(s_findings)}")
+
+    # Compare citation counts
+    p_citations = primary.citations or []
+    s_citations = shadow.citations or []
+    if len(p_citations) != len(s_citations):
+        diffs.append(f"citationCount: primary={len(p_citations)} shadow={len(s_citations)}")
 
     # Compare HIGH severity findings
     p_high = {f.get("title", "") for f in p_findings if str(f.get("severity", "")).upper() == "HIGH"}
     s_high = {f.get("title", "") for f in s_findings if str(f.get("severity", "")).upper() == "HIGH"}
     missing_in_shadow = p_high - s_high
     if missing_in_shadow:
-        diffs.append(f"HIGH findings MISSING in graph: {missing_in_shadow}")
+        diffs.append(f"HIGH findings MISSING in shadow: {missing_in_shadow}")
 
-    if diffs:
-        logger.warning("Shadow diff for run %s: %s", run_id, "; ".join(diffs))
-    else:
-        logger.info("Shadow run %s: no significant differences", run_id)
+    # Latency comparison (PRD §26.2) — always recorded, even when the
+    # finding/citation dimensions above show no difference.
+    diffs.append(
+        f"elapsed: primary={primary_elapsed_s:.1f}s shadow={shadow_elapsed_s:.1f}s"
+    )
+
+    summary = "Shadow v2 对照: " + "; ".join(diffs)
+    logger.info("Shadow diff for run %s: %s", run_id, "; ".join(diffs))
+
+    # Record the comparison on the primary run's trace. Best-effort: the
+    # shadow instrument must never fail the production dispatch.
+    try:
+        from .persistence import _conn
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT COALESCE(MAX(sequence_no), 0) + 1 AS seq"
+                    " FROM agent_run_trace WHERE run_id=%s",
+                    (run_id,),
+                )
+                seq_row = cur.fetchone()
+                if seq_row is None:
+                    return
+                cur.execute(
+                    """INSERT INTO agent_run_trace
+                       (run_id, event_type, sequence_no, summary, payload_json)
+                       VALUES (%s,'SHADOW_DIFF',%s,%s,%s)""",
+                    (
+                        run_id,
+                        int(seq_row["seq"]),
+                        summary[:500],
+                        json.dumps(
+                            {
+                                "primaryStatus": primary.status,
+                                "shadowStatus": shadow.status,
+                                "primaryGraph": (primary.graph_info or {}).get("graphName", ""),
+                                "shadowGraph": (shadow.graph_info or {}).get("graphName", ""),
+                                "primaryElapsedS": round(primary_elapsed_s, 1),
+                                "shadowElapsedS": round(shadow_elapsed_s, 1),
+                                "findingCounts": {"primary": len(p_findings), "shadow": len(s_findings)},
+                                "citationCounts": {"primary": len(p_citations), "shadow": len(s_citations)},
+                            },
+                            ensure_ascii=False,
+                        ),
+                    ),
+                )
+    except Exception as exc:
+        logger.debug("Shadow diff trace persist skipped for run %s: %s", run_id, exc)
 
 
 class LegacyHarnessAdapter:
@@ -619,6 +709,17 @@ class RuntimeRouter:
                     return adapter
             logger.warning("No graph adapter for task_type=%s, falling back to legacy", task_type)
 
+        # ── shadow_v2 mode (PRD §26.1 灰度期): v1 stays the production
+        # answer while v2 runs beside it for comparison ──
+        if resolved == "shadow_v2" and task_type == "CONTRACT_REVIEW":
+            primary = self._adapters.get("contract_review")
+            shadow = self._adapters.get("contract_review_v2")
+            if primary is not None and shadow is not None:
+                return ShadowAdapter(primary, shadow)
+            if primary is not None or shadow is not None:
+                return primary or shadow
+            logger.warning("shadow_v2 configured but v1/v2 adapters missing, falling back")
+
         # ── Fallback to legacy ──
         adapter = self._adapters.get(self._default)
         if adapter is None:
@@ -651,6 +752,24 @@ class RuntimeRouter:
                 "TIMELINE_EXTRACTION": "timeline_extraction",
             }.get(context.task_type, "")
             adapter = self._adapters.get(graph_name) if graph_name else None
+        elif mode == "shadow_v2":
+            # PRD §26.1/§26.2: v2 runs beside the production graph on the same
+            # case; the user-visible result stays the primary's (v1) and the
+            # shadow result is recorded as a SHADOW_DIFF trace for evaluation.
+            if context.task_type == "CONTRACT_REVIEW":
+                primary = self._adapters.get("contract_review")
+                shadow = self._adapters.get("contract_review_v2")
+                if primary is not None and shadow is not None:
+                    adapter = ShadowAdapter(primary, shadow)
+                else:
+                    adapter = primary or shadow
+            else:
+                graph_name = {
+                    "FULFILLMENT_CHECK": "fulfillment_check",
+                    "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
+                    "TIMELINE_EXTRACTION": "timeline_extraction",
+                }.get(context.task_type, "")
+                adapter = self._adapters.get(graph_name) if graph_name else None
         elif mode == "langgraph":
             graph_name = {
                 "CONTRACT_REVIEW": "contract_review",
