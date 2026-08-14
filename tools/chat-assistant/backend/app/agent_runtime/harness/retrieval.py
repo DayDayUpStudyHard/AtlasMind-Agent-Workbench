@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # semaphore keeps provider pressure under the cliff while queueing the rest.
 #
 # Must be a *threading* semaphore, not asyncio: graph nodes call retrieve_sync
-# from different threads, each with its own fresh event loop (see _run_async);
+# from different threads, each with its own fresh event loop (see run_async);
 # an asyncio.Semaphore binds to the first loop that uses it and then rejects
 # every later call from another loop ("bound to a different event loop").
 _CHANNEL_FANOUT_LIMIT = 3
@@ -233,7 +233,13 @@ def _rrf_fuse(ranked_lists: list[list[dict]], k: int = 60) -> list[dict]:
     )]
 
 
-def _dedupe_pool(hits: list[dict], limit: int | None = None) -> list[dict]:
+def dedupe_pool(hits: list[dict], limit: int | None = None) -> list[dict]:
+    """Public pool dedupe — first occurrence of each sourceId wins, capped.
+
+    Part of the harness public API (PRD §14-4): business graphs import the
+    public names, never the underscore aliases, so harness-internal changes
+    do not leak into business behavior.
+    """
     result: list[dict] = []
     seen: set[str] = set()
     for hit in hits:
@@ -245,6 +251,10 @@ def _dedupe_pool(hits: list[dict], limit: int | None = None) -> list[dict]:
         if limit and len(result) >= limit:
             break
     return result
+
+
+# back-compat alias for pre-publicization internal callers
+_dedupe_pool = dedupe_pool
 
 
 def _parent_key(clause_number: str) -> str | None:
@@ -327,7 +337,7 @@ def merge_bundles(primary: EvidenceBundle, targeted: EvidenceBundle) -> Evidence
     )
 
 
-def _normalize_hit(item: dict[str, Any]) -> dict[str, Any]:
+def normalize_hit(item: dict[str, Any]) -> dict[str, Any]:
     """Shared evidence normalization at the channel boundary.
 
     ContractStore hits do not always carry ``sourceId``; the orchestrator
@@ -371,6 +381,10 @@ def _normalize_hit(item: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
+# back-compat alias for pre-publicization internal callers
+_normalize_hit = normalize_hit
+
+
 # ─────────────────────────────── orchestrator ───────────────────────────────
 
 
@@ -402,7 +416,7 @@ class RetrievalOrchestrator:
         clauses: list[dict] | None = None,
     ) -> EvidenceBundle:
         """Synchronous entry for LangGraph nodes."""
-        return _run_async(self.retrieve(snapshot, request, clauses=clauses))
+        return run_async(self.retrieve(snapshot, request, clauses=clauses))
 
     async def retrieve(
         self,
@@ -490,7 +504,7 @@ class RetrievalOrchestrator:
             hits = list(result.get("hits") or [])
             channel_hits[channel_key] = channel_hits.get(channel_key, 0) + len(hits)
             pool_key = "counter_evidence" if channel_key == "counter" else _CHANNEL_POOL[channel_key]
-            normalized = [_normalize_hit(hit) for hit in hits]
+            normalized = [normalize_hit(hit) for hit in hits]
             pool_rankings[pool_key].extend(normalized)
             channel_rankings.setdefault(channel_key, []).extend(normalized)
 
@@ -500,9 +514,9 @@ class RetrievalOrchestrator:
             if key in ("contract", "clause_type")
         ]
         pools["contract_evidence"] = _rrf_fuse(contract_channels) if contract_channels else []
-        pools["policy_evidence"] = _dedupe_pool(pool_rankings["policy_evidence"])
-        pools["historical_evidence"] = _dedupe_pool(pool_rankings["historical_evidence"])
-        pools["counter_evidence"] = _dedupe_pool(pool_rankings["counter_evidence"])
+        pools["policy_evidence"] = dedupe_pool(pool_rankings["policy_evidence"])
+        pools["historical_evidence"] = dedupe_pool(pool_rankings["historical_evidence"])
+        pools["counter_evidence"] = dedupe_pool(pool_rankings["counter_evidence"])
 
         fusion_counts = {key: len(value) for key, value in pools.items()}
 
@@ -591,7 +605,7 @@ def flatten_bundle(bundle: EvidenceBundle) -> list[dict]:
     )
 
 
-def _run_async(awaitable: Awaitable[Any]) -> Any:
+def run_async(awaitable: Awaitable[Any]) -> Any:
     """Run an async call from a synchronous LangGraph node. Single
     implementation — ``graph/nodes/retrieval.py`` re-imports this one."""
     try:
@@ -601,6 +615,10 @@ def _run_async(awaitable: Awaitable[Any]) -> Any:
     context = contextvars.copy_context()
     with ThreadPoolExecutor(max_workers=1) as executor:
         return executor.submit(context.run, asyncio.run, awaitable).result()
+
+
+# back-compat alias for pre-publicization internal callers
+_run_async = run_async
 
 
 _orchestrator: RetrievalOrchestrator | None = None

@@ -74,7 +74,7 @@ def test_reranker_records_keyword_fallback_on_provider_error(monkeypatch):
 
 
 def test_rerank_context_is_visible_inside_retrieval_worker_thread():
-    from app.agent_runtime.graph.nodes.retrieval import _run_async
+    from app.agent_runtime.graph.nodes.retrieval import run_async
     from app.agent_runtime.reranker import _rerank_disabled
 
     async def read_setting():
@@ -83,7 +83,7 @@ def test_rerank_context_is_visible_inside_retrieval_worker_thread():
     async def run_inside_event_loop():
         token = _rerank_disabled.set(True)
         try:
-            return _run_async(read_setting())
+            return run_async(read_setting())
         finally:
             _rerank_disabled.reset(token)
 

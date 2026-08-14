@@ -8,7 +8,9 @@ shared lifecycle pieces, without changing v1 output fields.
                      CandidateResult / ValidationOutcome (PRD §10)
 * ``retrieval``    — RetrievalOrchestrator (PRD §11.2) — risk v1, 要素提取 and
                      review v2 all retrieve through this; v1 nodes re-import
-                     ``_run_async`` / ``_normalize_hit`` / ``_dedupe_pool``
+                     the public ``run_async`` / ``normalize_hit`` /
+                     ``dedupe_pool`` (underscore aliases exist only for
+                     pre-publicization internal callers)
 * ``validation``   — GroundingValidator (PRD §11.3) — used by 要素提取 / review v2
 * ``observation``  — ObservabilityRecorder (PRD §11.6, minimal dict form)
 * ``fakes``        — fake adapters / reranker / snapshot for pure unit tests
@@ -40,6 +42,13 @@ from .models import (  # noqa: F401
     EvidenceNeed,
     RetrievalRequest,
     ValidationOutcome,
+    WorkUnit,
 )
-from .retrieval import RetrievalOrchestrator, get_orchestrator  # noqa: F401
+from .retrieval import (  # noqa: F401
+    RetrievalOrchestrator,
+    dedupe_pool,
+    get_orchestrator,
+    normalize_hit,
+    run_async,
+)
 from .validation import GroundingValidator  # noqa: F401

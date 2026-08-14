@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
 
+from langgraph.errors import GraphInterrupt
+
 # Graph dispatch heartbeat cadence, matching AgentRunner.HEARTBEAT_INTERVAL.
 # Exposed as a module constant so tests can shorten it.
 GRAPH_HEARTBEAT_INTERVAL = 15
@@ -172,6 +174,7 @@ class GraphAdapter:
         self._graph_name = graph_name
         self._graph_version = graph_version
         self._run_store = run_store
+        self._heartbeat_task: asyncio.Task | None = None
 
     async def _persist_start_metadata(
         self,
@@ -233,6 +236,7 @@ class GraphAdapter:
                 "run_id": context.run_id,
             }
         }
+        heartbeat_task = None
         if not shadow_mode:
             await self._persist_start_metadata(
                 context.run_id,
@@ -246,30 +250,36 @@ class GraphAdapter:
             # in active statuses with a stale heartbeat as FAILED. The legacy
             # AgentRunner beats from its dispatch path; graph dispatches did not,
             # so any run whose event loop stays responsive (e.g. the v2 pilot's
-            # async retrieval) could be flagged mid-run.
+            # async retrieval) could be flagged mid-run. The task reference is
+            # kept and cancelled below — a paused (WAITING_HUMAN) run must not
+            # keep a heartbeat task alive.
             if callable(getattr(self._run_store, "heartbeat", None)):
-                asyncio.create_task(self._heartbeat_loop(context.run_id))
+                heartbeat_task = asyncio.create_task(self._heartbeat_loop(context.run_id))
+                self._heartbeat_task = heartbeat_task
         try:
             final_state = await self._graph.ainvoke(initial_state, config)
+        except GraphInterrupt:
+            # Graph paused at an interrupt() node — expected for HITL.
+            # Typed on the exception class, never on message text: a plain
+            # failure whose message happens to say "interrupted" must stay
+            # FAILED, and a GraphInterrupt whose message has no English
+            # marker must stay HITL.
+            logger.info("Graph %s interrupted for run %s (HITL)",
+                       initial_state.get("graph_name", ""), context.run_id)
+            return AgentResult(
+                run_id=context.run_id,
+                status="WAITING_HUMAN",
+                artifact={},
+                graph_info={
+                    "runtimeEngine": "langgraph",
+                    "graphName": initial_state.get("graph_name", ""),
+                    "graphVersion": initial_state.get("graph_version", ""),
+                    "model": initial_state.get("model", ""),
+                    "promptVersion": initial_state.get("prompt_version", ""),
+                    "waitState": initial_state.get("wait_state") or {"type": "WAITING_HUMAN"},
+                },
+            )
         except Exception as exc:
-            err_str = str(exc)
-            # GraphInterrupt: graph paused at interrupt_before — expected for HITL
-            if "GraphInterrupt" in err_str or "interrupt" in err_str.lower():
-                logger.info("Graph %s interrupted for run %s (HITL)",
-                           initial_state.get("graph_name", ""), context.run_id)
-                return AgentResult(
-                    run_id=context.run_id,
-                    status="WAITING_HUMAN",
-                    artifact={},
-                    graph_info={
-                        "runtimeEngine": "langgraph",
-                        "graphName": initial_state.get("graph_name", ""),
-                        "graphVersion": initial_state.get("graph_version", ""),
-                        "model": initial_state.get("model", ""),
-                        "promptVersion": initial_state.get("prompt_version", ""),
-                        "waitState": initial_state.get("wait_state") or {"type": "WAITING_HUMAN"},
-                    },
-                )
             logger.exception("Graph run failed for run %s", context.run_id)
             return AgentResult(
                 run_id=context.run_id,
@@ -283,6 +293,13 @@ class GraphAdapter:
                     "promptVersion": initial_state.get("prompt_version", ""),
                 },
             )
+        finally:
+            # run() is over on every exit path — stop beating the run row.
+            # The loop's own status check is the backstop; this cancel makes
+            # the stop immediate (no lingering 15s tick after return).
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                self._heartbeat_task = None
 
         if final_state.get("__interrupt__"):
             wait_state = final_state.get("wait_state") or {}
@@ -353,12 +370,15 @@ class GraphAdapter:
         """Refresh last_heartbeat_at every 15s until the run row is terminal.
 
         Self-terminating: exits once the row leaves the active statuses, so it
-        needs no cancellation plumbing across `run()`'s return paths. A failed
-        read must not kill the loop — try again next tick.
+        needs no cancellation plumbing across `run()`'s return paths (run()
+        still cancels the task explicitly on return). WAITING_HUMAN is
+        deliberately NOT active here: a paused run is not executing, and the
+        RunRecovery sweeper does not kill WAITING_HUMAN rows — a long-pending
+        confirmation must not keep a background task and heartbeat writes
+        alive. A failed read must not kill the loop — try again next tick.
         """
         active_statuses = (
             "CREATED", "CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING",
-            "WAITING_HUMAN",
         )
         while True:
             await asyncio.sleep(GRAPH_HEARTBEAT_INTERVAL)
@@ -393,6 +413,19 @@ class GraphAdapter:
                     "operator_id": command.operator_id,
                 }),
                 config,
+            )
+        except GraphInterrupt:
+            # The graph paused again after the human input — stay in the HITL
+            # state, never report a failure for an expected pause.
+            logger.info("Graph re-interrupted on resume for run %s (HITL)", run_id)
+            return AgentResult(
+                run_id=run_id,
+                status="WAITING_HUMAN",
+                artifact={},
+                graph_info={
+                    "runtimeEngine": "langgraph",
+                    "waitState": {"type": "WAITING_HUMAN"},
+                },
             )
         except Exception as exc:
             logger.exception("Graph resume failed for run %s", run_id)

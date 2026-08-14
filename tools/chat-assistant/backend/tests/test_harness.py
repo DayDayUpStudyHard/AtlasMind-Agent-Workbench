@@ -530,12 +530,23 @@ def test_fanout_gate_survives_cross_loop_usage():
 def test_v1_nodes_reimport_harness_helpers_as_single_implementation():
     """The mirror copies in graph/nodes/retrieval.py must now BE the harness
     functions (identity, not just behavioral equality) — otherwise a future
-    edit to one side silently forks the two implementations again."""
+    edit to one side silently forks the two implementations again. Business
+    graphs import the *public* names only (验收 P2: underscore imports would
+    let harness-internal changes leak into business behavior)."""
     from app.agent_runtime.graph.nodes import retrieval as v1_retrieval
     from app.agent_runtime import harness as harness_pkg
 
-    assert v1_retrieval._run_async is harness_pkg.retrieval._run_async
-    assert v1_retrieval._normalize_evidence is harness_pkg.retrieval._normalize_hit
+    assert v1_retrieval.run_async is harness_pkg.retrieval.run_async
+    assert v1_retrieval._normalize_evidence is harness_pkg.retrieval.normalize_hit
+    # public API also exported at the harness package level
+    assert harness_pkg.run_async is harness_pkg.retrieval.run_async
+    assert harness_pkg.normalize_hit is harness_pkg.retrieval.normalize_hit
+    assert harness_pkg.dedupe_pool is harness_pkg.retrieval.dedupe_pool
+    assert harness_pkg.WorkUnit is not None  # baseline top-level export (验收 P1)
+    # no underscore import left in the business graph
+    assert not hasattr(v1_retrieval, "_run_async")
+    assert not hasattr(v1_retrieval, "_normalize_hit")
+    assert not hasattr(v1_retrieval, "_dedupe_pool")
 
 
 def test_v1_validation_prefixes_are_the_harness_vocabulary():

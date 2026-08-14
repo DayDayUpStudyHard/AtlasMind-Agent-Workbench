@@ -31,19 +31,16 @@ async def load_run_context(state: dict[str, Any]) -> dict[str, Any]:
             include_content_text=False,
         )
     except Exception as exc:
-        logger.warning("Failed to load shared contract evidence snapshot: %s", exc)
-        shared_snapshot = {
-            "case": state.get("case_snapshot") or {},
-            "documents": [],
-            "currentDocument": {},
-            "clauses": [],
-            "clauseCount": 0,
-            "confirmedIntake": {},
-            "extractionSnapshot": {},
-            "documentQuality": {},
-            "snapshotHash": "",
-            "snapshot_hash": "",
-        }
+        # PRD §14-5: a snapshot load failure must end the run as FAILED.
+        # Falling back to an empty snapshot would let every downstream stage
+        # run against zero evidence and emit wrong "缺少条款" risks.
+        logger.exception(
+            "Failed to load shared contract evidence snapshot (caseId=%s): %s",
+            case_id, exc,
+        )
+        raise RuntimeError(
+            f"证据快照加载失败，运行终止（caseId={case_id}）：{exc}"
+        ) from exc
 
     case_snapshot = dict(shared_snapshot.get("case") or {})
     extraction_snapshot = shared_snapshot.get("extractionSnapshot") or {}

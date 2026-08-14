@@ -607,6 +607,23 @@ def test_accepted_decision_stamps_without_moving_hash(monkeypatch):
     assert before["snapshot_hash"] == after["snapshot_hash"]
 
 
+def test_accepted_equivalent_value_keeps_proposed_representation(monkeypatch):
+    """ACCEPTED with a representation-only difference (54600000.0 proposed,
+    54600000 confirmed — real data in intakes 38/43) must keep the proposed
+    value: business-equivalent, and replacing it would churn the hash on JSON
+    representation alone."""
+    validated = {"amount": 54600000.0}
+    before = _load_snapshot(monkeypatch, _intake_resultsets(_validated_intake_row(validated), []))
+    after = _load_snapshot(monkeypatch, _intake_resultsets(
+        _validated_intake_row(validated), [_decision("amount", "ACCEPTED", 54600000)]))
+
+    accepted = after["confirmed_intake_fields"]["fields"]["amount"]
+    assert accepted["value"] == 54600000.0  # proposed representation survives
+    assert accepted["decisionType"] == "ACCEPTED"
+    assert accepted["humanConfirmed"] is True
+    assert before["snapshot_hash"] == after["snapshot_hash"]
+
+
 def test_user_supplied_decision_fills_empty_field(monkeypatch):
     """USER_SUPPLIED fills a field the model left empty; the new value enters
     the hash."""
@@ -636,25 +653,57 @@ def test_cleared_decision_empties_field(monkeypatch):
     assert before["snapshot_hash"] != after["snapshot_hash"]
 
 
-def test_legacy_confirmed_json_overlays_matching_field_keys(monkeypatch):
-    """A CONFIRMED intake without fact-decision rows (legacy) takes direct-key
-    values from the flat confirmed_json payload — but only for keys already in
-    the field space (title ≠ contractTitle, so no fragile mapping)."""
+def test_legacy_confirmed_json_maps_title_and_parties_into_field_space(monkeypatch):
+    """Legacy rows predate fact_decision: their confirmed_json holds intake
+    request keys (title / ourEntity / counterparty), which must still override
+    the AI proposal in the field space (contractTitle / partyA / partyB) —
+    the human title and parties win, never the AI value."""
     intake = _validated_intake_row(
-        {"amount": None, "currency": None, "contractTitle": "AI提的标题"},
-        confirmed_payload={"amount": 888, "currency": "USD", "title": "人工标题"},
+        {
+            "contractTitle": "AI提的标题",
+            "partyA": "AI甲方",
+            "partyB": "AI乙方",
+            "amount": None,
+            "currency": None,
+        },
+        confirmed_payload={
+            "title": "人工标题",
+            "ourEntity": "我方主体",
+            "counterparty": "对方主体",
+            "ourSide": "A",
+            "amount": 888,
+            "currency": "USD",
+        },
     )
     snap = _load_snapshot(monkeypatch, _intake_resultsets(intake, []))
     fields = snap["confirmed_intake_fields"]["fields"]
+    assert fields["contractTitle"]["value"] == "人工标题"
+    assert fields["contractTitle"]["decisionType"] == "LEGACY_CONFIRMED"
+    assert fields["contractTitle"]["humanConfirmed"] is True
+    assert fields["partyA"]["value"] == "我方主体"
+    assert fields["partyB"]["value"] == "对方主体"
     assert fields["amount"]["value"] == 888
     assert fields["amount"]["decisionType"] == "LEGACY_CONFIRMED"
     assert fields["currency"]["value"] == "USD"
-    assert fields["contractTitle"]["value"] == "AI提的标题"  # 无同键可回退，保留提议值
     assert "title" not in fields
     # raw confirmed payload stays available under its own key, unmangled
     assert snap["confirmed_intake_fields"]["confirmed"] == {
-        "amount": 888, "currency": "USD", "title": "人工标题",
+        "title": "人工标题", "ourEntity": "我方主体", "counterparty": "对方主体",
+        "ourSide": "A", "amount": 888, "currency": "USD",
     }
+
+
+def test_legacy_confirmed_json_swaps_parties_when_our_side_is_b(monkeypatch):
+    """Party assignment mirrors Java recordIntakeFactDecisions: with ourSide=B
+    the counterparty is partyA and our entity is partyB."""
+    intake = _validated_intake_row(
+        {"partyA": "AI甲方", "partyB": "AI乙方"},
+        confirmed_payload={"ourEntity": "我方主体", "counterparty": "对方主体", "ourSide": "B"},
+    )
+    snap = _load_snapshot(monkeypatch, _intake_resultsets(intake, []))
+    fields = snap["confirmed_intake_fields"]["fields"]
+    assert fields["partyA"]["value"] == "对方主体"
+    assert fields["partyB"]["value"] == "我方主体"
 
 
 def test_confirmed_payload_passthrough_alongside_decisions(monkeypatch):

@@ -128,6 +128,31 @@ def _select_main_document(documents: list[dict[str, Any]], requested_document_id
     return max(ready_mains, key=lambda item: (int(item.get("version") or 0), int(item.get("id") or 0)))
 
 
+def _legacy_confirmed_field_space(confirmed: dict[str, Any]) -> dict[str, Any]:
+    """Map a legacy flat ``confirmed_json`` (intake-request keys) into the
+    validated field-key space.
+
+    Legacy rows predate ``contract_intake_fact_decision``; their human values
+    live under request keys, not field keys: ``title`` instead of
+    ``contractTitle``, and ``ourEntity`` / ``counterparty`` instead of
+    ``partyA`` / ``partyB``. Party assignment mirrors Java
+    ``recordIntakeFactDecisions``: partyA is our entity when ``ourSide`` is
+    "A" (the default), otherwise the counterparty.
+    """
+    mapped = {k: v for k, v in confirmed.items() if k != "title"}
+    mapped["contractTitle"] = confirmed.get("title")
+    our_side = str(confirmed.get("ourSide") or "A").strip().upper()
+    our_entity = confirmed.get("ourEntity")
+    counterparty = confirmed.get("counterparty")
+    if our_side == "B":
+        mapped["partyA"] = counterparty
+        mapped["partyB"] = our_entity
+    else:
+        mapped["partyA"] = our_entity
+        mapped["partyB"] = counterparty
+    return mapped
+
+
 def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
     """Latest CONFIRMED intake, with human-confirmed field values merged in.
 
@@ -146,9 +171,12 @@ def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
         - ``CLEARED``       → human explicitly emptied the field (value=None)
 
     * Legacy fallback: a CONFIRMED intake without fact-decision rows (written
-      before per-field decisions existed) takes direct-key values from
-      ``confirmed_json`` for keys that already exist in the field space, so
-      old confirmations still propagate their values.
+      before per-field decisions existed) overlays values from the flat
+      ``confirmed_json`` intake-request map onto keys that already exist in
+      the field space — including the legacy key mapping (``title`` →
+      ``contractTitle``, ``ourEntity``/``counterparty`` → ``partyA``/``partyB``
+      per ``ourSide``), so old confirmations override the AI proposal instead
+      of leaving it in place. See ``_legacy_confirmed_field_space``.
 
     * ``confirmed`` stays the raw ``confirmed_json`` payload, unmodified.
 
@@ -197,18 +225,28 @@ def _load_confirmed_intake(cur, case_id: int) -> dict[str, Any]:
         entry["humanConfirmed"] = True
         if decision_type == "CLEARED":
             entry["value"] = None
+        elif decision_type == "ACCEPTED" and entry.get("value") is not None:
+            # ACCEPTED means the confirmed value is business-equivalent to the
+            # proposal (Java equivalentFactValue). Keep the proposed value:
+            # replacing it can churn the hash on representation alone (e.g.
+            # 54600000.0 confirmed as 54600000), and the contract says the
+            # hash is insensitive to decision events.
+            pass
         else:
+            # EDITED / USER_SUPPLIED — the human value wins
             wrapper = _parse_json(decision.get("confirmedValue"), {})
             entry["value"] = wrapper.get("value") if isinstance(wrapper, dict) else None
         fields[field_key] = entry
 
-    # Legacy fallback: no decision rows at all → overlay direct-key matches
-    # from the flat confirmed_json payload (old confirmations).
+    # Legacy fallback: no decision rows at all → overlay the flat
+    # confirmed_json payload (old confirmations), mapped into the field-key
+    # space so the human title / parties override the AI proposal.
     if not decisions and isinstance(confirmed, dict):
+        legacy_space = _legacy_confirmed_field_space(confirmed)
         for field_key, entry in fields.items():
-            if field_key in confirmed and confirmed.get(field_key) not in (None, ""):
+            if field_key in legacy_space and legacy_space[field_key] not in (None, ""):
                 overlaid = dict(entry)
-                overlaid["value"] = confirmed[field_key]
+                overlaid["value"] = legacy_space[field_key]
                 overlaid["decisionType"] = "LEGACY_CONFIRMED"
                 overlaid["humanConfirmed"] = True
                 fields[field_key] = overlaid

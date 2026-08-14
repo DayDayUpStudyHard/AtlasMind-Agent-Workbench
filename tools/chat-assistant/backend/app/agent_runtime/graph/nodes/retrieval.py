@@ -7,19 +7,19 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from ...harness.retrieval import _dedupe_pool, _normalize_hit, _run_async
+from ...harness.retrieval import dedupe_pool, normalize_hit, run_async
 
 logger = logging.getLogger(__name__)
 
 # PRD §14-4: the shared spine lives in the harness — these were exact mirror
 # copies here. Single implementation now; behavior identical.
-_normalize_evidence = _normalize_hit
+_normalize_evidence = normalize_hit
 
 
 def _deduplicate_evidence(items: list[dict[str, Any]], limit: int = 18) -> list[dict[str, Any]]:
-    """Normalize + dedupe by ``sourceId`` (harness ``_dedupe_pool`` dedupes
+    """Normalize + dedupe by ``sourceId`` (harness ``dedupe_pool`` dedupes
     already-normalized hits, so the normalize step stays here)."""
-    return _dedupe_pool([_normalize_hit(item) for item in items], limit)
+    return dedupe_pool([normalize_hit(item) for item in items], limit)
 
 
 def _load_type_clauses(case_id: int, clause_types: list[str]) -> list[dict[str, Any]]:
@@ -185,7 +185,7 @@ def run_deterministic_rules(state: dict[str, Any]) -> dict[str, Any]:
     try:
         from ...contract_store import ContractStore
 
-        findings = _run_async(ContractStore().evaluate_rules(case_id, {
+        findings = run_async(ContractStore().evaluate_rules(case_id, {
             "ruleSet": f"{contract_type}_V1",
         }))
     except Exception as exc:
@@ -235,7 +235,7 @@ def retrieve_fulfillment_evidence(state: dict[str, Any]) -> dict[str, Any]:
         return verification, contract_hits
 
     try:
-        verification, contract_hits = _run_async(_retrieve())
+        verification, contract_hits = run_async(_retrieve())
     except Exception as exc:
         logger.exception("Fulfillment evidence retrieval failed: %s", exc)
         verification, contract_hits = {"error": str(exc), "evidenceDocuments": []}, []
