@@ -330,10 +330,10 @@ def merge_bundles(primary: EvidenceBundle, targeted: EvidenceBundle) -> Evidence
 def _normalize_hit(item: dict[str, Any]) -> dict[str, Any]:
     """Shared evidence normalization at the channel boundary.
 
-    ContractStore hits do not always carry ``sourceId`` (the v1 nodes used to
-    normalize after retrieval); the orchestrator needs it for RRF fusion and
-    pool dedupe, so it happens once here, for every graph. Mirrors
-    ``graph/nodes/retrieval.py:_normalize_evidence`` without importing it.
+    ContractStore hits do not always carry ``sourceId``; the orchestrator
+    needs it for RRF fusion and pool dedupe, so it happens once here, for
+    every graph. Single implementation since PRD §14-4 —
+    ``graph/nodes/retrieval.py`` re-imports this instead of keeping a copy.
     """
     value = dict(item)
     source_type = str(value.get("sourceType") or "").upper()
@@ -592,8 +592,8 @@ def flatten_bundle(bundle: EvidenceBundle) -> list[dict]:
 
 
 def _run_async(awaitable: Awaitable[Any]) -> Any:
-    """Run an async call from a synchronous LangGraph node (same pattern as
-    graph/nodes/retrieval.py — kept local so the harness imports no graph code)."""
+    """Run an async call from a synchronous LangGraph node. Single
+    implementation — ``graph/nodes/retrieval.py`` re-imports this one."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:

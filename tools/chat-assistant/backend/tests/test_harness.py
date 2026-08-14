@@ -8,6 +8,8 @@ Covers the user's Phase 2 test requirements:
 * ES-unavailable → observable fallback, other channels keep their evidence
 * risk + intake graphs consume the same EvidenceBundle entry
 * observation logs show per-round input / hit count / post-fusion count
+* PRD §14-4: v1 nodes re-import the harness helpers (single implementation)
+  with identical outputs — the v1 output-field contract must not move
 """
 
 import asyncio
@@ -520,3 +522,64 @@ def test_fanout_gate_survives_cross_loop_usage():
     assert not errors, f"cross-loop gate failed: {errors}"
     assert len(results) == 3
     assert peak <= _CHANNEL_FANOUT_LIMIT
+
+
+# ─────────────── PRD §14-4: v1 re-imports the harness (equivalence) ─────────
+
+
+def test_v1_nodes_reimport_harness_helpers_as_single_implementation():
+    """The mirror copies in graph/nodes/retrieval.py must now BE the harness
+    functions (identity, not just behavioral equality) — otherwise a future
+    edit to one side silently forks the two implementations again."""
+    from app.agent_runtime.graph.nodes import retrieval as v1_retrieval
+    from app.agent_runtime import harness as harness_pkg
+
+    assert v1_retrieval._run_async is harness_pkg.retrieval._run_async
+    assert v1_retrieval._normalize_evidence is harness_pkg.retrieval._normalize_hit
+
+
+def test_v1_validation_prefixes_are_the_harness_vocabulary():
+    from app.agent_runtime.graph.nodes import validation as v1_validation
+    from app.agent_runtime.harness.models import VALID_CITATION_PREFIXES
+
+    assert v1_validation._VALID_PREFIXES is VALID_CITATION_PREFIXES
+
+
+def test_v1_deduplicate_evidence_matches_old_algorithm_exactly():
+    """Pin the exact pre-extraction behavior of graph/nodes/retrieval.py
+    ``_deduplicate_evidence``: normalize → first-wins by sourceId → cap.
+    Raw items here are the shapes ContractStore used to hand v1 nodes."""
+    from app.agent_runtime.graph.nodes.retrieval import _deduplicate_evidence
+
+    items = [
+        {"clauseId": 1, "content": "第一条", "pageNumber": 3, "sourceType": "CONTRACT_CLAUSE"},
+        {"clauseId": 1, "content": "第一条重复", "sourceType": "CONTRACT_CLAUSE"},  # dupe → dropped
+        {"id": 7, "chunkId": 7, "snippet": "知识条目", "sourceType": "KB_CHUNK"},
+        {"sourceType": "HISTORICAL_FINDING", "id": 9, "fullText": "历史结论"},
+        {},  # no id → empty sourceId → dropped by the old algorithm too
+        {"clauseId": 2, "content": "第二条"},
+    ]
+    result = _deduplicate_evidence(items)
+
+    assert [item["sourceId"] for item in result] == [
+        "CONTRACT_CLAUSE:1", "KB_CHUNK:7", "HISTORICAL_FINDING:9", "CONTRACT_CLAUSE:2",
+    ]
+    # old normalization contract: clauseText from content, snippet filled,
+    # page copied from pageNumber, first occurrence wins
+    assert result[0]["clauseText"] == "第一条"
+    assert result[0]["snippet"] == "第一条"
+    assert result[0]["page"] == 3
+    assert result[1]["snippet"] == "知识条目"
+    assert result[2]["clauseText"] == "历史结论"
+
+
+def test_v1_deduplicate_evidence_caps_at_limit():
+    from app.agent_runtime.graph.nodes.retrieval import _deduplicate_evidence
+
+    items = [
+        {"clauseId": i, "content": f"条款{i}", "sourceType": "CONTRACT_CLAUSE"}
+        for i in range(1, 6)
+    ]
+    assert len(_deduplicate_evidence(items, limit=2)) == 2
+    assert len(_deduplicate_evidence(items, limit=18)) == 5
+    assert len(_deduplicate_evidence(items)) == 5  # default limit 18 unchanged

@@ -5,13 +5,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from ...harness.models import VALID_CITATION_PREFIXES as _VALID_PREFIXES
 
-# Known citation source type prefixes
-_VALID_PREFIXES = (
-    "CONTRACT_CLAUSE:", "KB_CHUNK:", "KB_DOCUMENT:",
-    "STANDARD_CLAUSE:", "FULFILLMENT_DOCUMENT:",
-)
+logger = logging.getLogger(__name__)
 
 
 def validate_claims(state: dict[str, Any]) -> dict[str, Any]:

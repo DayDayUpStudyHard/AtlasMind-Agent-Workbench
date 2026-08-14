@@ -3,76 +3,23 @@
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Awaitable
+from typing import Any
+
+from ...harness.retrieval import _dedupe_pool, _normalize_hit, _run_async
 
 logger = logging.getLogger(__name__)
 
-
-def _run_async(awaitable: Awaitable[Any]) -> Any:
-    """Run an async ContractStore call from a synchronous LangGraph node."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-    context = contextvars.copy_context()
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(context.run, asyncio.run, awaitable).result()
-
-
-def _normalize_evidence(item: dict[str, Any]) -> dict[str, Any]:
-    value = dict(item)
-    source_type = str(value.get("sourceType") or "").upper()
-    if source_type == "CONTRACT_CLAUSE" or value.get("clauseId"):
-        source_type = "CONTRACT_CLAUSE"
-        raw_id = value.get("clauseId") or value.get("id") or value.get("sourceId")
-    elif source_type in {"CONTRACT_STANDARD_CLAUSE", "STANDARD_CLAUSE"}:
-        source_type = "STANDARD_CLAUSE"
-        raw_id = value.get("id") or value.get("sourceId")
-    elif source_type in {"KB_CHUNK", "KB_DOCUMENT"} or value.get("chunkId"):
-        source_type = "KB_CHUNK" if value.get("chunkId") else "KB_DOCUMENT"
-        raw_id = value.get("chunkId") or value.get("sourceId") or value.get("documentId")
-    elif source_type == "HISTORICAL_FINDING":
-        raw_id = value.get("id") or value.get("sourceId")
-    else:
-        source_type = source_type or "UNKNOWN"
-        raw_id = value.get("id") or value.get("sourceId")
-
-    prefixed = str(raw_id or "")
-    if prefixed and ":" not in prefixed:
-        prefixed = f"{source_type}:{prefixed}"
-    value["sourceType"] = source_type
-    value["sourceId"] = prefixed
-    value["clauseText"] = str(
-        value.get("clauseText")
-        or value.get("content")
-        or value.get("fullText")
-        or value.get("snippet")
-        or ""
-    )[:12000]
-    value["snippet"] = str(
-        value.get("snippet") or value.get("content") or value.get("description") or ""
-    )[:1800]
-    if value.get("pageNumber") is not None and value.get("page") is None:
-        value["page"] = value.get("pageNumber")
-    return value
+# PRD §14-4: the shared spine lives in the harness — these were exact mirror
+# copies here. Single implementation now; behavior identical.
+_normalize_evidence = _normalize_hit
 
 
 def _deduplicate_evidence(items: list[dict[str, Any]], limit: int = 18) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for raw in items:
-        item = _normalize_evidence(raw)
-        key = str(item.get("sourceId") or "")
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-        if len(result) >= limit:
-            break
-    return result
+    """Normalize + dedupe by ``sourceId`` (harness ``_dedupe_pool`` dedupes
+    already-normalized hits, so the normalize step stays here)."""
+    return _dedupe_pool([_normalize_hit(item) for item in items], limit)
 
 
 def _load_type_clauses(case_id: int, clause_types: list[str]) -> list[dict[str, Any]]:
