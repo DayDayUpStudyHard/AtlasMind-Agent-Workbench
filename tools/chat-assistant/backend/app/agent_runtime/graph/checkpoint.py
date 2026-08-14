@@ -313,6 +313,30 @@ class MySqlCheckpointSaver:
                         except Exception as metadata_exc:
                             logger.debug("Agent run metadata update skipped: %s", metadata_exc)
 
+                        # Persist the unified evidence snapshot hash so the
+                        # run detail (management UI) can show which evidence
+                        # version a run observed. Kept separate from the
+                        # metadata update above so a missing column never
+                        # blocks graph/version/model persistence.
+                        evidence_snapshot = channel_values.get("evidence_snapshot") or {}
+                        analysis_workflow = channel_values.get("analysis_workflow") or {}
+                        snapshot_hash = str(
+                            evidence_snapshot.get("snapshot_hash")
+                            or evidence_snapshot.get("snapshotHash")
+                            or analysis_workflow.get("evidenceSnapshotHash")
+                            or ""
+                        ).strip()
+                        if snapshot_hash:
+                            try:
+                                cur.execute(
+                                    """UPDATE agent_run
+                                       SET evidence_snapshot_hash=%s
+                                       WHERE id=%s""",
+                                    (snapshot_hash[:128], run_id),
+                                )
+                            except Exception as snapshot_exc:
+                                logger.debug("Agent run snapshot hash update skipped: %s", snapshot_exc)
+
                         sequence_no = max(0, state_revision)
                         input_summary = self._serde.dumps(
                             _node_input_summary(channel_values, node_name)

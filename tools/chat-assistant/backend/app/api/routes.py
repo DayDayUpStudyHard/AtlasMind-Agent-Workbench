@@ -212,6 +212,26 @@ def _init_contract_runtime():
         except Exception as exc:
             logger.warning("contract_review graph init failed: %s", exc)
 
+        # Build and register ContractReviewGraph v2 (PRD Phase 3 pilot, §15).
+        # Registered under a distinct adapter key so eval runs can force it via
+        # runtime_engine="langgraph_v2" — it is NOT the default dispatch target.
+        try:
+            from app.agent_runtime.graph.review_v2 import build_contract_review_v2_graph
+            cr_v2_graph = build_contract_review_v2_graph(checkpointer=checkpointer)
+            _contract_runtime_router.register(
+                "contract_review_v2",
+                GraphAdapter(
+                    cr_v2_graph,
+                    checkpointer,
+                    graph_name="contract_review",
+                    graph_version="v2",
+                    run_store=run_store,
+                ),
+            )
+            logger.info("Registered contract_review v2 graph adapter (pilot, not default)")
+        except Exception as exc:
+            logger.warning("contract_review v2 graph init failed: %s", exc)
+
         # Build and register FulfillmentCheckGraph
         try:
             from app.agent_runtime.graph.fulfillment_check import build_fulfillment_check_graph
@@ -2867,6 +2887,8 @@ def _set_eval_feature_overrides(features: dict) -> None:
         _recall_multiplier_override,
         _retry_limit_override,
         _temperature_override,
+        _v2_analysis_concurrency,
+        _v2_skip_llm_on_no_evidence,
     )
 
     reset_rerank_observation()
@@ -2879,6 +2901,8 @@ def _set_eval_feature_overrides(features: dict) -> None:
     _retry_limit_override.set(int(features.get("targetedRetrievalRetries", 1)))
     _coverage_reflection_disabled.set(not features.get("coverageReflection", True))
     _temperature_override.set(float(features.get("temperature") or 0))
+    _v2_analysis_concurrency.set(max(1, min(8, int(features.get("v2AnalysisConcurrency") or 3))))
+    _v2_skip_llm_on_no_evidence.set(bool(features.get("v2SkipLlmOnNoEvidence", True)))
 
 
 def _normalize_eval_text(value: Any) -> str:

@@ -66,6 +66,11 @@ class BaseGraphState(TypedDict, total=False):
     case_snapshot: dict[str, Any]
     analysis_workflow: dict[str, Any]
     document_snapshot: list[dict[str, Any]]
+    # Unified evidence snapshot (PRD §19.1): the canonical, hash-addressed
+    # evidence view every graph derives its facts from. `clauses` is stripped
+    # in the state copy — full clause details live in
+    # `contract_evidence_snapshot`, loaded from the same builder call.
+    evidence_snapshot: dict[str, Any]
     contract_evidence_snapshot: list[dict[str, Any]]
     knowledge_snapshot: list[dict[str, Any]]
     document_quality: dict[str, Any]
@@ -121,3 +126,18 @@ class BaseGraphState(TypedDict, total=False):
 
     # ── Human-in-the-loop ──
     wait_state: dict[str, Any] | None
+
+    # ── Contract review v2 pilot (PRD Phase 3, §15) ──
+    # Sub-item WorkUnits and their per-unit evidence/analysis structures.
+    work_units: list[dict[str, Any]]
+    contract_map: dict[str, Any]
+    evidence_bundles_by_work_unit: dict[str, dict[str, Any]]
+    findings_by_work_unit: dict[str, list[dict[str, Any]]]
+    merged_candidates_by_work_unit: dict[str, list[dict[str, Any]]]
+    validation_by_work_unit: dict[str, dict[str, Any]]
+    counter_analysis_by_work_unit: dict[str, list[dict[str, Any]]]
+    coverage_by_work_unit: dict[str, dict[str, Any]]
+    evidence_needs: list[dict[str, Any]]
+    negative_conclusion_checks: list[dict[str, Any]]
+    retry_budget: int
+    reanalysis_targets: list[str]

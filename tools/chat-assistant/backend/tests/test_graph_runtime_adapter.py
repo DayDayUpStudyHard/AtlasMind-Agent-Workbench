@@ -193,3 +193,91 @@ def test_fulfillment_graph_resume_preserves_human_result(monkeypatch):
         return results
 
     asyncio.run(exercise())
+
+
+class _SlowGraph(_CompletedGraph):
+    """Completes only after a short real wait, so heartbeat ticks can fire."""
+
+    async def ainvoke(self, state, _config):
+        self.initial_state = dict(state)
+        await asyncio.sleep(0.03)
+        return {**state, "artifact": {"reportType": "CONTRACT_REVIEW"}}
+
+
+class _HeartbeatRunStore(_RecordingRunStore):
+    def __init__(self):
+        super().__init__()
+        self.heartbeats: list[int] = []
+        self.status = "ANALYZING"
+
+    async def heartbeat(self, run_id):
+        self.heartbeats.append(run_id)
+
+    async def get_run(self, run_id):
+        return {"status": self.status, "id": run_id}
+
+
+def test_graph_adapter_heartbeats_run_and_stops_when_terminal(monkeypatch):
+    """Graph runs must heartbeat (the recovery sweeper flags stale active runs)
+    and the loop must self-terminate once the run row leaves active statuses."""
+    import app.agent_runtime.runtime as runtime
+
+    monkeypatch.setattr(runtime, "GRAPH_HEARTBEAT_INTERVAL", 0.01)
+
+    async def exercise():
+        store = _HeartbeatRunStore()
+        adapter = GraphAdapter(
+            _SlowGraph(),
+            graph_name="contract_review",
+            graph_version="v2",
+            run_store=store,
+        )
+        context = AgentTaskContext(
+            run_id=901,
+            project_id=1,
+            task_type="CONTRACT_REVIEW",
+            question="",
+            subject_type="CONTRACT_CASE",
+            subject_id=1,
+            project={},
+        )
+        await adapter.run(context)
+        # The graph took 0.03s with 0.01s ticks — at least one beat while active.
+        assert store.heartbeats, "heartbeat loop should beat while the run is active"
+
+        store.status = "COMPLETED"
+        await asyncio.sleep(0.05)  # give the loop a tick to observe and exit
+        snapshot = list(store.heartbeats)
+        await asyncio.sleep(0.05)
+        assert store.heartbeats == snapshot, "heartbeat loop should exit on terminal status"
+
+    asyncio.run(exercise())
+
+
+def test_graph_adapter_without_heartbeat_store_skips_loop(monkeypatch):
+    """Adapters without a heartbeat-capable store (tests, legacy wiring) must
+    not attempt to start the loop."""
+    import app.agent_runtime.runtime as runtime
+
+    monkeypatch.setattr(runtime, "GRAPH_HEARTBEAT_INTERVAL", 0.01)
+
+    async def exercise():
+        adapter = GraphAdapter(
+            _SlowGraph(),
+            graph_name="contract_review",
+            graph_version="v2",
+            run_store=None,
+        )
+        context = AgentTaskContext(
+            run_id=902,
+            project_id=1,
+            task_type="CONTRACT_REVIEW",
+            question="",
+            subject_type="CONTRACT_CASE",
+            subject_id=1,
+            project={},
+        )
+        result = await adapter.run(context)
+        assert result.status == "COMPLETED"
+
+    asyncio.run(exercise())

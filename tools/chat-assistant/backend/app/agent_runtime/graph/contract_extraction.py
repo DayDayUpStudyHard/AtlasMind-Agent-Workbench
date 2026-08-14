@@ -18,7 +18,7 @@ from typing import Any, Awaitable
 
 from langgraph.graph import END, START, StateGraph
 
-from .evidence_snapshot import load_contract_evidence_snapshot
+from .evidence_snapshot import load_contract_evidence_snapshot, state_copy_of_snapshot
 from .state import BaseGraphState
 
 logger = logging.getLogger(__name__)
@@ -183,10 +183,14 @@ def _load_context(state: dict[str, Any]) -> dict[str, Any]:
         "document": document,
         "clauseCount": shared_snapshot.get("clauseCount") or 0,
         "clauses": shared_snapshot.get("clauses") or [],
-        "confirmedIntake": shared_snapshot.get("confirmedIntake") or {},
-        "contentHash": shared_snapshot.get("contentHash"),
-        "documentQuality": shared_snapshot.get("documentQuality") or {"parseQuality": document.get("parseQuality")},
-        "evidenceSnapshotHash": shared_snapshot.get("snapshotHash"),
+        "clauseCatalog": shared_snapshot.get("clause_catalog") or [],
+        "confirmedIntake": shared_snapshot.get("confirmed_intake_fields") or {},
+        "contentHash": shared_snapshot.get("content_hash"),
+        "documentQuality": shared_snapshot.get("quality_diagnostics") or {"parseQuality": document.get("parseQuality")},
+        "evidenceSnapshotHash": shared_snapshot.get("snapshot_hash"),
+        # Same unified view as the other three graphs (PRD Phase 1): the
+        # extraction graph observes and records the identical snapshot.
+        "evidenceSnapshot": state_copy_of_snapshot(shared_snapshot),
     }
 
 def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
@@ -196,6 +200,7 @@ def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "load_extraction_context",
         "extraction_context": context,
+        "evidence_snapshot": context.get("evidenceSnapshot") or {},
         "observations": [{
             "callId": f"extraction-context-{run_id}",
             "planStepId": "load_document_snapshot",
@@ -255,29 +260,71 @@ def _retrieve_pack(case_id: int, pack: dict[str, Any]) -> list[dict[str, Any]]:
     return result[:18]
 
 
+_extraction_orchestrator_instance = None
+
+
+def _extraction_orchestrator():
+    """Contract-only orchestrator for element extraction (legacy channel set).
+
+    Same RetrievalOrchestrator entry as the risk graph; only the channel set
+    differs, because v1 element extraction never consumed policy or historical
+    evidence.
+    """
+    global _extraction_orchestrator_instance
+    if _extraction_orchestrator_instance is None:
+        from ..harness.retrieval import ContractChannelAdapter, RetrievalOrchestrator
+
+        _extraction_orchestrator_instance = RetrievalOrchestrator(
+            adapters=(ContractChannelAdapter(),),
+        )
+    return _extraction_orchestrator_instance
+
+
 def retrieve_element_evidence(state: dict[str, Any]) -> dict[str, Any]:
+    """Phase 2 (PRD): element evidence goes through the shared orchestrator.
+
+    Same retrieval entry as the risk graph — recall, fusion, dedupe, rerank
+    and parent expansion are no longer re-implemented per graph. The element
+    graph restricts its channels to contract evidence (knowledge channels are
+    not part of its v1 contract), but the bundle shape is identical.
+    """
+    from ..harness.models import default_retrieval_request
+    from ..harness.retrieval import ContractChannelAdapter, empty_bundle, flatten_bundle
+    from ..harness.observation import ObservabilityRecorder
+
     case_id = int(state.get("subject_id") or 0)
+    snapshot = state.get("evidence_snapshot") or {}
+    clause_texts = state.get("contract_evidence_snapshot") or []
+    orchestrator = _extraction_orchestrator()
+
     evidence_by_pack: dict[str, list[dict[str, Any]]] = {}
     observations: list[dict[str, Any]] = []
     citations: list[dict[str, Any]] = []
     for pack in state.get("element_packs") or []:
         key = str(pack.get("packKey") or "")
+        query = " ".join(str(value) for value in pack.get("queries") or [])[:700]
+        request = default_retrieval_request(
+            case_id, snapshot, key, [query],
+            source_quotas={"contract": 12},
+            final_limit=12,
+        )
         try:
-            evidence = _retrieve_pack(case_id, pack)
+            bundle = orchestrator.retrieve_sync(snapshot, request, clauses=clause_texts)
             status = "DONE"
             error = ""
         except Exception as exc:
-            evidence = []
+            logger.warning("Element evidence retrieval failed for %s: %s", key, exc)
+            bundle = empty_bundle(request, [f"orchestrator failed: {exc}"])
             status = "FAILED"
             error = str(exc)[:500]
-            logger.warning("Element evidence retrieval failed for %s: %s", key, exc)
+        evidence = flatten_bundle(bundle)
         evidence_by_pack[key] = evidence
         citations.extend(evidence)
         stats = next((item.get("retrievalStats") for item in evidence if item.get("retrievalStats")), {})
         observations.append({
             "callId": f"extraction-retrieval-{state.get('run_id', 0)}-{key}",
             "planStepId": f"retrieve_{key}",
-            "toolName": "searchContractClause",
+            "toolName": "retrieveEvidenceBundle",
             "arguments": {"query": pack.get("queries") or [], "topK": 12, "packKey": key},
             "output": {
                 "packName": pack.get("packName"),
@@ -285,6 +332,7 @@ def retrieve_element_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "sourceIds": [item.get("sourceId") for item in evidence],
                 "retrievalStats": stats,
                 "crossValidatedCount": sum(1 for item in evidence if item.get("crossValidated")),
+                "bundleStats": ObservabilityRecorder.bundle_summary(bundle),
             },
             "status": status,
             "error": error,

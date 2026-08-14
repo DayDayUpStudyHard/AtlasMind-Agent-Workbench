@@ -1,14 +1,39 @@
-"""Tests for the shared contract evidence snapshot loader (Phase 0, PRD §29.1)."""
+"""Tests for the unified contract evidence snapshot (PRD Phase 1, 2026-08-14).
+
+Invariants under test (user Phase 1 spec):
+
+* same case + version → same snapshot_hash across the four graphs (single entry)
+* document version / clause content / intake / knowledge scope change → hash changes
+* clause row ORDER change with same content → hash does NOT drift
+* include_content_text does NOT change the hash (extraction loads with it, the
+  other three graphs without it)
+* missing intake / extraction → explainable ``missing_inputs`` + stable shape,
+  never a silently different structure
+* EvidenceContextBuilder TTL cache: same object within TTL, evict() drops it
+* requested_document_id that is not a READY MAIN → ValueError, no silent fallback
+"""
+
+import asyncio
 
 import pytest
 
 
 class ScriptedCursor:
-    """Cursor that serves pre-scripted result sets, one per execute() call."""
+    """Serves one scripted result set per execute() call, in call order.
+
+    The previous positional cursor broke when an optional query (elements) was
+    skipped. A queue is faithful to real DB behavior: each execute() consumes
+    the next result set, so optional queries never shift the mapping.
+    """
 
     def __init__(self, resultsets):
-        self._rs = [list(r) for r in resultsets]
-        self._i = -1
+        # A bare dict is a single-row result set; a list is the rows themselves.
+        self._queue = [
+            [r] if isinstance(r, dict) else list(r)
+            for r in resultsets
+        ]
+        self._current = []
+        self._last_sql = ""
 
     def __enter__(self):
         return self
@@ -17,21 +42,26 @@ class ScriptedCursor:
         return None
 
     def execute(self, sql, params=None):
-        self._i += 1
+        if not self._queue:
+            raise AssertionError(f"Unexpected query beyond scripted result sets: {sql}")
+        self._last_sql = sql
+        self._current = self._queue.pop(0)
 
     def fetchone(self):
-        rs = self._rs[self._i]
-        return rs[0] if rs else None
+        return self._current[0] if self._current else None
 
     def fetchall(self):
-        return self._rs[self._i]
+        return self._current
 
 
 class ScriptedConnection:
-    def __init__(self, resultsets):
+    def __init__(self, resultsets, call_counter=None):
         self._cursor = ScriptedCursor(resultsets)
+        self._call_counter = call_counter
 
     def __enter__(self):
+        if self._call_counter is not None:
+            self._call_counter[0] += 1
         return self
 
     def __exit__(self, *_):
@@ -75,18 +105,78 @@ def _document(doc_id, *, doc_type="MAIN", status="READY", version=1, chash="h1")
     }
 
 
-def _clause(clause_id=1, doc_id=1):
+def _clause(clause_id=1, doc_id=1, *, number=None, title=None, content="条款内容"):
     return {
         "clauseId": clause_id,
         "documentId": doc_id,
-        "clauseNumber": f"{clause_id}.1",
-        "title": f"条款{clause_id}",
-        "content": "条款内容",
+        "clauseNumber": number if number is not None else f"{clause_id}.1",
+        "title": title if title is not None else f"条款{clause_id}",
+        "content": content,
         "clauseType": "PAYMENT",
         "pageNumber": 1,
         "startOffset": 0,
         "endOffset": 10,
     }
+
+
+def _knowledge_row(max_version=3, count=40):
+    return {"maxVersion": max_version, "cnt": count}
+
+
+def _intake_row(fields=None):
+    payload = {"fields": fields or {"party": "A"}}
+    return {
+        "id": 9,
+        "contentHash": "h1",
+        "schemaVersion": "s1",
+        "promptVersion": "p1",
+        "model": "m",
+        "confirmedAt": "2025-01-01T00:00:00",
+        "validatedJson": _dump(payload),
+        "confirmedJson": _dump(payload),
+    }
+
+
+def _extraction_row():
+    return {
+        "id": 7, "documentId": 1, "documentVersion": 1, "contentHash": "h1",
+        "status": "CONFIRMED", "snapshotHash": "sh1", "schemaVersion": "s1",
+        "promptVersion": "p1", "retrievalVersion": "r1",
+        "profileJson": '{"baseFields": []}', "profileHash": "ph1",
+    }
+
+
+def _element_row():
+    return {
+        "id": 11, "elementKey": "party_a", "category": "PARTY",
+        "rawValue": "A公司", "normalizedValue": '{"name": "A公司"}',
+        "status": "CONFIRMED", "confidence": 0.9, "source": "LLM",
+        "applicable": 1, "occurrenceNo": 1, "validation": '{"ok": true}',
+    }
+
+
+def _dump(obj):
+    import json
+
+    return json.dumps(obj, ensure_ascii=False)
+
+
+# Canonical execute() order inside EvidenceContextBuilder._build:
+#   case, documents, clauses, intake, extraction-snapshot,
+#   elements (only when a snapshot row exists), knowledge-scope.
+def _base_resultsets(*, with_intake=False, with_extraction=False, with_elements=False):
+    sets = [_case_row(), [_document(1)], [_clause()]]
+    if with_intake:
+        sets.append([_intake_row()])
+    else:
+        sets.append([])
+    if with_extraction:
+        sets.append([_extraction_row()])
+        sets.append([_element_row()] if with_elements else [])
+    else:
+        sets.append([])
+    sets.append([_knowledge_row()])
+    return sets
 
 
 def _load_snapshot(monkeypatch, resultsets, **kwargs):
@@ -95,6 +185,26 @@ def _load_snapshot(monkeypatch, resultsets, **kwargs):
 
     monkeypatch.setattr(persistence, "_conn", lambda: ScriptedConnection(resultsets))
     return load_contract_evidence_snapshot(1, **kwargs)
+
+
+def _builder_with_db(monkeypatch, resultsets, ttl_seconds=60.0):
+    from app.agent_runtime.graph.evidence_snapshot import EvidenceContextBuilder
+    from app.agent_runtime import persistence
+
+    calls = [0]
+
+    def _conn():
+        return ScriptedConnection(resultsets, call_counter=calls)
+
+    monkeypatch.setattr(persistence, "_conn", _conn)
+    return EvidenceContextBuilder(ttl_seconds=ttl_seconds), calls
+
+
+def _copied(resultsets):
+    return [r.copy() if isinstance(r, list) else dict(r) for r in resultsets]
+
+
+# ────────────────────────── compact_clause normalization ────────────────────
 
 
 def test_compact_clause_normalizes_camel_and_snake_rows():
@@ -119,6 +229,9 @@ def test_compact_clause_normalizes_camel_and_snake_rows():
     assert snake["clauseType"] == "OTHER"
 
 
+# ────────────────────────── main-document selection ─────────────────────────
+
+
 def test_load_snapshot_selects_requested_ready_main_document(monkeypatch):
     docs = [
         _document(2, version=2, chash="h2"),          # newest MAIN READY
@@ -128,7 +241,7 @@ def test_load_snapshot_selects_requested_ready_main_document(monkeypatch):
     ]
     snap = _load_snapshot(
         monkeypatch,
-        [_case_row(), docs, [_clause()], {}, {}, []],
+        [_case_row(), docs, [_clause()], [], [], [_knowledge_row()]],
         requested_document_id=1,
     )
     assert snap["currentDocument"]["id"] == 1
@@ -141,53 +254,258 @@ def test_load_snapshot_prefers_newest_ready_main_without_request(monkeypatch):
         _document(2, version=2, chash="h2"),
         _document(1, version=1, chash="h1"),
     ]
-    snap = _load_snapshot(monkeypatch, [_case_row(), docs, [], {}, {}, []])
+    snap = _load_snapshot(monkeypatch, [_case_row(), docs, [], [], [], [_knowledge_row()]])
     assert snap["currentDocument"]["id"] == 2
     assert snap["clauseCount"] == 0
     # contentText must never leak into graph state by default
     assert "contentText" not in snap["currentDocument"]
 
 
-def test_load_snapshot_hash_stable_and_version_sensitive(monkeypatch):
-    docs = [_document(1, version=1, chash="h1")]
-    base = [_case_row(), docs, [_clause()], {}, {}, []]
-    a = _load_snapshot(monkeypatch, [r.copy() if isinstance(r, list) else dict(r) for r in base])
-    b = _load_snapshot(monkeypatch, [r.copy() if isinstance(r, list) else dict(r) for r in base])
-    assert a["snapshotHash"] == b["snapshotHash"]
-    assert a["snapshotHash"]
+def test_load_snapshot_raises_when_requested_document_not_ready_main(monkeypatch):
+    docs = [
+        _document(1, version=1, chash="h1"),
+        _document(3, doc_type="ATTACHMENT", chash="h3"),
+        _document(4, status="PARSING", chash="h4"),
+    ]
+    with pytest.raises(ValueError, match="not a READY main document"):
+        _load_snapshot(monkeypatch, [_case_row(), docs, [], [], [], [_knowledge_row()]],
+                       requested_document_id=4)
 
-    docs_v2 = [_document(1, version=2, chash="h1")]
-    c = _load_snapshot(monkeypatch, [_case_row(), docs_v2, [_clause()], {}, {}, []])
-    assert c["snapshotHash"] != a["snapshotHash"]
+
+def test_load_snapshot_raises_without_ready_main_document(monkeypatch):
+    docs = [_document(3, doc_type="ATTACHMENT"), _document(4, status="PARSING")]
+    with pytest.raises(ValueError):
+        _load_snapshot(monkeypatch, [_case_row(), docs])
+
+
+def test_load_snapshot_raises_when_case_missing(monkeypatch):
+    with pytest.raises(ValueError):
+        _load_snapshot(monkeypatch, [[]])
+
+
+# ────────────────────────── hash invariants ─────────────────────────────────
+
+
+def test_hash_stable_across_calls_and_include_content_text(monkeypatch):
+    """Same case+version → same hash: across calls AND across the loading
+    modes the four graphs actually use (review/timeline/fulfillment load
+    without content text; extraction loads with it)."""
+    base = _base_resultsets(with_intake=True, with_extraction=True, with_elements=True)
+    a = _load_snapshot(monkeypatch, _copied(base))
+    b = _load_snapshot(monkeypatch, _copied(base))
+    c = _load_snapshot(monkeypatch, _copied(base), include_content_text=True)
+    assert a["snapshot_hash"] == b["snapshot_hash"] == c["snapshot_hash"]
+    assert a["snapshot_hash"]
+
+
+def test_hash_sensitive_to_document_version(monkeypatch):
+    a = _load_snapshot(monkeypatch, _base_resultsets())
+    docs_v2 = [_case_row(), [_document(1, version=2, chash="h1")], [_clause()], [], [], [_knowledge_row()]]
+    b = _load_snapshot(monkeypatch, docs_v2)
+    assert a["snapshot_hash"] != b["snapshot_hash"]
+
+
+def test_hash_insensitive_to_clause_row_order(monkeypatch):
+    """Clause row order changes with the same content → hash must NOT drift."""
+    ordered = [_clause(1, number="1.1", content="a"), _clause(2, number="2.1", content="b")]
+    shuffled = [_clause(2, number="2.1", content="b"), _clause(1, number="1.1", content="a")]
+    a = _load_snapshot(monkeypatch, [_case_row(), [_document(1)], ordered, [], [], [_knowledge_row()]])
+    b = _load_snapshot(monkeypatch, [_case_row(), [_document(1)], shuffled, [], [], [_knowledge_row()]])
+    assert a["snapshot_hash"] == b["snapshot_hash"]
+
+
+def test_hash_sensitive_to_clause_content(monkeypatch):
+    a = _load_snapshot(monkeypatch, _base_resultsets())
+    b = _load_snapshot(monkeypatch,
+                       [_case_row(), [_document(1)], [_clause(content="改了内容")], [], [], [_knowledge_row()]])
+    assert a["snapshot_hash"] != b["snapshot_hash"]
+
+
+def test_hash_sensitive_to_confirmed_intake(monkeypatch):
+    a = _load_snapshot(monkeypatch, _base_resultsets(with_intake=True))
+    changed = _base_resultsets(with_intake=True)
+    changed[3] = [_intake_row(fields={"party": "B"})]
+    b = _load_snapshot(monkeypatch, changed)
+    assert a["snapshot_hash"] != b["snapshot_hash"]
+
+
+def test_hash_sensitive_to_knowledge_scope(monkeypatch):
+    a = _load_snapshot(monkeypatch, _base_resultsets())
+    changed = _base_resultsets()
+    changed[-1] = [_knowledge_row(max_version=4, count=41)]
+    b = _load_snapshot(monkeypatch, changed)
+    assert a["snapshot_hash"] != b["snapshot_hash"]
+
+
+def test_hash_sensitive_to_extraction_snapshot(monkeypatch):
+    a = _load_snapshot(monkeypatch, _base_resultsets())
+    b = _load_snapshot(monkeypatch, _base_resultsets(with_extraction=True))
+    assert a["snapshot_hash"] != b["snapshot_hash"]
+
+
+# ────────────────── missing inputs are explainable, shape stable ────────────
+
+
+def test_missing_intake_and_extraction_are_explicit(monkeypatch):
+    """No intake / no extraction snapshot → canonical keys stay present with
+    empty shape and ``missing_inputs`` names exactly what is absent — no
+    silent structural degradation (user Phase 1 test requirement)."""
+    snap = _load_snapshot(monkeypatch, _base_resultsets())
+    assert snap["missing_inputs"] == [
+        "confirmed_intake_fields",
+        "latest_confirmed_extraction_snapshot",
+    ]
+    assert snap["confirmed_intake_fields"] == {}
+    assert snap["latest_confirmed_extraction_snapshot"] == {}
+    assert snap["clause_catalog"] == [_clause_catalog_entry(_clause())]
+    assert snap["knowledge_scope"]["standardClauseVersion"] == 3
+    # every canonical key exists even in the degraded case
+    for key in (
+        "snapshot_hash", "case_id", "document_id", "document_version",
+        "content_hash", "main_document_parser", "quality_diagnostics",
+        "confirmed_intake_fields", "latest_confirmed_extraction_snapshot",
+        "clause_catalog", "clauses", "knowledge_scope", "missing_inputs",
+    ):
+        assert key in snap, f"canonical key {key} missing"
+
+
+def _clause_catalog_entry(clause):
+    return {
+        "clauseId": clause["clauseId"],
+        "documentId": clause["documentId"],
+        "clauseNumber": clause["clauseNumber"],
+        "title": clause["title"],
+        "clauseType": clause["clauseType"],
+        "pageNumber": clause["pageNumber"],
+        "charCount": len(clause["content"]),
+    }
+
+
+def test_missing_inputs_partial_when_intake_exists(monkeypatch):
+    snap = _load_snapshot(monkeypatch, _base_resultsets(with_intake=True))
+    assert snap["missing_inputs"] == ["latest_confirmed_extraction_snapshot"]
+    assert snap["confirmed_intake_fields"]["fields"] == {"party": "A"}
+
+
+# ─────────────── the four graphs all enter through the same loader ──────────
+
+
+def test_four_graphs_observe_same_snapshot_hash(monkeypatch):
+    """Review / timeline / fulfillment run load_run_context (no content text);
+    extraction runs load_extraction_context (with content text). All four must
+    observe the same snapshot_hash for the same case + version."""
+    from app.agent_runtime.graph.contract_extraction import load_extraction_context
+    from app.agent_runtime.graph.nodes import context as context_nodes
+
+    base = _base_resultsets(with_intake=True, with_extraction=True, with_elements=True)
+    expected = _load_snapshot(monkeypatch, _copied(base))["snapshot_hash"]
+
+    def reset_db():
+        from app.agent_runtime import persistence
+
+        monkeypatch.setattr(
+            persistence, "_conn",
+            lambda: ScriptedConnection(_copied(base)),
+        )
+
+    # review / timeline / fulfillment: same node, no content text
+    reset_db()
+    review_state = asyncio.run(context_nodes.load_run_context({
+        "run_id": 1, "subject_id": 1, "task_input": {}, "state_revision": 0,
+    }))
+    assert review_state["evidence_snapshot"]["snapshot_hash"] == expected
+    assert review_state["analysis_workflow"]["evidenceSnapshotHash"] == expected
+    assert review_state["analysis_workflow"]["documentVersion"] == 1
+
+    # extraction: loads with include_content_text=True, must still agree
+    reset_db()
+    extraction_state = load_extraction_context({
+        "run_id": 2, "subject_id": 1, "task_input": {}, "state_revision": 0,
+    })
+    assert extraction_state["evidence_snapshot"]["snapshot_hash"] == expected
+    assert extraction_state["extraction_context"]["evidenceSnapshotHash"] == expected
+
+
+def test_state_copy_drops_bulk_clauses_but_keeps_identity(monkeypatch):
+    from app.agent_runtime.graph.evidence_snapshot import state_copy_of_snapshot
+
+    snap = _load_snapshot(monkeypatch, _base_resultsets(with_intake=True))
+    state_view = state_copy_of_snapshot(snap)
+    # bulk fields are stripped to keep checkpoints small
+    assert "clauses" not in state_view
+    assert "case" not in state_view
+    assert "documents" not in state_view
+    assert "currentDocument" not in state_view
+    # identity and evidence metadata survive
+    assert state_view["snapshot_hash"] == snap["snapshot_hash"]
+    assert state_view["document_version"] == 1
+    assert state_view["clause_catalog"]
+    assert state_view["confirmed_intake_fields"]["fields"] == {"party": "A"}
+
+
+# ────────────────────────── builder TTL cache ───────────────────────────────
+
+
+def test_builder_cache_serves_same_object_within_ttl(monkeypatch):
+    resultsets = _base_resultsets()
+    builder, calls = _builder_with_db(monkeypatch, resultsets, ttl_seconds=60.0)
+    first = builder.build(1)
+    second = builder.build(1)
+    assert first is second
+    assert calls[0] == 1  # DB touched exactly once
+
+
+def test_builder_cache_evict_drops_one_case(monkeypatch):
+    resultsets = _base_resultsets()
+    builder, calls = _builder_with_db(monkeypatch, resultsets, ttl_seconds=60.0)
+    first = builder.build(1)
+    builder.evict(1)
+    second = builder.build(1)
+    assert first is not second
+    assert calls[0] == 2
+
+
+def test_builder_cache_clear_drops_everything(monkeypatch):
+    resultsets = _base_resultsets()
+    builder, calls = _builder_with_db(monkeypatch, resultsets, ttl_seconds=60.0)
+    builder.build(1)
+    builder.clear()
+    builder.build(1)
+    assert calls[0] == 2
+
+
+def test_builder_cache_disabled_by_default(monkeypatch):
+    from app.agent_runtime.graph.evidence_snapshot import EvidenceContextBuilder
+
+    resultsets = _base_resultsets()
+    builder = EvidenceContextBuilder()  # ttl_seconds=0 → caching OFF
+    from app.agent_runtime import persistence
+
+    calls = [0]
+    monkeypatch.setattr(
+        persistence, "_conn",
+        lambda: ScriptedConnection(resultsets, call_counter=calls),
+    )
+    a = builder.build(1)
+    b = builder.build(1)
+    assert a is not b
+    assert calls[0] == 2
+
+
+# ────────────────────────── intake / extraction parsing ─────────────────────
 
 
 def test_load_snapshot_parses_intake_and_extraction_json(monkeypatch):
-    intake_row = {
-        "id": 9,
-        "contentHash": "h1",
-        "schemaVersion": "s1",
-        "promptVersion": "p1",
-        "model": "m",
-        "confirmedAt": "2025-01-01T00:00:00",
-        "validatedJson": '{"fields": {"party": "A"}}',
-        "confirmedJson": '{"fields": {"party": "A"}}',
-    }
-    snapshot_row = {
-        "id": 7, "documentId": 1, "documentVersion": 1, "contentHash": "h1",
-        "status": "CONFIRMED", "snapshotHash": "sh1", "schemaVersion": "s1",
-        "promptVersion": "p1", "retrievalVersion": "r1",
-        "profileJson": '{"baseFields": []}', "profileHash": "ph1",
-    }
-    element_row = {
-        "id": 11, "elementKey": "party_a", "category": "PARTY",
-        "rawValue": "A公司", "normalizedValue": '{"name": "A公司"}',
-        "status": "CONFIRMED", "confidence": 0.9, "source": "LLM",
-        "applicable": 1, "occurrenceNo": 1, "validation": '{"ok": true}',
-    }
-    snap = _load_snapshot(
-        monkeypatch,
-        [_case_row(), [_document(1)], [_clause()], [intake_row], [snapshot_row], [element_row]],
-    )
+    resultsets = [
+        _case_row(),
+        [_document(1)],
+        [_clause()],
+        [_intake_row()],
+        [_extraction_row()],
+        [_element_row()],
+        [_knowledge_row()],
+    ]
+    snap = _load_snapshot(monkeypatch, resultsets)
     assert snap["confirmedIntake"]["fields"] == {"party": "A"}
     assert snap["confirmedIntake"]["confirmed"] == {"fields": {"party": "A"}}
     extracted = snap["extractionSnapshot"]
@@ -195,14 +513,7 @@ def test_load_snapshot_parses_intake_and_extraction_json(monkeypatch):
     assert extracted["profile"] == {"baseFields": []}
     assert extracted["elements"][0]["normalizedValue"] == {"name": "A公司"}
     assert extracted["elements"][0]["validation"] == {"ok": True}
-
-
-def test_load_snapshot_raises_without_ready_main_document(monkeypatch):
-    docs = [_document(3, doc_type="ATTACHMENT"), _document(4, status="PARSING")]
-    with pytest.raises(ValueError):
-        _load_snapshot(monkeypatch, [_case_row(), docs, [], {}, {}, []])
-
-
-def test_load_snapshot_raises_when_case_missing(monkeypatch):
-    with pytest.raises(ValueError):
-        _load_snapshot(monkeypatch, [[], [], [], {}, {}, []])
+    # canonical keys mirror the aliases from the same load
+    assert snap["confirmed_intake_fields"]["fields"] == {"party": "A"}
+    assert snap["latest_confirmed_extraction_snapshot"]["id"] == 7
+    assert snap["missing_inputs"] == []

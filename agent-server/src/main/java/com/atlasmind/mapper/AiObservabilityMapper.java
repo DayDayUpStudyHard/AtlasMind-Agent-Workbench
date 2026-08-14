@@ -295,10 +295,13 @@ public interface AiObservabilityMapper {
                  r.graph_name AS graphName,
                  r.graph_version AS graphVersion,
                  r.model AS model,
-                 r.prompt_version AS promptVersion
+                 r.prompt_version AS promptVersion,
+                 COALESCE(r.evidence_snapshot_hash, w.evidence_snapshot_hash) AS evidenceSnapshotHash,
+                 w.document_version AS documentVersion
             FROM agent_run r
             LEFT JOIN contract_case c ON c.id = r.subject_id AND r.subject_type = 'CONTRACT_CASE'
             LEFT JOIN agent_project p ON p.id = r.project_id
+            LEFT JOIN contract_analysis_workflow w ON w.id = r.workflow_id
             WHERE r.id = #{runId}
             LIMIT 1
             """)

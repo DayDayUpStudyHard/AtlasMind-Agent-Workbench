@@ -266,6 +266,8 @@
             <div><span>当前步骤</span><strong>{{ activeAgentRun.currentStep || '-' }}</strong></div>
             <div><span>Runtime</span><strong>{{ activeAgentRun.runtimeEngine || 'legacy' }}</strong></div>
             <div><span>Graph</span><strong>{{ activeAgentRun.graphName || '-' }} · {{ activeAgentRun.graphVersion || '-' }}</strong></div>
+            <div><span>证据快照</span><strong class="mono-tiny">{{ activeAgentRun.evidenceSnapshotHash ? activeAgentRun.evidenceSnapshotHash.slice(0, 16) + '…' : '-' }}</strong></div>
+            <div><span>文档版本</span><strong>{{ activeAgentRun.documentVersion || '-' }}</strong></div>
             <div><span>模型</span><strong>{{ activeAgentRun.model || '-' }}</strong></div>
             <div><span>Prompt 版本</span><strong>{{ activeAgentRun.promptVersion || '-' }}</strong></div>
           </div>
@@ -924,6 +926,7 @@ function prettyJson(value) {
 .detail-section { border-bottom: 1px solid #e5e7eb; padding-bottom: 16px; }
 .section-title { margin-bottom: 10px; color: #1f2d3d; font-weight: 800; }
 .fact-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.mono-tiny { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace; font-size: 12px; color: #4a5b6e; }
 .fact-grid div { padding: 10px; background: #fbfcfe; border: 1px solid #dce4ee; border-radius: 4px; }
 .fact-grid span, .io-grid span { display: block; margin-bottom: 4px; color: #8b9aaa; font-size: 11px; font-weight: 800; }
 .fact-grid strong { color: #1f2d3d; font-size: 13px; }

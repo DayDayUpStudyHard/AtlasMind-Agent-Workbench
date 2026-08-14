@@ -93,11 +93,14 @@ public class WorkspaceStatusController {
                 + " r.runtime_engine AS runtimeEngine, r.graph_name AS graphName,"
                 + " r.graph_version AS graphVersion, r.model AS model,"
                 + " r.prompt_version AS promptVersion,"
+                + " COALESCE(r.evidence_snapshot_hash, w.evidence_snapshot_hash) AS evidenceSnapshotHash,"
+                + " w.document_version AS documentVersion,"
                 + " COALESCE(c.title, c.case_key, p.name, p.project_key, CONCAT('Run #', r.id)) AS projectName,"
                 + " c.case_key AS caseKey"
                 + " FROM agent_run r"
                 + " LEFT JOIN contract_case c ON r.subject_type='CONTRACT_CASE' AND c.id=r.subject_id AND c.deleted=0"
                 + " LEFT JOIN agent_project p ON r.subject_type='PROJECT' AND p.id=r.project_id"
+                + " LEFT JOIN contract_analysis_workflow w ON w.id=r.workflow_id"
                 + " " + where
                 + " ORDER BY r.id DESC LIMIT 20";
 

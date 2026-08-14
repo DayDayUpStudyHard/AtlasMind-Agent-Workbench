@@ -1460,13 +1460,17 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     @Override
     public Map<String, Object> getRun(Long runId) {
         Map<String, Object> run = first(jdbcTemplate.queryForList("""
-                SELECT id, subject_type AS subjectType, subject_id AS subjectId, run_type AS runType,
-                       status, progress, current_step AS currentStep, error_message AS errorMessage,
-                       workflow_id AS workflowId, workflow_stage AS workflowStage,
-                       evidence_snapshot_hash AS evidenceSnapshotHash, runtime_engine AS runtimeEngine,
-                       graph_name AS graphName, graph_version AS graphVersion, model,
-                       prompt_version AS promptVersion, create_time AS createTime, update_time AS updateTime
-                FROM agent_run WHERE id=? AND subject_type=?
+                SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId, r.run_type AS runType,
+                       r.status, r.progress, r.current_step AS currentStep, r.error_message AS errorMessage,
+                       r.workflow_id AS workflowId, r.workflow_stage AS workflowStage,
+                       COALESCE(r.evidence_snapshot_hash, w.evidence_snapshot_hash) AS evidenceSnapshotHash,
+                       w.document_version AS documentVersion,
+                       r.runtime_engine AS runtimeEngine,
+                       r.graph_name AS graphName, r.graph_version AS graphVersion, r.model,
+                       r.prompt_version AS promptVersion, r.create_time AS createTime, r.update_time AS updateTime
+                FROM agent_run r
+                LEFT JOIN contract_analysis_workflow w ON w.id=r.workflow_id
+                WHERE r.id=? AND r.subject_type=?
                 """, runId, SUBJECT_TYPE));
         if (run == null) throw new IllegalArgumentException("Run not found");
         return run;

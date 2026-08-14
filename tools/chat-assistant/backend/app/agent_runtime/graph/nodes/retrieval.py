@@ -133,25 +133,50 @@ async def _retrieve_one_domain(case_id: int, task: dict[str, Any]) -> list[dict[
 
 
 def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
-    """Retrieve contract, knowledge, standard-clause, and historical evidence per domain."""
+    """Retrieve contract, knowledge, standard-clause, and historical evidence per domain.
+
+    Phase 2 (PRD): the risk graph no longer assembles retrieval itself — every
+    domain task becomes one ``RetrievalRequest`` and goes through the shared
+    ``RetrievalOrchestrator`` (the same entry the element-extraction graph
+    uses). Legacy helpers below stay in place for compatibility.
+    """
     domain_tasks = state.get("domain_tasks") or []
     case_id = int(state.get("subject_id") or 0)
+    snapshot = state.get("evidence_snapshot") or {}
+    clause_texts = state.get("contract_evidence_snapshot") or []
 
-    async def _retrieve_all() -> list[list[dict[str, Any]]]:
-        return await asyncio.gather(*[_retrieve_one_domain(case_id, task) for task in domain_tasks])
+    from ...harness.models import default_retrieval_request
+    from ...harness.retrieval import empty_bundle, flatten_bundle, get_orchestrator
+    from ...harness.observation import ObservabilityRecorder
 
-    try:
-        result_sets = _run_async(_retrieve_all())
-    except Exception as exc:
-        logger.exception("Domain retrieval failed: %s", exc)
-        result_sets = [[] for _ in domain_tasks]
+    orchestrator = get_orchestrator()
 
     domain_results: dict[str, list[dict[str, Any]]] = {}
     retrieval_validation: dict[str, dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
     citations: list[dict[str, Any]] = []
-    for task, evidence in zip(domain_tasks, result_sets):
+    for task in domain_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
+        queries = task.get("queries") or task.get("queryTemplates") or [task.get("objective", "")]
+        # v1 keeps one joined query per domain (per-intent fan-out is the
+        # Phase 3 v2 behavior); the orchestrator already supports variants.
+        joined_query = " ".join(str(value) for value in queries if value)[:600]
+        clause_types = [str(value).upper() for value in task.get("requiredClauseTypes") or []]
+        request = default_retrieval_request(
+            case_id, snapshot, key, [joined_query],
+            clause_types=clause_types,
+        )
+        try:
+            bundle = orchestrator.retrieve_sync(snapshot, request, clauses=clause_texts)
+            status = "DONE"
+            error = ""
+        except Exception as exc:
+            logger.exception("Orchestrated domain retrieval failed for %s: %s", key, exc)
+            bundle = empty_bundle(request, [f"orchestrator failed: {exc}"])
+            status = "FAILED"
+            error = str(exc)[:500]
+
+        evidence = flatten_bundle(bundle)
         domain_results[key] = evidence
         citations.extend(evidence)
         type_counts: dict[str, int] = {}
@@ -164,7 +189,7 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
             {},
         )
         retrieval_validation[key] = {
-            "mode": stats.get("mode") or "UNKNOWN",
+            "mode": stats.get("mode") or "MULTI_CHANNEL",
             "crossValidatedCount": sum(
                 1 for item in evidence if item.get("crossValidated")
             ),
@@ -178,7 +203,7 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         observations.append({
             "callId": f"graph-retrieval-{key}-{case_id}",
             "planStepId": f"retrieve_{key}",
-            "toolName": "searchContractClause/searchPolicyKnowledge/searchHistoricalDecision",
+            "toolName": "retrieveEvidenceBundle",
             "arguments": {
                 "domainKey": key,
                 "domainName": task.get("domainName"),
@@ -186,11 +211,12 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
                 "clauseTypes": task.get("requiredClauseTypes") or [],
             },
             "output": {
-                "evidenceCount": len(evidence),
+                **ObservabilityRecorder.bundle_summary(bundle),
                 "sourceCounts": type_counts,
                 "retrievalValidation": retrieval_validation[key],
             },
-            "status": "DONE",
+            "status": status,
+            "error": error,
         })
 
     return {

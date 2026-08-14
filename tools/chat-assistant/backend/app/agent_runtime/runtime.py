@@ -6,11 +6,16 @@ plus LegacyAdapter (existing harness) and GraphAdapter (LangGraph) implementatio
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol, runtime_checkable
+
+# Graph dispatch heartbeat cadence, matching AgentRunner.HEARTBEAT_INTERVAL.
+# Exposed as a module constant so tests can shorten it.
+GRAPH_HEARTBEAT_INTERVAL = 15
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +29,9 @@ _recall_max_override: contextvars.ContextVar[int] = contextvars.ContextVar("reca
 _retry_limit_override: contextvars.ContextVar[int] = contextvars.ContextVar("retry_limit_override", default=-1)
 _coverage_reflection_disabled: contextvars.ContextVar[bool] = contextvars.ContextVar("coverage_reflection_disabled", default=False)
 _temperature_override: contextvars.ContextVar[float] = contextvars.ContextVar("temperature_override", default=-1.0)
+# Contract review v2 pilot (PRD Phase 3, §15) — tunable via eval features_json
+_v2_analysis_concurrency: contextvars.ContextVar[int] = contextvars.ContextVar("v2_analysis_concurrency", default=3)
+_v2_skip_llm_on_no_evidence: contextvars.ContextVar[bool] = contextvars.ContextVar("v2_skip_llm_on_no_evidence", default=True)
 
 _GRAPH_PROMPT_VERSIONS = {
     "CONTRACT_REVIEW": "contract-review-graph-v1",
@@ -226,6 +234,14 @@ class GraphAdapter:
             model,
             prompt_version,
         )
+        # Keep the run row heartbeating while the graph executes: the
+        # RunRecovery sweeper (this process's or the API server's) marks runs
+        # in active statuses with a stale heartbeat as FAILED. The legacy
+        # AgentRunner beats from its dispatch path; graph dispatches did not,
+        # so any run whose event loop stays responsive (e.g. the v2 pilot's
+        # async retrieval) could be flagged mid-run.
+        if callable(getattr(self._run_store, "heartbeat", None)):
+            asyncio.create_task(self._heartbeat_loop(context.run_id))
         try:
             final_state = await self._graph.ainvoke(initial_state, config)
         except Exception as exc:
@@ -325,6 +341,30 @@ class GraphAdapter:
                 "stateRevision": final_state.get("state_revision", 0),
             },
         )
+
+    async def _heartbeat_loop(self, run_id: int) -> None:
+        """Refresh last_heartbeat_at every 15s until the run row is terminal.
+
+        Self-terminating: exits once the row leaves the active statuses, so it
+        needs no cancellation plumbing across `run()`'s return paths. A failed
+        read must not kill the loop — try again next tick.
+        """
+        active_statuses = (
+            "CREATED", "CONTEXT_BUILDING", "PLANNING", "ANALYZING", "VERIFYING",
+            "WAITING_HUMAN",
+        )
+        while True:
+            await asyncio.sleep(GRAPH_HEARTBEAT_INTERVAL)
+            try:
+                row = await self._run_store.get_run(run_id)
+                if (row or {}).get("status") not in active_statuses:
+                    return
+            except Exception:
+                pass
+            try:
+                await self._run_store.heartbeat(run_id)
+            except Exception:
+                logger.warning("Heartbeat write failed for run %s", run_id, exc_info=True)
 
     async def resume(self, run_id: int, command: ResumeCommand) -> AgentResult:
         """Resume a paused graph from its last checkpoint using Command(resume=...)."""
@@ -601,7 +641,17 @@ class RuntimeRouter:
 
         Used by eval center to force legacy or langgraph regardless of system config.
         """
-        if mode == "langgraph":
+        if mode == "langgraph_v2":
+            # PRD Phase 3 pilot: contract_review v2 only; other task types
+            # fall through to their v1 graphs rather than failing an eval run.
+            graph_name = {
+                "CONTRACT_REVIEW": "contract_review_v2",
+                "FULFILLMENT_CHECK": "fulfillment_check",
+                "CONTRACT_ELEMENT_EXTRACTION": "contract_extraction",
+                "TIMELINE_EXTRACTION": "timeline_extraction",
+            }.get(context.task_type, "")
+            adapter = self._adapters.get(graph_name) if graph_name else None
+        elif mode == "langgraph":
             graph_name = {
                 "CONTRACT_REVIEW": "contract_review",
                 "FULFILLMENT_CHECK": "fulfillment_check",

@@ -478,6 +478,11 @@
             <el-descriptions-item label="发现数">{{ viewingResult.findingCount }}</el-descriptions-item>
             <el-descriptions-item label="Schema 有效">{{ formatMetric(viewingResult, 'schemaValidRate') }}</el-descriptions-item>
             <el-descriptions-item label="成功">{{ viewingResult.success ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item label="证据快照" :span="2">
+              <span v-if="caseEvidence.evidenceSnapshotHash" class="mono-tiny">{{ caseEvidence.evidenceSnapshotHash.slice(0, 24) }}…</span>
+              <span v-else>-</span>
+            </el-descriptions-item>
+            <el-descriptions-item label="文档版本">{{ caseEvidence.documentVersion || '-' }}</el-descriptions-item>
             <el-descriptions-item v-if="viewingResult.errorMessage" label="错误信息" :span="3">
               <span style="color:#c0392b">{{ viewingResult.errorMessage }}</span>
             </el-descriptions-item>
@@ -817,6 +822,19 @@ const actualFindings = computed(() => {
   return Array.isArray(artifact?.findings) ? artifact.findings : []
 })
 
+const caseEvidence = computed(() => {
+  if (!viewingResult.value?.resultJson) return {}
+  let artifact
+  try { artifact = JSON.parse(viewingResult.value.resultJson) } catch { return {} }
+  const planHash = artifact?.content?.plan?.evidenceSnapshotHash
+    || artifact?.plan?.evidenceSnapshotHash
+    || artifact?.evidenceSnapshotHash
+  return {
+    evidenceSnapshotHash: artifact?.evidenceHash || planHash || '',
+    documentVersion: artifact?.documentVersion || artifact?.content?.document?.version || '',
+  }
+})
+
 function formatDate(v) { return v ? String(v).replace('T', ' ').slice(0, 16) : '' }
 function parseFeatures(v) { try { return JSON.parse(v) || {} } catch { return {} } }
 function parseSummary(v) { try { return JSON.parse(v) || {} } catch { return {} } }
@@ -980,6 +998,7 @@ function severityTagType(v) {
   padding: 12px; background: #f5f7fa; border: 1px solid #e4e7ed; border-radius: 4px;
   font-size: 12px; line-height: 1.6; color: #303133; margin: 0; white-space: pre-wrap; word-break: break-all;
 }
+.mono-tiny { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace; font-size: 12px; color: #4a5b6e; }
 .artifact-block { max-height: 420px; }
 
 /* Compare */
