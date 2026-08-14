@@ -256,3 +256,36 @@ builder.add_edge("targeted_retrieval", "compose_limited_report")
 
 - `tests/test_task_spec_builder.py` — delta 格式/`_diff`/`_apply`/捕获深拷贝/回归测试
 - `tests/golden/contract_review_v1_golden_artifact.json` — 重新生成
+
+---
+
+## 2026-08-15：PRD Phase 5 迁移合同要素提取 — 8 项任务实施
+
+### 问题
+
+PRD §Phase 5（迁移合同要素提取）要求 8 项改造：①基础身份字段单独固定 WorkUnit ②合同类型/标的/画像要素 LLM 动态规划 ③金额/币种/主体/标题/日期确定性规范化+专用校验 ④要素绑定原文引用/页码/条款/Snapshot Hash ⑤冲突保留候选不静默覆盖人工确认值 ⑥只重跑失败或低置信度字段 ⑦候选/确认/修正/版本历史保存 ⑧风险画像不得覆盖基础确认事实。现有实现：要素提取全部由 LLM 静态分组完成、无确定性规范化、无快照 Hash 绑定、重跑整份合同、候选互相覆盖。
+
+### 修复
+
+1. **确定性规范化器**（新增 [element_normalization.py](tools/chat-assistant/backend/app/agent_runtime/graph/element_normalization.py)）：金额（中文大写/阿拉伯数字 + 万/亿外部倍率、币种别名 ¥/￥/人民币→CNY 等、裸"元"隐含 CNY）、日期（2012-12-12 / 2012.12.12 / 2012年12月12日 / 20121212，日历合法性校验）、主体/标题、全角→半角；`validate_base_field` 输出 `EXTRACTED`/`NEEDS_REVIEW` + issues（ourSide 白名单 A/B、contractType 枚举）；`validate_structured_element` 类型化校验（MONEY/DATE/结构化值）。31 项测试。
+2. **固定基础身份 WorkUnit + 专用节点**（[contract_extraction.py](tools/chat-assistant/backend/app/agent_runtime/graph/contract_extraction.py)）：`_BASE_IDENTITY_WORK_UNIT`（work_unit_id=base_identity_fields，required_checks 声明确定性校验 6 项，human_review_policy=CONFIRMED_VALUES_ONLY）+ `extract_base_identity_fields` 节点走规范化路径而非 LLM；`_canonical_base_fields` 附 normalizedValue/validation.deterministic，人工确认值原样保留。
+3. **LLM 动态规划**（[llm_service.py](tools/chat-assistant/backend/app/services/llm_service.py)）：`plan_contract_elements` 规划 2-6 个要素包（不含基础身份键）；`_normalize_planned_packs` 校验后采用，LLM 失败回退 STATIC_FALLBACK 并留 meta（source/contractTypeRefined/subjectSummary/rationale）。
+4. **快照 Hash 绑定**：`validate_extracted_elements` 给每个要素 validation 与 citation 绑定 evidenceSnapshotHash；新增 `audit_element_coverage` 审计节点输出引用支持率/绑定率/未引用清单。
+5. **字段级重跑**：`_previous_settled_elements` 读上一快照已确认（reviewStatus 已设，或 EXTRACTED/CONFIRMED 且置信度≥0.75）要素 → carried 不再检索/提取（按 packKey 过滤，无整份重分析）；新增 [V034](tools/chat-assistant/backend/migrations/V034__extraction_snapshot_provenance.sql) base_snapshot_id + rerun_scope_json 溯源；已确认要素查询失败时降级为全量提取而非整个 Run 失败。
+6. **候选保留**：`_top_candidates_by_key` 选最高置信度置 selected=1，carried 置"沿用上一版本已确认要素"，冲突候选 selected=0 保留供人工确认——确认值永不静默覆盖。
+7. **画像防覆盖**（任务⑧）：画像分组字段与基础身份键冲突即丢弃；`build_contract_profile`/`normalize_contract_profile` 统一从 `base_identity_fields`（或重算 `_canonical_base_fields`）取基础事实。
+8. **架构迁移**：`CONTRACT_EXTRACTION_SPEC` 声明 §6.1 全角色（context/planner/retriever/analyzer/validator/coverage_auditor/composer/persistence），走公共 `build_task_graph` 编译（与 risk v1 同构）；`_run_async` 收敛到 harness 公共实现。
+
+### 验证结果
+
+- Python 312/312（原 263 + 规范化器 31 + Phase 5 定向 18）、`git diff --check` 通过，提交 4eaab2e 已推送
+- 验收门槛（基础字段准确率 ≥95%、引用支持率 ≥97% 等）为评测门禁，待 Phase 8 统一评测集跑分，**当前未声称达标**
+
+### 影响范围
+
+- `agent_runtime/graph/element_normalization.py`（新增）/ `contract_extraction.py`（重写流程 + TaskSpec）
+- `services/llm_service.py`（plan_contract_elements）
+- `migrations/V034__extraction_snapshot_provenance.sql`（新增）
+- `agent_runtime/harness/__init__.py`（docstring）
+- `tests/test_element_normalization.py`、`tests/test_contract_extraction_phase5.py`（新增）
+- 未动 legacy `_retrieve_pack`；v2 检索/分析逻辑未改

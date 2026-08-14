@@ -1013,7 +1013,9 @@ def _add_timeline_node(
             "clauseNumber": clause.get("clauseNumber"),
             "title": clause.get("title"),
             "quote": quote,
-            "fullQuote": str(clause.get("content") or "").strip()[:12000],
+            # PRD Phase 6, task 6: the formal schedule must carry the complete
+            # parent clause, never a truncated copy.
+            "fullQuote": str(clause.get("content") or "").strip(),
             "page": 1,
             "extractionMode": source_mode,
             "textQuality": text_quality,

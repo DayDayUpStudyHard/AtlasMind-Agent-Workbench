@@ -172,6 +172,58 @@ class LlmServiceStructuredResponseTest(unittest.TestCase):
         self.assertTrue(compacted["clauseTextWasTruncated"])
         self.assertEqual(len(clause), compacted["originalClauseTextLength"])
 
+    def test_complete_timeline_candidate_never_truncates(self):
+        clause = "前文" * 1200 + "收到发票后10日内付款" + "后文" * 1200
+        from app.services.llm_service import _complete_timeline_candidate_for_llm
+
+        prepared = _complete_timeline_candidate_for_llm({
+            "candidateId": "timeline-1",
+            "quote": "收到发票后10日内付款",
+            "clauseText": clause,
+        })
+
+        self.assertEqual(clause, prepared["clauseText"])
+        self.assertTrue(prepared["clauseTextComplete"])
+        self.assertEqual(len(clause), prepared["clauseTextLength"])
+
+    def test_enrich_contract_timeline_sends_complete_clause_text(self):
+        """PRD Phase 6, task 6: the LLM judges on the complete parent clause —
+        the legacy 4500-char compaction must not be applied on this path."""
+        import json
+
+        service = LLMService()
+        long_clause = (
+            "7.2.3 竣工图设计文件：两台机组通过168小时试运后45天内完成编制。"
+            + "本条补充上下文。" * 800
+        )
+        self.assertGreater(len(long_clause), 4500)
+        captured = {}
+
+        def fake_call(fn, *args, **kwargs):
+            captured["kwargs"] = fn.__defaults__[0]
+            return response('{"nodes":[]}')
+
+        service._call_llm_with_retry = fake_call
+        client = SimpleNamespace()
+        client.with_options = lambda **kw: client
+        client.chat = SimpleNamespace(completions=SimpleNamespace(create=None))
+        service.analysis_client = client
+
+        result = service.enrich_contract_timeline([{
+            "candidateId": "timeline-1",
+            "date": None,
+            "condition": "两台机组通过168小时试运后45天内",
+            "quote": "两台机组通过168小时试运后45天内完成编制",
+            "clauseText": long_clause,
+        }])
+
+        self.assertEqual([], result["nodes"])
+        payload = json.loads(captured["kwargs"]["messages"][1]["content"])
+        sent = payload["candidates"][0]["clauseText"]
+        self.assertEqual(long_clause, sent)
+        self.assertNotIn("...", sent)
+        self.assertTrue(payload["candidates"][0]["clauseTextComplete"])
+
 
 if __name__ == "__main__":
     unittest.main()

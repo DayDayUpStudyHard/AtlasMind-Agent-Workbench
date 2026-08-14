@@ -394,3 +394,45 @@ def test_legacy_run_async_delegates_to_harness(monkeypatch):
 
     assert result == "harness-result"
     assert captured["called"] is True
+
+
+# ── graph state schema (regression: LangGraph drops undeclared keys) ─────────
+
+def test_graph_state_schema_keeps_cross_node_channels():
+    """LangGraph silently drops node-output keys that are not declared on the
+    state schema — direct node-call tests cannot catch that. Every channel the
+    Phase 5/6 nodes emit must be declared, and must survive a compiled run."""
+    from langgraph.graph import END, START, StateGraph
+
+    from app.agent_runtime.graph.state import BaseGraphState
+
+    emitted_keys = {
+        "base_identity_fields", "carried_elements", "element_coverage_audit",
+        "timeline_scope", "timeline_clauses", "timeline_candidates",
+        "timeline_enrichment", "timeline_validation", "timeline_audit",
+    }
+    assert emitted_keys <= set(BaseGraphState.__annotations__)
+
+    builder = StateGraph(BaseGraphState)
+
+    def emit(state):
+        return {
+            "base_identity_fields": [{"key": "partyA"}],
+            "carried_elements": [{"elementKey": "payment_terms"}],
+            "element_coverage_audit": {"totalElements": 1},
+            "timeline_candidates": [{"label": "验收"}],
+        }
+
+    def read(state):
+        assert state.get("carried_elements") == [{"elementKey": "payment_terms"}]
+        assert state.get("base_identity_fields") == [{"key": "partyA"}]
+        assert state.get("element_coverage_audit") == {"totalElements": 1}
+        assert state.get("timeline_candidates") == [{"label": "验收"}]
+        return {}
+
+    builder.add_node("emit", emit)
+    builder.add_node("read", read)
+    builder.add_edge(START, "emit")
+    builder.add_edge("emit", "read")
+    builder.add_edge("read", END)
+    builder.compile().invoke({})

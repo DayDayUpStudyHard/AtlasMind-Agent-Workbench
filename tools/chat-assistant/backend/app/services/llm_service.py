@@ -69,8 +69,25 @@ class CircuitBreaker:
 _llm_circuit_breaker = CircuitBreaker()
 
 
+def _complete_timeline_candidate_for_llm(item: dict) -> dict:
+    """Build the LLM payload for one timeline candidate (PRD Phase 6, task 6).
+
+    The complete parent clause is sent unmodified — no excerpt, no truncation.
+    ``_compact_timeline_candidate_for_llm`` below stays as the legacy
+    compaction (still covered by tests) but the enrichment path no longer uses
+    it.
+    """
+    prepared = dict(item)
+    clause_text = str(prepared.get("clauseText") or "")
+    prepared["clauseText"] = clause_text
+    prepared["clauseTextComplete"] = True
+    prepared["clauseTextLength"] = len(clause_text)
+    return prepared
+
+
 def _compact_timeline_candidate_for_llm(item: dict, max_clause_chars: int = 4500) -> dict:
-    """Keep a timeline candidate small enough for reliable JSON review.
+    """Legacy payload compaction, kept for tests and rollback (unused by the
+    enrichment path since Phase 6 — see ``_complete_timeline_candidate_for_llm``).
 
     The persisted citation still carries the full clause. This payload keeps the
     quote plus surrounding clause context so the model can judge the actual
@@ -1290,7 +1307,11 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
         for start in range(0, len(selected_candidates), batch_size):
             payload = {
                 "candidates": [
-                    _compact_timeline_candidate_for_llm(item)
+                    # PRD Phase 6, task 6: the model judges on the complete
+                    # parent clause — never a truncated excerpt. The persisted
+                    # citation likewise keeps the full text, so the LLM input
+                    # and the traceable evidence stay identical.
+                    _complete_timeline_candidate_for_llm(item)
                     for item in selected_candidates[start:start + batch_size]
                 ]
             }

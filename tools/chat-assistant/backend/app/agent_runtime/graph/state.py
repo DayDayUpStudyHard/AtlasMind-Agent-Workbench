@@ -84,6 +84,21 @@ class BaseGraphState(TypedDict, total=False):
     contract_profile: dict[str, Any]
     profile_validation: dict[str, Any]
     extraction_snapshot: dict[str, Any]
+    # Phase 5 field-level rerun / coverage channels. These must stay in the
+    # schema: LangGraph silently drops node-output keys that are not declared
+    # here, which would break carried settled elements and the coverage audit
+    # at runtime even though direct node-call tests pass.
+    base_identity_fields: list[dict[str, Any]]
+    carried_elements: list[dict[str, Any]]
+    element_coverage_audit: dict[str, Any]
+
+    # -- Phase 6 timeline DAG (rule → LLM → validation → publish) --
+    timeline_scope: dict[str, Any]
+    timeline_clauses: list[dict[str, Any]]
+    timeline_candidates: list[dict[str, Any]]
+    timeline_enrichment: dict[str, Any]
+    timeline_validation: dict[str, Any]
+    timeline_audit: dict[str, Any]
 
     # Fulfillment verification context and human decision channels
     fulfillment_context: dict[str, Any]
