@@ -1,0 +1,1 @@
+{"reportType": "CONTRACT_REVIEW_REPORT", "riskReport": {"items": [{"domain": "PAYMENT", "findingKeys": ["finding-1"], "id": "risk-1", "level": "HIGH", "title": "付款节点无验收前置"}, {"domain": "CONFIDENTIALITY", "findingKeys": ["finding-2"], "id": "risk-2", "level": "MEDIUM", "title": "保密义务不对称"}], "riskLevel": "MEDIUM", "summary": "共识别 2 项风险：付款节点无验收前置、保密义务不对称"}}

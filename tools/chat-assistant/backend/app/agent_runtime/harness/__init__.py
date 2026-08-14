@@ -5,7 +5,10 @@ harness is extracted from risk v1 and stays the single implementation of
 shared lifecycle pieces, without changing v1 output fields.
 
 * ``models``       — WorkUnit / EvidenceNeed / RetrievalRequest / EvidenceBundle /
-                     CandidateResult / ValidationOutcome (PRD §10)
+                     CandidateResult / ValidationOutcome (PRD §10) and
+                     TaskSpec (PRD §6.1, Phase 4)
+* ``graph_builder``— build_task_graph: compiles a TaskSpec into a LangGraph
+                     (PRD §4.2 lifecycle skeleton + spec-declared routing)
 * ``retrieval``    — RetrievalOrchestrator (PRD §11.2) — risk v1, 要素提取 and
                      review v2 all retrieve through this; v1 nodes re-import
                      the public ``run_async`` / ``normalize_hit`` /
@@ -31,16 +34,19 @@ would change risk v1 output fields, which Phase 4 forbids):
   contextvars wrapper (re-pointing it is a Phase 5 item, not a zero-change
   alias)
 
-TaskSpec, WorkUnit planners, artifact composition, risk scoring, date
-calculation and fulfillment persistence stay OUT until the interfaces prove
-stable across the graphs (PRD §14.4).
+TaskSpec and the common graph builder are in the harness (Phase 4 / §14-4);
+WorkUnit planners, artifact composition, risk scoring, date calculation and
+fulfillment persistence stay OUT until the interfaces prove stable across
+the graphs (PRD §14.4).
 """
 
+from .graph_builder import build_task_graph  # noqa: F401
 from .models import (  # noqa: F401
     CandidateResult,
     EvidenceBundle,
     EvidenceNeed,
     RetrievalRequest,
+    TaskSpec,
     ValidationOutcome,
     WorkUnit,
 )

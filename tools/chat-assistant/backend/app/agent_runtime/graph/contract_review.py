@@ -9,9 +9,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langgraph.graph import StateGraph, START, END
-
-from .state import BaseGraphState
+from ..harness.graph_builder import build_task_graph
+from ..harness.models import TaskSpec
 from .nodes.context import load_run_context, freeze_case_snapshot
 from .nodes.inventory import inventory_clauses
 from .nodes.domain_tasks import create_domain_tasks
@@ -63,89 +62,110 @@ def _route_after_targeted(state: dict[str, Any]) -> str:
     return "draft_domain_findings"
 
 
+# Lifecycle stages in declaration order (PRD §4.2 skeleton): context and
+# snapshot → inventory → planning → retrieval → analysis → validation →
+# coverage audit → composition → human-review boundary → persistence.
+# The §6.1 role hooks map onto these stages: planner=create_domain_tasks,
+# retriever=retrieve_domain_evidence, analyzer=run_deterministic_rules +
+# draft_domain_findings, validator=validate_claims, coverage_auditor=
+# coverage_reflection + targeted_retrieval, composer=compose_report +
+# compose_limited_report + validate_schema + repair_artifact +
+# prepare_human_review, persistence=persist_report. Risk v1 has no
+# interrupt stage, so human_gate is None.
+_STAGES = (
+    "load_run_context",
+    "freeze_case_snapshot",
+    "inventory_clauses",
+    "create_domain_tasks",
+    "retrieve_domain_evidence",
+    "run_deterministic_rules",
+    "draft_domain_findings",
+    "validate_claims",
+    "coverage_reflection",
+    "targeted_retrieval",
+    "compose_report",
+    "compose_limited_report",
+    "validate_schema",
+    "repair_artifact",
+    "prepare_human_review",
+    "persist_report",
+)
+
+# Frozen pre-migration wiring: the same nodes, linear / loop-back edges and
+# conditional gates the v1 builder hardcoded before Phase 4. The common
+# builder compiles this spec; output fields are untouched because the node
+# functions are referenced by identity.
+CONTRACT_REVIEW_SPEC = TaskSpec(
+    task_type="CONTRACT_REVIEW",
+    graph_name="contract_review",
+    graph_version="v1",
+    prompt_version="contract-review-graph-v1",
+    stages=_STAGES,
+    nodes={
+        "load_run_context": load_run_context,
+        "freeze_case_snapshot": freeze_case_snapshot,
+        "inventory_clauses": inventory_clauses,
+        "create_domain_tasks": create_domain_tasks,
+        "retrieve_domain_evidence": retrieve_domain_evidence,
+        "run_deterministic_rules": run_deterministic_rules,
+        "draft_domain_findings": draft_domain_findings,
+        "validate_claims": validate_claims,
+        "coverage_reflection": coverage_reflection,
+        "targeted_retrieval": targeted_retrieval,
+        "compose_report": compose_report,
+        "compose_limited_report": compose_limited_report,
+        "validate_schema": validate_schema,
+        "repair_artifact": repair_artifact,
+        "prepare_human_review": prepare_human_review,
+        "persist_report": persist_report,
+    },
+    edges=(
+        ("load_run_context", "freeze_case_snapshot"),
+        ("freeze_case_snapshot", "inventory_clauses"),
+        ("inventory_clauses", "create_domain_tasks"),
+        ("create_domain_tasks", "retrieve_domain_evidence"),
+        ("retrieve_domain_evidence", "run_deterministic_rules"),
+        ("run_deterministic_rules", "draft_domain_findings"),
+        ("draft_domain_findings", "validate_claims"),
+        ("validate_claims", "coverage_reflection"),
+        # Targeted retrieval feeds supplementary evidence back into domain
+        # analysis so gap domains get a second LLM pass before the report is
+        # composed. The coverage_reflection retry gate prevents unbounded loops.
+        ("targeted_retrieval", "draft_domain_findings"),
+        ("compose_report", "validate_schema"),
+        ("compose_limited_report", "validate_schema"),
+        ("repair_artifact", "validate_schema"),
+        ("prepare_human_review", "persist_report"),
+    ),
+    conditional_routes={
+        "coverage_reflection": (
+            _route_after_reflection,
+            {
+                "compose_report": "compose_report",
+                "compose_limited_report": "compose_limited_report",
+                "targeted_retrieval": "targeted_retrieval",
+            },
+        ),
+        "validate_schema": (
+            _route_after_schema,
+            {
+                "persist_report": "persist_report",
+                "prepare_human_review": "prepare_human_review",
+                "repair_artifact": "repair_artifact",
+                "compose_limited_report": "compose_limited_report",
+            },
+        ),
+    },
+)
+
+
 def build_contract_review_graph(checkpointer: Any = None) -> Any:
-    """Build and compile the ContractReviewGraph.
+    """Build and compile the ContractReviewGraph from its TaskSpec.
 
     Args:
         checkpointer: Optional LangGraph checkpointer for state persistence.
     """
-
-    builder = StateGraph(BaseGraphState)
-
-    # ── Context & snapshot ──
-    builder.add_node("load_run_context", load_run_context)
-    builder.add_node("freeze_case_snapshot", freeze_case_snapshot)
-
-    # ── Clause inventory ──
-    builder.add_node("inventory_clauses", inventory_clauses)
-
-    # ── Domain tasks ──
-    builder.add_node("create_domain_tasks", create_domain_tasks)
-
-    # ── Real retrieval & rules ──
-    builder.add_node("retrieve_domain_evidence", retrieve_domain_evidence)
-    builder.add_node("run_deterministic_rules", run_deterministic_rules)
-    builder.add_node("draft_domain_findings", draft_domain_findings)
-
-    # ── Validation & reflection ──
-    builder.add_node("validate_claims", validate_claims)
-    builder.add_node("coverage_reflection", coverage_reflection)
-    builder.add_node("targeted_retrieval", targeted_retrieval)
-
-    # ── Report generation ──
-    builder.add_node("compose_report", compose_report)
-    builder.add_node("compose_limited_report", compose_limited_report)
-    builder.add_node("validate_schema", validate_schema)
-    builder.add_node("repair_artifact", repair_artifact)
-    builder.add_node("prepare_human_review", prepare_human_review)
-    builder.add_node("persist_report", persist_report)
-
-    # ── Edges ──
-    builder.add_edge(START, "load_run_context")
-    builder.add_edge("load_run_context", "freeze_case_snapshot")
-    builder.add_edge("freeze_case_snapshot", "inventory_clauses")
-    builder.add_edge("inventory_clauses", "create_domain_tasks")
-    builder.add_edge("create_domain_tasks", "retrieve_domain_evidence")
-    builder.add_edge("retrieve_domain_evidence", "run_deterministic_rules")
-    builder.add_edge("run_deterministic_rules", "draft_domain_findings")
-    builder.add_edge("draft_domain_findings", "validate_claims")
-    builder.add_edge("validate_claims", "coverage_reflection")
-
-    # Conditional routing from reflection
-    builder.add_conditional_edges(
-        "coverage_reflection",
-        _route_after_reflection,
-        {
-            "compose_report": "compose_report",
-            "compose_limited_report": "compose_limited_report",
-            "targeted_retrieval": "targeted_retrieval",
-        },
-    )
-    # Targeted retrieval feeds supplementary evidence back into domain analysis
-    # so gap domains get a second LLM pass before the report is composed.
-    # The coverage_reflection retry gate prevents unbounded loops.
-    builder.add_edge("targeted_retrieval", "draft_domain_findings")
-
-    # Report paths with quality gate
-    builder.add_edge("compose_report", "validate_schema")
-    builder.add_edge("compose_limited_report", "validate_schema")
-
-    # validate_schema → persist | repair | limited (conditional gate)
-    builder.add_conditional_edges(
-        "validate_schema",
-        _route_after_schema,
-        {
-            "persist_report": "persist_report",
-            "prepare_human_review": "prepare_human_review",
-            "repair_artifact": "repair_artifact",
-            "compose_limited_report": "compose_limited_report",
-        },
-    )
-    builder.add_edge("repair_artifact", "validate_schema")
-    builder.add_edge("prepare_human_review", "persist_report")
-    builder.add_edge("persist_report", END)
-
-    return builder.compile(checkpointer=checkpointer) if checkpointer else builder.compile()
+    return build_task_graph(CONTRACT_REVIEW_SPEC, checkpointer)
 
 
 def register(registry=None) -> None:

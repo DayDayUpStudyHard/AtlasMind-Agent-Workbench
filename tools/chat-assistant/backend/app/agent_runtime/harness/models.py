@@ -3,13 +3,15 @@
 TypedDicts only — no runtime dependency on the DB, LLM or graph layers, so
 they can be imported by graph nodes, harness modules and tests alike.
 
-TaskSpec is deliberately absent: PRD §10.8 says the first stage must NOT
-freeze a full TaskSpec before the common modules prove stable (Phase 4).
+TaskSpec arrives in Phase 4 (PRD §14-4): after the shared retrieval /
+validation / lifecycle modules proved stable, the harness now also carries
+the declarative graph contract and its common builder.
 """
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from dataclasses import dataclass
+from typing import Any, Callable, Mapping, TypedDict
 
 
 class WorkUnit(TypedDict):
@@ -183,3 +185,52 @@ def default_retrieval_request(
         "require_counter_evidence": bool(require_counter_evidence),
         "cache_policy": "NONE",  # caching is owned by PRD Phase 9
     }
+
+
+@dataclass
+class TaskSpec:
+    """Declarative description of one task graph (PRD Phase 4 / §6.1).
+
+    The spec declares how a task differs from the shared lifecycle: its
+    stage sequence, its node functions and its conditional routing.
+    ``harness.graph_builder.build_task_graph`` turns a spec into a compiled
+    LangGraph — business modules declare a spec instead of re-implementing
+    that wiring.
+
+    The spec holds no contract content and no DB / LLM clients: the node
+    functions it references do the work, and they come from the business
+    module (``graph/*.py``), never from the harness.
+
+    PRD §6.1 role hooks map onto ``nodes`` by stage name (risk v1 example):
+    ``planner`` → create_domain_tasks, ``retriever`` →
+    retrieve_domain_evidence, ``analyzer`` → run_deterministic_rules /
+    draft_domain_findings, ``validator`` → validate_claims,
+    ``coverage_auditor`` → coverage_reflection / targeted_retrieval,
+    ``composer`` → compose_report / compose_limited_report / validate_schema
+    / repair_artifact / prepare_human_review, ``persistence`` →
+    persist_report, ``human_gate`` → None for risk v1 (it has no interrupt
+    stage; the FULFILLMENT graph will declare its gate once migrated).
+
+    Field contract:
+
+    * ``stages`` — node names in lifecycle order (PRD §4.2 skeleton). The
+      first stage receives the START edge and the last stage flows to END;
+      a stage with a conditional route has no linear outgoing edge.
+    * ``nodes`` — stage name → node function (all business behavior).
+    * ``edges`` — explicit linear / loop-back edges, excluding START / END.
+    * ``conditional_routes`` — stage name → (router, route_map). The route
+      targets must be declared stages.
+    * ``human_gate`` — the single stage allowed to interrupt (HITL
+      contract); declarative metadata, the interrupt itself lives inside
+      the node.
+    """
+
+    task_type: str
+    graph_name: str
+    graph_version: str
+    prompt_version: str
+    stages: tuple[str, ...]
+    nodes: Mapping[str, Callable]
+    edges: tuple[tuple[str, str], ...]
+    conditional_routes: Mapping[str, tuple[Callable, Mapping[str, str]]]
+    human_gate: str | None = None
