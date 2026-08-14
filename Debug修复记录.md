@@ -289,3 +289,32 @@ PRD §Phase 5（迁移合同要素提取）要求 8 项改造：①基础身份�
 - `agent_runtime/harness/__init__.py`（docstring）
 - `tests/test_element_normalization.py`、`tests/test_contract_extraction_phase5.py`（新增）
 - 未动 legacy `_retrieve_pack`；v2 检索/分析逻辑未改
+
+---
+
+## 2026-08-15：PRD Phase 6 履约日程 DAG 化 — 黑盒单节点重构为分层可观测 DAG
+
+### 问题
+
+原履约日程是黑盒：`timeline_extraction.py` 只有一个 publish 节点，内部一次调用 `extract_final_contract_timeline` 完成规则提取+LLM 复核+落库，规则层/LLM 层/校验层耗时不可分别观测、失败阶段粒度是整节点。另有 PRD 明确要求未满足：LLM 载荷经 `_compact_timeline_candidate_for_llm` 截断 4500 字（不截断父条款）；`citation.fullQuote` 截断 12000 字；乱码/低质量 OCR/不确定基准日期无标记。**附带发现 Phase 5 运行时隐患**：LangGraph 0.4.10 静默丢弃未声明在 state schema 上的节点输出键，Phase 5 的 `base_identity_fields`/`carried_elements`/`element_coverage_audit` 在真实运行时会被丢弃（直调节点测试无法暴露）。
+
+### 修复
+
+1. **TaskSpec DAG**（[timeline_extraction.py](tools/chat-assistant/backend/app/agent_runtime/graph/timeline_extraction.py) 重写，10 阶段，走公共 `build_task_graph`）：planner 选文档/生效日期/质量门禁 → retriever 装载条款证据（无 OCR/Embedding）→ 规则层 `extract_rule_timeline_candidates`（日期 100% 代码解析，LLM 不算日期）→ LLM 层 `enrich_timeline_candidates`（strict：复核不可用即 raise，绝不发布未复核日程）→ 校验层（去重、来源谱系 RULE_CANDIDATE→LLM_ENRICHED、完整引用、条件节点检查、quote 落地性检查——只标记不篡改原文）→ 覆盖率审计（引用支持率 + 规则/LLM/校验三层耗时聚合）→ composer（FINAL artifact + stageDurationsMs）→ persistence（DELETE manual_override=0 → INSERT source=AGENT_FINAL → UPDATE workflow，与 legacy 落库契约一致）。每个节点独立 current_node + 耗时观察（任务9）。
+2. **不截断**：`enrich_contract_timeline` 改用 `_complete_timeline_candidate_for_llm` 发完整条款原文（legacy compaction 函数保留不删）；`_add_timeline_node` 的 `fullQuote` 取消 12000 字截断。
+3. **风险标记**：`_MOJIBAKE_PATTERN`（U+FFFD + 经典 CJK 乱码签名 ä¸/åŒ/çš„/æ˜¯/â€ 等）命中→NEEDS_REVIEW+mojibakeRisk；生效日期缺失→推断年份/相对期限节点标 dateBasis.effectiveDateMissing（推断年不可信）；低质量 OCR 沿用 documentQuality LOW 降级。
+4. **state schema 修复**（[state.py](tools/chat-assistant/backend/app/agent_runtime/graph/state.py)）：`base_identity_fields`/`carried_elements`/`element_coverage_audit`/`timeline_*` 全部补入 `BaseGraphState`；新增编译图回归测试（emit→read 探针证明跨节点通道存活）。
+
+### 验证结果
+
+- Python 334/334（test_timeline_v2 19 + schema 回归 + LLM 完整条款载荷 3）、`git diff --check` 通过，提交 8116285 已推送
+- 验收门槛（召回率 ≥92%、日期计算 ≥99%、责任方/动作/触发 ≥95%）为评测门禁，待 Phase 8 统一评测跑分，**当前未声称达标**；规则/LLM/校验三层耗时可分别观测已实现
+
+### 影响范围
+
+- `agent_runtime/graph/timeline_extraction.py`（重写为 DAG，legacy publish_final_timeline 保留）
+- `agent_runtime/contract_document_parser.py`（fullQuote 取消截断；legacy extract_final_contract_timeline 未动）
+- `agent_runtime/graph/state.py`（schema 通道补齐）
+- `services/llm_service.py`（完整条款载荷 + _complete_timeline_candidate_for_llm）
+- `tests/test_timeline_v2.py`（新增）、`tests/test_contract_extraction_phase5.py`、`tests/test_llm_service.py`
+- 未动 v2 检索/分析逻辑；未动 Java 显示过滤（source='AGENT_FINAL' OR manual_override=1 不变）
