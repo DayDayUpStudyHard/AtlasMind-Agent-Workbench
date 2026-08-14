@@ -13,6 +13,10 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# PRD Phase 8 / §10: frozen rerank stack version, stamped on artifacts and
+# agent_run so evaluation results stay traceable to the reranker that ran.
+RERANK_VERSION = "reranker-v1"
+
 _rerank_disabled: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "rerank_disabled", default=False
 )

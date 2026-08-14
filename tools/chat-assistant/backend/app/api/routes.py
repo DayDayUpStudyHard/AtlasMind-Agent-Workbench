@@ -2698,7 +2698,13 @@ def _eval_expected_dimensions(case: dict[str, Any]) -> list[str]:
     return dims
 
 
-def _create_eval_temp_case(eval_run_id: int, case: dict[str, Any], idx: int, temp_case_ids: list[int]) -> int:
+def _create_eval_temp_case(
+    eval_run_id: int,
+    case: dict[str, Any],
+    idx: int,
+    temp_case_ids: list[int],
+    reuse_stats: list[int] | None = None,
+) -> int:
     from app.agent_runtime.persistence import _conn
     from app.agent_runtime.contract_document_parser import (
         _index_contract_chunks,
@@ -2722,6 +2728,11 @@ def _create_eval_temp_case(eval_run_id: int, case: dict[str, Any], idx: int, tem
             if cached:
                 cached_case_id = int(cached["id"])
                 if _eval_fixture_ready(cur, cached_case_id):
+                    # PRD Phase 8 task 2: the text-hash fixture cache reused
+                    # the existing case — no re-split, no embedding/index
+                    # rebuild. The run summary reports the reuse count.
+                    if reuse_stats is not None:
+                        reuse_stats.append(1)
                     logger.info(
                         "Eval run %s case %s/%s reusing fixture case %s (%s)",
                         eval_run_id, idx + 1, case.get("case_key") or case.get("id"), cached_case_id, fixture_hash[:12],
@@ -3285,36 +3296,300 @@ def _score_element_extraction(case: dict[str, Any], artifact: dict[str, Any]) ->
     }
 
 
+# PRD Phase 8 / §10: every scored run freezes the scorer version it was
+# evaluated with — agent_eval_result rows and eval summaries must be
+# traceable to this exact implementation.
+EVAL_SCORER_VERSION = "eval-scorers-v2"
+
+
+def _timeline_node_surface(node: dict[str, Any]) -> str:
+    """Flatten one timeline node into the text surface expected titles match."""
+    return " ".join(str(node.get(key) or "") for key in (
+        "label", "businessMeaning", "date", "condition",
+        "responsibleParty", "nodeType",
+    ))
+
+
+def _timeline_expected_parts(entry: dict[str, Any]) -> tuple[str, str]:
+    """Split an expected timeline entry "label:detail" into its two parts."""
+    title = str(entry.get("title") or "")
+    if ":" in title:
+        label, detail = title.split(":", 1)
+        return label.strip(), detail.strip()
+    return title.strip(), ""
+
+
+_DATE_TOKEN = re.compile(r"\d{4}-\d{1,2}-\d{1,2}")
+
+
+def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """Score a TIMELINE_EXTRACTION artifact (PRD §9.3).
+
+    Golden expectations share the expected_findings_json shape, e.g.
+    "生效:2026-01-01", "终止:双方权利义务履行完毕之日(条件事件)",
+    "每月5日前:公示收支明细(周期)":
+
+      - label matches a node via containment / bigram overlap on the node
+        surface (label/businessMeaning/date/condition);
+      - a date in the detail must equal the matched node's date exactly
+        (日期计算准确率);
+      - a 条件事件 entry must land on a node with no fixed date and a
+        non-empty condition (非固定结束条件识别率);
+      - should_not_find_json entries must not appear in any node surface
+        (e.g. a fabricated fixed termination date).
+
+    Every rate carries its explicit denominator for Phase 8 task 5.
+    """
+    nodes = artifact.get("nodes") or []
+    if not isinstance(nodes, list):
+        nodes = []
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        expected = []
+    if not isinstance(expected, list):
+        expected = []
+
+    matched = 0
+    date_expected = 0
+    date_correct = 0
+    cond_expected = 0
+    cond_recognized = 0
+    for entry in expected:
+        if not isinstance(entry, dict):
+            continue
+        label, detail = _timeline_expected_parts(entry)
+        if not label:
+            continue
+        label_text = _normalize_eval_text(label)
+        expected_date = _DATE_TOKEN.search(detail)
+        conditional = (
+            not expected_date and ("条件" in detail or "事件" in detail)
+        )
+        if conditional:
+            cond_expected += 1
+        if expected_date:
+            date_expected += 1
+
+        best: dict[str, Any] | None = None
+        for node in nodes:
+            if not isinstance(node, dict):
+                continue
+            node_label = _normalize_eval_text(str(node.get("label") or ""))
+            surface = _normalize_eval_text(_timeline_node_surface(node))
+            if not label_text:
+                continue
+            if label_text in node_label or label_text in surface:
+                best = node
+                break
+            label_grams = _eval_bigrams(label_text)
+            overlap = len(label_grams & _eval_bigrams(surface)) if label_grams else 0
+            if label_grams and overlap >= max(2, len(label_grams) // 2):
+                best = node
+                break
+
+        if best is None:
+            continue
+        matched += 1
+        node_date = _DATE_TOKEN.search(str(best.get("date") or ""))
+        if expected_date:
+            if node_date and node_date.group(0) == expected_date.group(0):
+                date_correct += 1
+        if conditional:
+            if not node_date and str(best.get("condition") or "").strip():
+                cond_recognized += 1
+
+    try:
+        should_not = json.loads(case.get("should_not_find_json") or "[]")
+    except Exception:
+        should_not = []
+    false_pos = 0
+    for node in nodes:
+        surface = _normalize_eval_text(_timeline_node_surface(node))
+        for entry in (should_not if isinstance(should_not, list) else []):
+            token = _normalize_eval_text(entry)
+            if token and token in surface:
+                false_pos += 1
+
+    validation = (artifact.get("content") or {}).get("validation") or {}
+    cited = sum(
+        1 for node in nodes
+        if isinstance(node, dict) and (node.get("citation") or {}).get("quote")
+    )
+    return {
+        "success": True,
+        "scored": True,
+        "scorerVersion": EVAL_SCORER_VERSION,
+        "highRecall": matched / len(expected) if expected else 1.0,
+        "expectedNodeCount": len(expected),
+        "dualCitationRate": cited / max(len(nodes), 1),
+        "falsePositives": false_pos,
+        "schemaValid": 1 if isinstance(artifact.get("nodes"), list) else 0,
+        "analysisMode": artifact.get("analysisMode", "FULL"),
+        "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(nodes),
+        "dateAccuracy": date_correct / date_expected if date_expected else 1.0,
+        "dateDenominator": date_expected,
+        "conditionalRecognitionRate": (
+            cond_recognized / cond_expected if cond_expected else 1.0
+        ),
+        "conditionalDenominator": cond_expected,
+        "responsiblePartyCoverage": (
+            sum(1 for node in nodes
+                if isinstance(node, dict) and node.get("responsibleParty"))
+            / max(len(nodes), 1)
+        ),
+        "mojibakeFlaggedCount": int(validation.get("mojibakeFlaggedCount") or 0),
+        "artifact": artifact,
+    }
+
+
+def _fulfillment_requirement_surface(row: dict[str, Any]) -> str:
+    """Flatten one fulfilment judgement row for expected-title matching."""
+    return " ".join(str(row.get(key) or "") for key in (
+        "requirement", "judgement", "proofStatus", "evidence",
+        "gap", "deadline",
+    ))
+
+
+def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """Score a FULFILLMENT_REPORT artifact (PRD §9.4).
+
+    Expected entries are requirement titles ("首付款:2026-03-01前支付").
+    The acceptance-critical metrics are structural:
+
+      - aiAutoConfirmViolations — a conclusion present without a human
+        manualResult counts as one violation; PRD requires it to be 0;
+      - restraintRate — among rows that found no evidence snapshot, the
+        fraction judged INSUFFICIENT/NEEDS_REVIEW rather than claiming a
+        satisfied state (证据不足克制率);
+      - aiSuggestionSchemaRate — fraction of rows whose advisory suggestion
+        layer normalized cleanly (LLM_ENRICHED), PRD ≥99%.
+    """
+    content = artifact.get("content") or {}
+    if not isinstance(content, dict):
+        content = {}
+    requirements = artifact.get("requirements") or content.get("requirements") or []
+    if not isinstance(requirements, list):
+        requirements = []
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        expected = []
+    if not isinstance(expected, list):
+        expected = []
+
+    matched = 0
+    for entry in expected:
+        if not isinstance(entry, dict):
+            continue
+        if any(
+            _element_expectation_matches(
+                entry, _fulfillment_requirement_surface(row)
+            )
+            for row in requirements
+            if isinstance(row, dict)
+        ):
+            matched += 1
+
+    no_evidence_rows = [
+        row for row in requirements
+        if isinstance(row, dict)
+        and not (row.get("evidenceSnapshot") or row.get("evidenceCitationIds"))
+    ]
+    restrained = sum(
+        1 for row in no_evidence_rows
+        if str(row.get("proofStatus") or row.get("judgement") or "").upper()
+        in ("INSUFFICIENT", "EVIDENCE_INSUFFICIENT", "NEEDS_REVIEW", "UNCLEAR", "UNCLEAR_TERMS")
+    )
+    manual_result = str(content.get("manualResult") or "").strip().upper()
+    conclusion = str(artifact.get("conclusion") or "").strip()
+    ai_violations = 1 if (conclusion and not manual_result) else 0
+    conflict_rows = sum(
+        1 for row in requirements
+        if isinstance(row, dict)
+        and str(row.get("judgement") or (row.get("aiSuggestion") or {}).get("conclusion") or "")
+        .upper() in ("UNCLEAR_TERMS", "UNCLEAR")
+    )
+    cited_rows = sum(
+        1 for row in requirements
+        if isinstance(row, dict)
+        and (row.get("evidenceCitationIds") or row.get("contractCitationIds"))
+    )
+    try:
+        should_not = json.loads(case.get("should_not_find_json") or "[]")
+    except Exception:
+        should_not = []
+    false_pos = sum(
+        1 for row in requirements
+        for entry in (should_not if isinstance(should_not, list) else [])
+        if _normalize_eval_text(entry)
+        in _normalize_eval_text(_fulfillment_requirement_surface(row))
+        if _normalize_eval_text(entry)
+    )
+    return {
+        "success": True,
+        "scored": True,
+        "scorerVersion": EVAL_SCORER_VERSION,
+        "highRecall": matched / len(expected) if expected else 1.0,
+        "expectedRequirementCount": len(expected),
+        "dualCitationRate": cited_rows / max(len(requirements), 1),
+        "falsePositives": false_pos,
+        "schemaValid": 1 if (
+            isinstance(artifact.get("requirements") or content.get("requirements"), list)
+            and isinstance(artifact.get("content"), dict)
+        ) else 0,
+        "analysisMode": artifact.get("analysisMode") or content.get("analysisMode", "FULL"),
+        "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(requirements),
+        "restraintRate": restrained / max(len(no_evidence_rows), 1),
+        "restraintDenominator": len(no_evidence_rows),
+        "aiSuggestionSchemaRate": sum(
+            1 for row in requirements
+            if isinstance(row, dict)
+            and (row.get("aiSuggestion") or {}).get("status") == "LLM_ENRICHED"
+        ) / max(len(requirements), 1),
+        "aiAutoConfirmViolations": ai_violations,
+        "conflictRecognitionRate": conflict_rows / max(len(requirements), 1),
+        "humanAdoptionRate": 1.0 if manual_result else 0.0,
+        "artifact": artifact,
+    }
+
+
 _EVAL_SCORERS = {
     "CONTRACT_REVIEW": _score_risk_review,
     "RISK_REVIEW": _score_risk_review,
     "CONTRACT_ELEMENT_EXTRACTION": _score_element_extraction,
     "INTAKE": _score_element_extraction,
     "ELEMENT_EXTRACTION": _score_element_extraction,
+    "TIMELINE_EXTRACTION": _score_timeline_extraction,
+    "FULFILLMENT_TIMELINE": _score_timeline_extraction,
+    "FULFILLMENT_CHECK": _score_fulfillment_check,
 }
 
 
 def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_mode: str) -> dict[str, Any]:
     """Score one eval case through the per-task-type scorer registry.
 
-    Unregistered task types (FULFILLMENT_CHECK / TIMELINE_EXTRACTION) keep
-    the placeholder pass-through until a real scorer is written for them.
+    PRD Phase 8 acceptance: no constant-1.0 placeholder scoring. An
+    unregistered task type is reported as explicitly UNSCORED (scored=False
+    + skipReason) so the run summary can exclude it from the metrics
+    denominators instead of publishing fake 1.0s.
     """
     scorer = _EVAL_SCORERS.get(str(score_mode or "").upper())
     if scorer:
         return scorer(case, artifact or {})
-    findings = (artifact or {}).get("findings") or []
-    if not isinstance(findings, list):
-        findings = []
     return {
-        "success": True,
-        "highRecall": 1,
-        "dualCitationRate": 1,
+        "success": False,
+        "scored": False,
+        "skipReason": f"NO_SCORER:{str(score_mode or 'UNKNOWN').upper()}",
+        "highRecall": 0.0,
+        "dualCitationRate": 0.0,
         "falsePositives": 0,
-        "schemaValid": 1 if isinstance(artifact, dict) else 0,
-        "analysisMode": (artifact or {}).get("analysisMode", "FULL"),
-        "riskScore": (artifact or {}).get("riskScore", 0),
-        "findingCount": len(findings),
+        "schemaValid": 0,
+        "analysisMode": "UNSCORED",
+        "riskScore": 0,
+        "findingCount": 0,
         "artifact": artifact,
     }
 
@@ -3546,6 +3821,8 @@ async def _run_evaluation_background(eval_run_id: int):
         task_plan = _eval_task_plan(dataset_type)
         per_case_results: list[dict[str, Any]] = []
         infra_failed_count = 0
+        scored_case_run_ids: list[int] = []
+        fixture_reuse_count: list[int] = []
         logger.info(
             "Eval run %s: %d cases, runtime=%s, dataset=%s, tasks=%s",
             eval_run_id, total_cases, runtime, dataset_type, task_plan,
@@ -3565,7 +3842,7 @@ async def _run_evaluation_background(eval_run_id: int):
                     current_step=f"Running case {idx + 1}/{total_cases}: {case_key}",
                     summary_patch={"percent": round((idx / total_cases) * 100, 2)},
                 )
-                temp_case_id = _create_eval_temp_case(eval_run_id, case, idx, temp_case_ids)
+                temp_case_id = _create_eval_temp_case(eval_run_id, case, idx, temp_case_ids, fixture_reuse_count)
                 _set_eval_feature_overrides(features)
                 stage_outputs: dict[str, Any] = {}
                 review_artifact: dict[str, Any] | None = None
@@ -3622,6 +3899,8 @@ async def _run_evaluation_background(eval_run_id: int):
                 row["rerankMethod"] = rerank_observation["actualMethod"]
                 _record_eval_result(eval_run_id, case_id, row)
                 per_case_results.append({"caseId": case_id, **row})
+                if row.get("scored", True):
+                    scored_case_run_ids.extend(case_run_ids)
                 success_count += 1
             except Exception as exc:
                 for run_id in _failed_eval_stage_run_ids(case_run_ids, completed_run_ids):
@@ -3665,7 +3944,37 @@ async def _run_evaluation_background(eval_run_id: int):
                     },
                 )
 
-        metric_results = [r for r in per_case_results if r.get("analysisMode") != "INFRA_FAILED"]
+        # PRD §10: freeze the scorer version on the executed run rows so the
+        # stack behind every scored case is queryable from agent_run.
+        if scored_case_run_ids:
+            try:
+                with _conn() as conn:
+                    with conn.cursor() as cur:
+                        placeholders = ",".join(["%s"] * len(scored_case_run_ids))
+                        cur.execute(
+                            f"UPDATE agent_run SET scorer_version=%s WHERE id IN ({placeholders})",
+                            [EVAL_SCORER_VERSION, *scored_case_run_ids],
+                        )
+                        conn.commit()
+            except Exception as exc:
+                logger.debug("Could not stamp scorer version on eval case runs: %s", exc)
+
+        # Phase 8 task 5: UNSCORED rows (no scorer registered for the task
+        # type) are excluded from metric denominators and reported explicitly
+        # with their skip reason instead of leaking 0.0s into the averages.
+        metric_results = [
+            r for r in per_case_results
+            if r.get("analysisMode") != "INFRA_FAILED" and r.get("scored", True) is not False
+        ]
+        unscored_count = sum(
+            1 for r in per_case_results
+            if r.get("analysisMode") != "INFRA_FAILED" and r.get("scored") is False
+        )
+        skip_reasons = {
+            str(r.get("caseId")): str(r.get("skipReason"))
+            for r in per_case_results
+            if r.get("skipReason")
+        }
         if metric_results:
             n = len(metric_results)
             avg_recall = sum(float(r.get("highRecall") or 0) for r in metric_results) / n
@@ -3675,6 +3984,7 @@ async def _run_evaluation_background(eval_run_id: int):
             limited_count = sum(1 for r in metric_results if r.get("analysisMode") == "LIMITED")
             limited_report_rate = limited_count / n
         else:
+            avg_recall = 0.0
             avg_dual_cite = 0.0
             avg_false_pos = 0.0
             avg_schema_valid = 0.0
@@ -3683,6 +3993,7 @@ async def _run_evaluation_background(eval_run_id: int):
         failed_count = len([
             r for r in per_case_results
             if not r.get("success") and r.get("analysisMode") != "INFRA_FAILED"
+            and r.get("scored", True) is not False
         ])
         rerank_methods = sorted({
             str(result.get("rerankMethod") or "NOT_USED")
@@ -3700,6 +4011,7 @@ async def _run_evaluation_background(eval_run_id: int):
             eval_status = "FAILED"
         elif (
             failed_count > 0 or limited_count > 0 or infra_failed_count > 0
+            or unscored_count > 0
             or env_status == "DEGRADED" or (requested_rerank and rerank_fallback_count > 0)
         ):
             eval_status = "DEGRADED"
@@ -3714,6 +4026,17 @@ async def _run_evaluation_background(eval_run_id: int):
             "limitedReportRate": round(limited_report_rate, 4),
             "caseCount": total_cases,
             "metricCaseCount": len(metric_results),
+            # PRD Phase 8 task 2: how many cases hit the text-hash fixture
+            # cache (no re-split / no embedding-index rebuild).
+            "fixtureReuseCount": len(fixture_reuse_count),
+            "fixtureBuildCount": total_cases - len(fixture_reuse_count),
+            "unscoredCount": unscored_count,
+            "skipReasons": skip_reasons or None,
+            "scorerVersions": sorted({
+                str(r.get("scorerVersion"))
+                for r in per_case_results
+                if r.get("scorerVersion")
+            }),
             "passedCount": success_count,
             "failedCount": failed_count,
             "infraFailedCount": infra_failed_count,

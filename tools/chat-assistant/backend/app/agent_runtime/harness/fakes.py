@@ -246,6 +246,8 @@ class FakePersistence:
     async def set_runtime_metadata(
         self, run_id: int, *, runtime_engine: str = "", graph_name: str = "",
         graph_version: str = "", model: str = "", prompt_version: str = "",
+        retrieval_version: str = "", rerank_version: str = "",
+        scorer_version: str = "",
     ) -> None:
         self._maybe_raise("set_runtime_metadata")
         self.metadata.append((run_id, {
@@ -254,4 +256,7 @@ class FakePersistence:
             "graph_version": graph_version,
             "model": model,
             "prompt_version": prompt_version,
+            "retrieval_version": retrieval_version,
+            "rerank_version": rerank_version,
+            "scorer_version": scorer_version,
         }))

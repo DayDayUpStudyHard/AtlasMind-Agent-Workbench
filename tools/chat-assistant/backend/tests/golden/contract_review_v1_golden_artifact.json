@@ -1985,7 +1985,18 @@
       }
     ],
     "summary": "完成 6 个风险领域审查，识别 6 项需关注事项，其中高风险 0 项、中风险 6 项。",
-    "title": "合同审查报告 — Golden 软件采购合同"
+    "title": "合同审查报告 — Golden 软件采购合同",
+    "versions": {
+      "artifactSchemaVersion": "artifact-v2",
+      "graphName": "contract_review",
+      "graphVersion": "v1",
+      "model": "",
+      "promptVersion": "contract-review-graph-v1",
+      "rerankVersion": "reranker-v1",
+      "retrievalVersion": "contract-hybrid-retrieval-v2",
+      "scorerVersion": "",
+      "snapshotHash": ""
+    }
   },
   "format": "golden-v3-ops",
   "initial_state": {
@@ -1997,7 +2008,10 @@
     "model": "",
     "observations": [],
     "prompt_version": "contract-review-graph-v1",
+    "rerank_version": "reranker-v1",
+    "retrieval_version": "contract-hybrid-retrieval-v2",
     "run_id": 7001,
+    "scorer_version": "",
     "state_revision": 0,
     "subject_id": 1,
     "subject_type": "CONTRACT_CASE",
@@ -8103,7 +8117,18 @@
               }
             ],
             "summary": "完成 6 个风险领域审查，识别 6 项需关注事项，其中高风险 0 项、中风险 6 项。",
-            "title": "合同审查报告 — Golden 软件采购合同"
+            "title": "合同审查报告 — Golden 软件采购合同",
+            "versions": {
+              "artifactSchemaVersion": "artifact-v2",
+              "graphName": "contract_review",
+              "graphVersion": "v1",
+              "model": "",
+              "promptVersion": "contract-review-graph-v1",
+              "rerankVersion": "reranker-v1",
+              "retrievalVersion": "contract-hybrid-retrieval-v2",
+              "scorerVersion": "",
+              "snapshotHash": ""
+            }
           }
         ]
       ]
@@ -10205,7 +10230,18 @@
               }
             ],
             "summary": "完成 6 个风险领域审查，识别 6 项需关注事项，其中高风险 0 项、中风险 6 项。",
-            "title": "合同审查报告 — Golden 软件采购合同"
+            "title": "合同审查报告 — Golden 软件采购合同",
+            "versions": {
+              "artifactSchemaVersion": "artifact-v2",
+              "graphName": "contract_review",
+              "graphVersion": "v1",
+              "model": "",
+              "promptVersion": "contract-review-graph-v1",
+              "rerankVersion": "reranker-v1",
+              "retrievalVersion": "contract-hybrid-retrieval-v2",
+              "scorerVersion": "",
+              "snapshotHash": ""
+            }
           }
         ]
       ]

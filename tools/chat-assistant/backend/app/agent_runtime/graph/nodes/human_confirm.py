@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..versioning import stamp_artifact_versions
+
 
 def _build_wait_state(state: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     artifacts = state.get("artifacts") or {}
@@ -153,6 +155,8 @@ def apply_human_result(state: dict[str, Any]) -> dict[str, Any]:
             "requirements": judgements,
         },
     }
+
+    stamp_artifact_versions(state, artifact)
 
     wait_state = state.get("wait_state") or {}
     wait_state["resolved"] = True

@@ -205,8 +205,15 @@ class RunStore(ABC):
         graph_version: str,
         model: str,
         prompt_version: str,
+        retrieval_version: str = "",
+        rerank_version: str = "",
+        scorer_version: str = "",
     ) -> None:
-        """Persist runtime identity before a graph reaches its first checkpoint."""
+        """Persist runtime identity before a graph reaches its first checkpoint.
+
+        PRD Phase 8 / §10: retrieval/rerank/scorer versions freeze the full
+        stack behind a run so evaluation results stay traceable.
+        """
         ...
 
     @abstractmethod
@@ -403,6 +410,9 @@ class MySqlRunStore(RunStore):
                                   runtime_engine AS runtimeEngine, graph_name AS graphName,
                                   graph_version AS graphVersion, model,
                                   prompt_version AS promptVersion,
+                                  retrieval_version AS retrievalVersion,
+                                  rerank_version AS rerankVersion,
+                                  scorer_version AS scorerVersion,
                                   started_at AS startedAt, finished_at AS finishedAt,
                                   create_time AS createTime, update_time AS updateTime
                            FROM agent_run WHERE id=%s""",
@@ -502,6 +512,9 @@ class MySqlRunStore(RunStore):
         graph_version: str,
         model: str,
         prompt_version: str,
+        retrieval_version: str = "",
+        rerank_version: str = "",
+        scorer_version: str = "",
     ) -> None:
         def _update():
             try:
@@ -513,7 +526,10 @@ class MySqlRunStore(RunStore):
                                    graph_name=%s,
                                    graph_version=%s,
                                    model=%s,
-                                   prompt_version=%s
+                                   prompt_version=%s,
+                                   retrieval_version=%s,
+                                   rerank_version=%s,
+                                   scorer_version=%s
                                WHERE id=%s""",
                             (
                                 str(runtime_engine or "")[:32],
@@ -521,6 +537,9 @@ class MySqlRunStore(RunStore):
                                 str(graph_version or "")[:32],
                                 str(model or "")[:128],
                                 str(prompt_version or "")[:64],
+                                str(retrieval_version or "")[:64],
+                                str(rerank_version or "")[:64],
+                                str(scorer_version or "")[:64],
                                 run_id,
                             ),
                         )

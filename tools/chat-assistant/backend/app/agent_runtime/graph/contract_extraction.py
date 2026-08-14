@@ -17,6 +17,7 @@ from typing import Any, Awaitable
 from ..harness.models import Role, TaskSpec
 from .element_normalization import validate_base_field, validate_structured_element
 from .evidence_snapshot import load_contract_evidence_snapshot, state_copy_of_snapshot
+from .versioning import stamp_artifact_versions
 
 logger = logging.getLogger(__name__)
 
@@ -1520,6 +1521,9 @@ def persist_extraction_snapshot(state: dict[str, Any]) -> dict[str, Any]:
             "humanConfirmationRequired": True,
         },
     }
+
+    stamp_artifact_versions(state, artifact)
+
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "persist_extraction_snapshot",

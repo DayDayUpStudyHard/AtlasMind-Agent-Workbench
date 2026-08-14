@@ -74,6 +74,8 @@ def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):
             "graph_version": "v1",
             "model": "test-llm",
             "prompt_version": "test-contract-prompt-v1",
+            "retrieval_version": "contract-hybrid-retrieval-v2",
+            "rerank_version": "reranker-v1",
         },
     )]
     assert result.graph_info == {
@@ -82,6 +84,9 @@ def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):
         "graphVersion": "v1",
         "model": "test-llm",
         "promptVersion": "test-contract-prompt-v1",
+        "retrievalVersion": "contract-hybrid-retrieval-v2",
+        "rerankVersion": "reranker-v1",
+        "scorerVersion": "",
         "stateRevision": 0,
     }
 

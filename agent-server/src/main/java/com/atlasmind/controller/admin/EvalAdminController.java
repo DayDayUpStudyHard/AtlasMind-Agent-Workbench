@@ -29,6 +29,7 @@ public class EvalAdminController {
     public Result<List<Map<String, Object>>> listDatasets() {
         return Result.ok(jdbc.queryForList("""
                 SELECT d.id, d.name, d.version, d.description, d.contract_type AS contractType,
+                       d.task_purpose AS taskPurpose,
                        d.case_count AS caseCount, d.status, d.create_time AS createTime
                 FROM agent_eval_dataset d
                 ORDER BY d.create_time DESC
@@ -40,11 +41,12 @@ public class EvalAdminController {
     public Result<Map<String, Object>> createDataset(@RequestBody Map<String, Object> request) {
         String contractType = normalizeDatasetType(str(request, "contractType"));
         jdbc.update("""
-                INSERT INTO agent_eval_dataset (name, version, description, contract_type, case_count, status)
-                VALUES (?,?,?,?,0,'DRAFT')
+                INSERT INTO agent_eval_dataset
+                (name, version, description, contract_type, task_purpose, case_count, status)
+                VALUES (?,?,?,?,?,0,'DRAFT')
                 """,
                 str(request, "name"), str(request, "version"),
-                str(request, "description"), contractType);
+                str(request, "description"), contractType, str(request, "taskPurpose"));
         return Result.ok(Map.of("created", true));
     }
 
@@ -215,6 +217,46 @@ public class EvalAdminController {
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 ORDER BY r.id DESC LIMIT 50
                 """).stream().map(this::decorateRun).toList());
+    }
+
+    // ── Version comparison board (PRD Phase 8 task 7) ──────────────
+    // v1 基线（legacy）/ 迁移版本（graph）对照：按运行时 + 图 + 模型 + 提示词
+    // 版本聚合已完成评测的指标，作为「迁移前后指标可追溯」的看板数据源。
+
+    @GetMapping("/versions/comparison")
+    public Result<List<Map<String, Object>>> versionComparison() {
+        return Result.ok(jdbc.queryForList("""
+                SELECT
+                       COALESCE(NULLIF(r.graph_name, ''), CONCAT('legacy-', r.runtime_engine)) AS versionKey,
+                       r.runtime_engine AS runtimeEngine,
+                       r.graph_name AS graphName,
+                       r.graph_version AS graphVersion,
+                       r.llm_model AS llmModel,
+                       r.prompt_version AS promptVersion,
+                       COUNT(*) AS runCount,
+                       ROUND(AVG(r.high_risk_recall), 4) AS avgHighRiskRecall,
+                       ROUND(AVG(r.dual_citation_rate), 4) AS avgDualCitationRate,
+                       ROUND(AVG(r.false_positive_rate), 4) AS avgFalsePositiveRate,
+                       ROUND(AVG(r.schema_valid_rate), 4) AS avgSchemaValidRate,
+                       MAX(r.finished_at) AS lastFinishedAt
+                FROM agent_eval_run r
+                WHERE r.status = 'COMPLETED'
+                GROUP BY versionKey, r.runtime_engine, r.graph_name, r.graph_version,
+                         r.llm_model, r.prompt_version
+                ORDER BY MAX(r.finished_at) DESC
+                """).stream().map(row -> {
+            row.put("versionLabel", versionLabel(row));
+            return row;
+        }).toList());
+    }
+
+    private String versionLabel(Map<String, Object> row) {
+        String graphName = str(row, "graphName");
+        String graphVersion = str(row, "graphVersion");
+        if (!graphName.isEmpty()) {
+            return graphName + " @ " + graphVersion;
+        }
+        return "v1 基线（legacy " + str(row, "runtimeEngine") + "）";
     }
 
     @DeleteMapping("/runs/{runId}")

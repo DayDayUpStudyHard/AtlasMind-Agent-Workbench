@@ -326,6 +326,11 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         addColumnIfMissing("agent_run", "graph_version", "VARCHAR(64)");
         addColumnIfMissing("agent_run", "model", "VARCHAR(128)");
         addColumnIfMissing("agent_run", "prompt_version", "VARCHAR(64)");
+        // PRD §10 / Phase 8 task 3: frozen retrieval/rerank/scorer stack
+        // versions — run rows stay traceable to the exact implementation.
+        addColumnIfMissing("agent_run", "retrieval_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "rerank_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "scorer_version", "VARCHAR(64)");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_fulfillment_check (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -445,12 +450,16 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     version VARCHAR(32) NOT NULL DEFAULT 'v1',
                     description VARCHAR(1000) DEFAULT '',
                     contract_type VARCHAR(64) DEFAULT 'SERVICE_PROCUREMENT',
+                    task_purpose VARCHAR(64) DEFAULT '',
                     case_count INT DEFAULT 0,
                     status VARCHAR(32) DEFAULT 'DRAFT',
                     create_time DATETIME DEFAULT CURRENT_TIMESTAMP,
                     update_time DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // PRD Phase 8 task 1: evaluation sets are distinguished by task
+        // purpose (要素提取 / 履约日程 / 风险审查 / 履约核验 / 综合).
+        addColumnIfMissing("agent_eval_dataset", "task_purpose", "VARCHAR(64) DEFAULT ''");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS agent_eval_case (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,

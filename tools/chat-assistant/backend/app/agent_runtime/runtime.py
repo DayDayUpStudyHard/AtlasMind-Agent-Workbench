@@ -60,6 +60,14 @@ def is_legacy_task_supported(task_type: str) -> bool:
     return str(task_type or "").upper() in LEGACY_SUPPORTED_TASK_TYPES
 
 
+# PRD Phase 8 / §10: the frozen retrieval pipeline version. Mirrors
+# contract_extraction.EXTRACTION_RETRIEVAL_VERSION — every graph shares the
+# same hybrid retrieval implementation; the value lives here (runtime
+# cannot import the graph package without a cycle) and contract_extraction
+# pins the same string for its snapshot rows.
+RETRIEVAL_VERSION = "contract-hybrid-retrieval-v2"
+
+
 def _runtime_model_metadata(task_type: str) -> tuple[str, str]:
     """Return the configured model and stable prompt version for a graph.
 
@@ -183,6 +191,8 @@ class GraphAdapter:
         graph_version: str,
         model: str,
         prompt_version: str,
+        retrieval_version: str = "",
+        rerank_version: str = "",
     ) -> None:
         """Make a graph run identifiable even when it fails before checkpointing."""
         writer = getattr(self._run_store, "set_runtime_metadata", None)
@@ -196,6 +206,8 @@ class GraphAdapter:
                 graph_version=graph_version,
                 model=model,
                 prompt_version=prompt_version,
+                retrieval_version=retrieval_version,
+                rerank_version=rerank_version,
             )
         except Exception as exc:
             logger.debug("Could not persist graph runtime metadata for run %s: %s", run_id, exc)
@@ -210,6 +222,11 @@ class GraphAdapter:
         graph_name = self._graph_name or getattr(context, "graph_name", "unknown")
         graph_version = self._graph_version or getattr(context, "graph_version", "v1")
         model, prompt_version = _runtime_model_metadata(context.task_type)
+        # PRD Phase 8 / §10: freeze the retrieval + rerank stack alongside
+        # graph/prompt/model so every run (and every artifact) is traceable.
+        from app.agent_runtime.reranker import RERANK_VERSION
+        retrieval_version = RETRIEVAL_VERSION
+        rerank_version = RERANK_VERSION
 
         initial_state = {
             "run_id": context.run_id,
@@ -221,6 +238,9 @@ class GraphAdapter:
             "graph_version": graph_version,
             "model": model,
             "prompt_version": prompt_version,
+            "retrieval_version": retrieval_version,
+            "rerank_version": rerank_version,
+            "scorer_version": "",
             "trigger_type": "MANUAL",
             "state_revision": 0,
             "case_snapshot": context.project or {},
@@ -244,6 +264,8 @@ class GraphAdapter:
                 graph_version,
                 model,
                 prompt_version,
+                retrieval_version,
+                rerank_version,
             )
             # Keep the run row heartbeating while the graph executes: the
             # RunRecovery sweeper (this process's or the API server's) marks runs
@@ -363,6 +385,11 @@ class GraphAdapter:
             "graphVersion": final_state.get("graph_version", ""),
             "model": final_state.get("model", model),
             "promptVersion": final_state.get("prompt_version", prompt_version),
+            # PRD §10: the frozen retrieval/rerank/scorer stack travels with
+            # the result so eval observers can record it without re-querying.
+            "retrievalVersion": final_state.get("retrieval_version", ""),
+            "rerankVersion": final_state.get("rerank_version", ""),
+            "scorerVersion": final_state.get("scorer_version", ""),
             "stateRevision": final_state.get("state_revision", 0),
         }
         if limited_diagnostics:

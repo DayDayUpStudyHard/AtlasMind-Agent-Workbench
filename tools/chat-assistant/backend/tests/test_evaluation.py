@@ -533,12 +533,159 @@ def test_score_eval_artifact_element_missing_not_detected_scores_zero():
     assert result["highRecall"] == 0.0
 
 
-def test_score_eval_artifact_unregistered_mode_keeps_placeholder():
+def test_score_eval_artifact_unregistered_mode_is_explicitly_unscored():
     from app.api.routes import _score_eval_artifact
 
-    result = _score_eval_artifact({}, {}, "FULFILLMENT_CHECK")
-    assert result["success"] is True
-    assert result["highRecall"] == 1
+    result = _score_eval_artifact({}, {}, "SOME_FUTURE_TASK_TYPE")
+    assert result["success"] is False
+    assert result["scored"] is False
+    assert result["skipReason"] == "NO_SCORER:SOME_FUTURE_TASK_TYPE"
+    assert result["analysisMode"] == "UNSCORED"
+    assert result["highRecall"] == 0.0
+
+
+def test_score_eval_artifact_timeline_extraction_scores_nodes():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "生效:2026-01-01", "severity": "LOW", "riskDimension": "DATE"},
+            {"title": "终止:双方权利义务履行完毕之日(条件事件)",
+             "severity": "LOW", "riskDimension": "DATE"},
+            {"title": "每月5日前:公示收支明细(周期)",
+             "severity": "LOW", "riskDimension": "DATE"},
+        ]),
+        "should_not_find_json": json.dumps(["合同终止日期为2027-12-31"]),
+    }
+    artifact = {
+        "analysisMode": "LLM_REVIEWED_TIMELINE",
+        "nodes": [
+            {
+                "clauseId": 1, "label": "生效", "date": "2026-01-01",
+                "condition": None, "nodeType": "EFFECTIVE",
+                "businessMeaning": "合同生效日", "responsibleParty": "甲方",
+                "citation": {"quote": "自2026年1月1日起生效"},
+            },
+            {
+                "clauseId": 5, "label": "终止", "date": None,
+                "condition": "双方权利义务履行完毕之日", "nodeType": "TERMINATION",
+                "businessMeaning": "合同终止(条件事件)", "responsibleParty": None,
+                "citation": {"quote": "于双方权利义务履行完毕之日终止"},
+            },
+            {
+                "clauseId": 9, "label": "公示收支明细", "date": None,
+                "condition": "每月5日前", "nodeType": "PERIODIC",
+                "businessMeaning": "每月公示收支明细", "responsibleParty": "乙方",
+                "citation": {"quote": "每月5日前公示收支明细"},
+            },
+        ],
+    }
+    result = _score_eval_artifact(case, artifact, "TIMELINE_EXTRACTION")
+    assert result["scored"] is True
+    assert result["highRecall"] == 1.0
+    assert result["expectedNodeCount"] == 3
+    assert result["dualCitationRate"] == 1.0
+    assert result["dateAccuracy"] == 1.0
+    assert result["dateDenominator"] == 1
+    assert result["conditionalRecognitionRate"] == 1.0
+    assert result["conditionalDenominator"] == 1
+    assert result["responsiblePartyCoverage"] == pytest.approx(2 / 3)
+    assert result["falsePositives"] == 0
+
+
+def test_score_eval_artifact_timeline_date_mismatch_and_fabricated_node():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "生效:2026-01-01", "severity": "LOW", "riskDimension": "DATE"},
+        ]),
+        "should_not_find_json": json.dumps(["合同终止日期为2027-12-31"]),
+    }
+    artifact = {
+        "nodes": [
+            {
+                "label": "生效", "date": "2026-02-01", "condition": None,
+                "nodeType": "EFFECTIVE", "businessMeaning": "合同生效日",
+                "citation": {},
+            },
+            {
+                "label": "终止", "date": "2027-12-31", "condition": None,
+                "nodeType": "TERMINATION",
+                "businessMeaning": "合同终止日期为2027-12-31",
+                "citation": {},
+            },
+        ],
+    }
+    result = _score_eval_artifact(case, artifact, "TIMELINE_EXTRACTION")
+    # node found, but the calculated date is wrong
+    assert result["highRecall"] == 1.0
+    assert result["dateAccuracy"] == 0.0
+    assert result["dateDenominator"] == 1
+    # fabricated fixed termination date surfaces as a false positive
+    assert result["falsePositives"] == 1
+
+
+def test_score_eval_artifact_fulfillment_check_scores_requirements():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([
+            {"title": "完成付款：首付款"},
+            {"title": "完成验收：设备调试验收"},
+        ]),
+        "should_not_find_json": json.dumps(["已完成全部付款"]),
+    }
+    artifact = {
+        "analysisMode": "FULL",
+        "content": {
+            "manualResult": "SATISFIED",
+            "requirements": [
+                {
+                    "requirement": "完成付款：首付款",
+                    "proofStatus": "SUPPORTED",
+                    "evidenceCitationIds": [1],
+                    "aiSuggestion": {
+                        "status": "LLM_ENRICHED", "conclusion": "BASICALLY_SATISFIED",
+                    },
+                },
+                {
+                    "requirement": "完成验收：设备调试验收",
+                    "proofStatus": "EVIDENCE_INSUFFICIENT",
+                    "judgement": "UNCLEAR_TERMS",
+                    "evidenceSnapshot": None,
+                    "evidenceCitationIds": None,
+                },
+            ],
+        },
+        "conclusion": "BASICALLY_SATISFIED",
+    }
+    result = _score_eval_artifact(case, artifact, "FULFILLMENT_CHECK")
+    assert result["scored"] is True
+    assert result["highRecall"] == 1.0
+    assert result["expectedRequirementCount"] == 2
+    # the evidence-less row is honestly judged INSUFFICIENT, not claimed
+    assert result["restraintRate"] == 1.0
+    assert result["restraintDenominator"] == 1
+    assert result["aiSuggestionSchemaRate"] == 0.5
+    assert result["conflictRecognitionRate"] == 0.5
+    assert result["aiAutoConfirmViolations"] == 0
+    assert result["humanAdoptionRate"] == 1.0
+    assert result["dualCitationRate"] == 0.5
+    assert result["falsePositives"] == 0
+
+
+def test_score_eval_artifact_fulfillment_ai_auto_confirm_is_flagged():
+    from app.api.routes import _score_eval_artifact
+
+    case = {"expected_findings_json": "[]"}
+    artifact = {
+        "content": {"requirements": [], "manualResult": None},
+        "conclusion": "COMPLETED",
+    }
+    result = _score_eval_artifact(case, artifact, "FULFILLMENT_CHECK")
+    assert result["aiAutoConfirmViolations"] == 1
+    assert result["humanAdoptionRate"] == 0.0
 
 
 def test_legacy_task_support_guard():

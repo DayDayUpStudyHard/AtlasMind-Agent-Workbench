@@ -44,6 +44,14 @@
               {{ row.contractTypeLabel || formatDatasetType(row.contractType) }}
             </template>
           </el-table-column>
+          <el-table-column prop="taskPurpose" label="任务用途" width="110">
+            <template #default="{ row }">
+              <el-tag v-if="row.taskPurpose" type="warning" effect="plain" size="small">
+                {{ row.taskPurpose }}
+              </el-tag>
+              <span v-else style="color: #a8abb2">—</span>
+            </template>
+          </el-table-column>
           <el-table-column prop="caseCount" label="用例数" width="80" align="center" />
           <el-table-column label="状态" width="80" align="center">
             <template #default="{ row }">
@@ -79,6 +87,9 @@
                 <el-option label="履约核验" value="FULFILLMENT_CHECK" />
                 <el-option label="综合评测" value="COMPREHENSIVE" />
               </el-select>
+            </el-form-item>
+            <el-form-item label="任务用途">
+              <el-input v-model="newDataset.taskPurpose" placeholder="如 要素提取 / 履约日程 / 风险审查 / 综合" />
             </el-form-item>
             <el-form-item label="描述">
               <el-input v-model="newDataset.description" type="textarea" rows="3" placeholder="描述" />
@@ -559,6 +570,39 @@
 
       <!-- ═══ Compare Tab ═══ -->
       <el-tab-pane label="版本对比" name="compare">
+        <!-- v1 基线 / 迁移版本 / 未来版本聚合对照（PRD Phase 8 task 7） -->
+        <div class="version-board" v-if="versionBoard.length">
+          <h4>版本维度汇总（已完成评测，按运行时/图/模型/提示词版本聚合）</h4>
+          <el-table :data="versionBoard" stripe size="small">
+            <el-table-column label="版本" min-width="220">
+              <template #default="{ row }">
+                <el-tag :type="row.runtimeEngine === 'legacy' ? 'info' : 'success'" effect="plain" size="small">
+                  {{ row.versionLabel }}
+                </el-tag>
+                <span v-if="row.llmModel" style="margin-left:6px;font-size:12px;color:#8b9aaa">
+                  {{ row.llmModel }} · {{ row.promptVersion }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="runCount" label="Run 数" width="80" align="center" />
+            <el-table-column label="平均召回" width="100" align="center">
+              <template #default="{ row }">{{ (row.avgHighRiskRecall * 100).toFixed(1) }}%</template>
+            </el-table-column>
+            <el-table-column label="平均双引用" width="100" align="center">
+              <template #default="{ row }">{{ (row.avgDualCitationRate * 100).toFixed(1) }}%</template>
+            </el-table-column>
+            <el-table-column label="平均误报率" width="100" align="center">
+              <template #default="{ row }">{{ (row.avgFalsePositiveRate * 100).toFixed(1) }}%</template>
+            </el-table-column>
+            <el-table-column label="Schema 有效" width="110" align="center">
+              <template #default="{ row }">{{ (row.avgSchemaValidRate * 100).toFixed(1) }}%</template>
+            </el-table-column>
+            <el-table-column label="最近完成" width="170">
+              <template #default="{ row }">{{ formatDate(row.lastFinishedAt) }}</template>
+            </el-table-column>
+          </el-table>
+        </div>
+
         <div class="compare-controls">
           <el-select v-model="compareId1" placeholder="选择 Run 1" style="width: 200px">
             <el-option v-for="r in runs" :key="r.id" :label="`${r.datasetName} · ${(r.runtimeEngineLabel || formatRuntimeEngine(r.runtimeEngine))} · #${r.id}`" :value="r.id" />
@@ -609,6 +653,7 @@ const tab = ref('datasets')
 const datasets = ref([])
 const runs = ref([])
 const trend = ref([])
+const versionBoard = ref([])
 const cases = ref([])
 const selectedDataset = ref(null)
 const showCreateDataset = ref(false)
@@ -647,6 +692,7 @@ async function loadAll() {
   try { datasets.value = (await api.get('/api/admin/eval/datasets')).data.data || [] } catch {}
   try { runs.value = (await api.get('/api/admin/eval/runs')).data.data || [] } catch {}
   try { trend.value = (await api.get('/api/admin/eval/metrics/trend')).data.data || [] } catch {}
+  try { versionBoard.value = (await api.get('/api/admin/eval/versions/comparison')).data.data || [] } catch {}
 }
 
 async function createDataset() {
@@ -654,7 +700,7 @@ async function createDataset() {
     await api.post('/api/admin/eval/datasets', newDataset.value)
     ElMessage.success('数据集已创建')
     showCreateDataset.value = false
-    newDataset.value = { name: '', version: 'v1', contractType: 'CONTRACT_REVIEW', description: '' }
+    newDataset.value = { name: '', version: 'v1', contractType: 'CONTRACT_REVIEW', taskPurpose: '', description: '' }
     loadAll()
   } catch (err) {
     ElMessage.error(err.response?.data?.message || '创建失败')
@@ -1065,6 +1111,10 @@ function severityTagType(v) {
 .artifact-block { max-height: 420px; }
 
 /* Compare */
+.version-board { margin-bottom: 24px; }
+.version-board h4 { margin: 0 0 10px; color: #1f2d3d; font-size: 14px; }
+.version-board .el-table { border: 1px solid #dce4ee; border-radius: 4px; }
+
 .compare-controls { display: flex; align-items: center; gap: 14px; margin-bottom: 18px; }
 .compare-controls .vs { color: #909399; font-size: 15px; font-weight: 700; }
 

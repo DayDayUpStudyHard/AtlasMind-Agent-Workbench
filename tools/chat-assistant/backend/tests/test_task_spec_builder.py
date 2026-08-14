@@ -52,10 +52,18 @@ from app.agent_runtime.harness.fakes import FakePersistence, fake_clause, fake_s
 from app.agent_runtime.harness.graph_builder import build_task_graph
 from app.agent_runtime.harness.models import HumanGate, Role, TaskSpec
 from app.agent_runtime.persistence import MySqlReportStore
+from app.agent_runtime import reranker as reranker_mod
+from app.agent_runtime import runtime as runtime_mod
 from app.agent_runtime.runtime import GraphAdapter
 from app.services.llm_service import LLMService
 
 GOLDEN_PATH = Path(__file__).parent / "golden" / "contract_review_v1_golden_artifact.json"
+
+# PRD Phase 8 / §10: the golden run must freeze the same stack the
+# GraphAdapter seeds, regardless of the machine's settings — capture and
+# _run_artifact both read these pinned values so the frozen artifact is
+# byte-stable across machines.
+_GOLDEN_MODEL_METADATA = ("", "contract-review-graph-v1")
 
 # ── Deterministic v1-shaped stub pipeline (topology tests only) ────────────────
 
@@ -864,6 +872,9 @@ def _golden_environment() -> Iterator[None]:
         mock.patch.object(LLMService, "plan_contract_risk_domains", return_value={"domains": []}),
         mock.patch.object(ContractStore, "evaluate_rules", _rules_down),
         mock.patch.object(MySqlReportStore, "_save_sync", return_value=501),
+        # Pin the adapter's model/prompt seeding so GraphAdapter.run seeds the
+        # exact values the golden initial state carries (§10 version block).
+        mock.patch.object(runtime_mod, "_runtime_model_metadata", return_value=_GOLDEN_MODEL_METADATA),
     ):
         yield
 
@@ -879,8 +890,13 @@ def _golden_initial_state() -> dict[str, Any]:
         "task_input": {},
         "graph_name": "contract_review",
         "graph_version": "v1",
-        "model": "",
-        "prompt_version": "contract-review-graph-v1",
+        "model": _GOLDEN_MODEL_METADATA[0],
+        "prompt_version": _GOLDEN_MODEL_METADATA[1],
+        # §10 version channels — same constants GraphAdapter.run seeds, so
+        # the direct-stream capture and the adapter-driven tests agree.
+        "retrieval_version": runtime_mod.RETRIEVAL_VERSION,
+        "rerank_version": reranker_mod.RERANK_VERSION,
+        "scorer_version": "",
         "trigger_type": "MANUAL",
         "state_revision": 0,
         "case_snapshot": {},

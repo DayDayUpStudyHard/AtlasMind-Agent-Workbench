@@ -29,10 +29,13 @@ DB = {
 
 DS = [
   {"name":"Golden-风险审查回归集","version":"golden-v1","contract_type":"CONTRACT_REVIEW",
+   "task_purpose":"风险审查",
    "desc":"Phase 0 Golden Dataset：跨条款引用隐藏风险、缺失条款规则发现解释。来源 PRD §25.4 回归清单。"},
   {"name":"Golden-要素提取回归集","version":"golden-v1","contract_type":"INTAKE",
+   "task_purpose":"要素提取",
    "desc":"Phase 0 Golden Dataset：金额歧义(10 CNY 陷阱)、甲乙方与项目业主/联系人混淆。来源 PRD §25.4 回归清单。"},
   {"name":"Golden-履约日程回归集","version":"golden-v1","contract_type":"FULFILLMENT_TIMELINE",
+   "task_purpose":"履约日程",
    "desc":"Phase 0 Golden Dataset：结束条件不得转为固定日期、长条款尾部节点截断。来源 PRD §25.4 回归清单。"},
 ]
 
@@ -154,9 +157,10 @@ def main():
             ct = ds["contract_type"]
             cases = GOLDEN[ct]
             print(f"Creating: {ds['name']} ({ct}) — {len(cases)} cases")
-            c.execute("""INSERT INTO agent_eval_dataset (name,version,description,contract_type,case_count,status)
-                         VALUES (%s,%s,%s,%s,%s,'ACTIVE')""",
-                      (ds["name"], ds["version"], ds["desc"], ct, len(cases)))
+            c.execute("""INSERT INTO agent_eval_dataset (name,version,description,contract_type,task_purpose,case_count,status)
+                         VALUES (%s,%s,%s,%s,%s,%s,'ACTIVE')""",
+                      (ds["name"], ds["version"], ds["desc"], ct,
+                       ds.get("task_purpose", ""), len(cases)))
             ds_id = c.lastrowid
             conn.commit()
             print(f"  Dataset ID: {ds_id}")

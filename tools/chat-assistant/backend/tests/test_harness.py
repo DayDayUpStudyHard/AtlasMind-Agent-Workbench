@@ -637,6 +637,7 @@ def test_fake_persistence_records_runtime_contract_writes():
         assert store.metadata[0] == (9, {
             "runtime_engine": "langgraph", "graph_name": "g",
             "graph_version": "v2", "model": "m", "prompt_version": "p",
+            "retrieval_version": "", "rerank_version": "", "scorer_version": "",
         })
         # raise_on models transient persistence failures
         with pytest.raises(RuntimeError):

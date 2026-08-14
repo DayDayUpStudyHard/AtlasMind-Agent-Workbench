@@ -10,6 +10,7 @@ from ...harness.budget import (
     coverage_limited_diagnostics,
     merge_limited_diagnostics,
 )
+from ..versioning import stamp_artifact_versions
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,8 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
+    stamp_artifact_versions(state, artifact)
+
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "compose_report",
@@ -211,6 +214,8 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
             "retrievalValidation": state.get("retrieval_validation") or {},
         },
     }
+
+    stamp_artifact_versions(state, artifact)
 
     # §7.2/§6.4: the limited report carries the mandatory diagnostics —
     # the runtime turns the run into LIMITED, and the route layer persists

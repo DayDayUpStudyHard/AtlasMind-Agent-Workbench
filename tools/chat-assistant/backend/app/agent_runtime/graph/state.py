@@ -56,6 +56,11 @@ class BaseGraphState(TypedDict, total=False):
     graph_version: str
     model: str
     prompt_version: str
+    # PRD Phase 8 / §10: frozen retrieval/rerank/scorer stack versions —
+    # carried in state so composers can stamp them onto the artifact.
+    retrieval_version: str
+    rerank_version: str
+    scorer_version: str
     trigger_type: str               # MANUAL | RESUME | SHADOW | SCHEDULED
 
     # ── State management ──

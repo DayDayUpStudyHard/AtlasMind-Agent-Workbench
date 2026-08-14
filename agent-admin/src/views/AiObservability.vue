@@ -270,6 +270,9 @@
             <div><span>文档版本</span><strong>{{ activeAgentRun.documentVersion || '-' }}</strong></div>
             <div><span>模型</span><strong>{{ activeAgentRun.model || '-' }}</strong></div>
             <div><span>Prompt 版本</span><strong>{{ activeAgentRun.promptVersion || '-' }}</strong></div>
+            <div><span>检索版本</span><strong>{{ activeAgentRun.retrievalVersion || '-' }}</strong></div>
+            <div><span>重排版本</span><strong>{{ activeAgentRun.rerankVersion || '-' }}</strong></div>
+            <div><span>评分器版本</span><strong>{{ activeAgentRun.scorerVersion || '-' }}</strong></div>
           </div>
           <pre v-if="activeAgentRun.inputJson" class="json-box">{{ prettyJson(activeAgentRun.inputJson) }}</pre>
           <p v-if="activeAgentRun.errorMessage" class="error-text">{{ activeAgentRun.errorMessage }}</p>
@@ -285,7 +288,22 @@
             <div><span>反思节点</span><strong>{{ eventCount(activeAgentRun, 'REFLECTION') }}</strong></div>
             <div><span>报告产物</span><strong>{{ activeAgentRun.reports?.length || 0 }}</strong></div>
             <div><span>审查发现</span><strong>{{ activeAgentRun.findings?.length || 0 }}</strong></div>
+            <div><span>节点 Token</span><strong>{{ totalNodeTokens(activeAgentRun) }}</strong></div>
+            <div><span>节点总耗时</span><strong>{{ totalNodeLatency(activeAgentRun) }}ms</strong></div>
           </div>
+        </section>
+
+        <section class="detail-section" v-if="runDiagnostics(activeAgentRun)">
+          <div class="section-title">WorkUnit 预算与诊断</div>
+          <div class="stat-grid">
+            <div><span>WorkUnit</span><strong>{{ runDiagnostics(activeAgentRun).workUnitId || '-' }}</strong></div>
+            <div><span>缺失检查项</span><strong>{{ (runDiagnostics(activeAgentRun).missingCheckItems || []).length }}</strong></div>
+            <div><span>缺失证据类型</span><strong>{{ (runDiagnostics(activeAgentRun).missingSourceTypes || []).length }}</strong></div>
+            <div><span>重试轮次</span><strong>{{ runDiagnostics(activeAgentRun).retried ?? 0 }}</strong></div>
+            <div><span>超限项</span><strong>{{ (runDiagnostics(activeAgentRun).exceeded || []).length }}</strong></div>
+            <div><span>原因</span><strong>{{ (runDiagnostics(activeAgentRun).reasons || []).join('、') || '-' }}</strong></div>
+          </div>
+          <pre class="json-box">{{ prettyJson(activeAgentRun.limitedDiagnostics) }}</pre>
         </section>
 
         <section class="detail-section">
@@ -897,6 +915,22 @@ function prettyJson(value) {
   } catch {
     return String(value)
   }
+}
+
+function runDiagnostics(run) {
+  const raw = run?.limitedDiagnostics
+  if (!raw) return null
+  if (typeof raw === 'object') return raw
+  try { return JSON.parse(raw) } catch { return null }
+}
+
+function totalNodeTokens(run) {
+  return (run?.nodeExecutions || []).reduce(
+    (sum, n) => sum + (Number(n.tokenInput) || 0) + (Number(n.tokenOutput) || 0), 0)
+}
+
+function totalNodeLatency(run) {
+  return (run?.nodeExecutions || []).reduce((sum, n) => sum + (Number(n.latencyMs) || 0), 0)
 }
 </script>
 

@@ -43,6 +43,7 @@ from ..harness.graph_builder import build_task_graph
 from ..harness.models import Role, TaskSpec
 from ..persistence import new_connection
 from .nodes.context import freeze_case_snapshot, load_run_context
+from .versioning import stamp_artifact_versions
 
 logger = logging.getLogger(__name__)
 
@@ -497,6 +498,9 @@ def compose_final_timeline(state: dict[str, Any]) -> dict[str, Any]:
             },
         },
     }
+
+    stamp_artifact_versions(state, artifact)
+
     return {
         "state_revision": int(state.get("state_revision") or 0) + 1,
         "current_node": "compose_final_timeline",
