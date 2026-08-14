@@ -350,3 +350,38 @@ PRD §Phase 5（迁移合同要素提取）要求 8 项改造：①基础身份�
 - `agent_runtime/graph/state.py`（evidence_rules/rerun_scope/fulfillment_ai/fulfillment_validation 四通道补 schema）
 - `tests/test_fulfillment_check_v2.py`（新增）、`tests/test_graph_runtime_adapter.py`（真图 resume 重写）、`tests/test_contract_extraction_phase5.py`（探针扩展）
 - 未动 legacy `_fulfillment_check` 旧路径代码；未动 v2 检索/分析逻辑；履约最终判定仍 100% 由人工确认写入
+
+---
+
+## 2026-08-15：PRD Phase 8 统一评测与可观测性 — 真实评分器 / 版本冻结 / 评测看板
+
+### 问题
+
+Phase 8 七项任务盘点：①评测集无任务用途区分（task_purpose 缺失）；②用例无文本 Hash 缓存、评测时会重建 Embedding；③Run 不冻结 Runtime/Graph/Prompt/Model/Retrieval/Rerank/Scorer 版本——指标无法追溯版本；④TIMELINE_EXTRACTION/FULFILLMENT_CHECK 走 **恒定 1.0 占位计分**（PRD 验收明确"不允许使用恒定 1.0 占位计分作为发布依据"），未注册模式返回的却是"满分"假结果；⑤汇总不报分母/跳过原因；⑥管理端看不到 WorkUnit/预算/耗时；⑦无 v1 基线/迁移版/未来版对照看板。
+
+**期间暴露的测试基建缺陷**：四个 composer 打 §10 版本块后，golden 用例 3 个失败——捕获路径（`_stream_run` 直接 `graph.stream(_golden_initial_state())`）与测试路径（`_run_artifact` 走 `GraphAdapter.run`）种子不一致：adapter 会注入 model（settings 驱动，机器相关）+ retrieval/rerank/scorer 三通道，捕获路径没有 → 冻结 artifact 与 live artifact 版本块字节漂移。
+
+### 修复
+
+1. **任务④ 评分器真实化**（[routes.py](tools/chat-assistant/backend/app/api/routes.py)）：`_EVAL_SCORERS` 注册 TIMELINE_EXTRACTION/FULFILLMENT_TIMELINE→`_score_timeline_extraction`（label 包含/二元组重叠匹配节点、`\d{4}-\d{1,2}-\d{1,2}` 日期精确相等、条件事件识别、负责人覆盖、乱码标记），FULFILLMENT_CHECK→`_score_fulfillment_check`（需求召回、证据不足克制率、AI 建议 Schema 通过率、AI 自动确认违规、冲突识别、人工采纳、双重引用）；**未注册模式显式 UNSCORED**（`NO_SCORER:<MODE>`、scored=False、skipReason 透传）——移除 1.0 占位。
+2. **任务⑤ 分母与跳过原因**：`metric_results` 排除 INFRA_FAILED 与 scored=False；汇总新增 unscoredCount/skipReasons/scorerVersions/fixtureReuseCount/fixtureBuildCount，unscored>0 判 DEGRADED；评分完成后 scorer_version 回写 agent_run。
+3. **任务③ §10 版本冻结**：`runtime.RETRIEVAL_VERSION`、`reranker.RERANK_VERSION`、`routes.EVAL_SCORER_VERSION`；[V035](tools/chat-assistant/backend/migrations/V035__agent_run_stack_versions.sql) 加 agent_run 三列（Java `addColumnIfMissing` 镜像）；GraphAdapter.run 种子三通道 + `_persist_start_metadata` 落库；[versioning.py](tools/chat-assistant/backend/app/agent_runtime/graph/versioning.py) 新增 `stamp_artifact_versions`（artifact-v2 schema + snapshotHash + graph/prompt/model/retrieval/rerank/scorer），四个 composer 全部接入。
+4. **任务①**：agent_eval_dataset 加 `task_purpose` 列（Java schema/controller + seed 脚本 + EvalCenter 表单/列表列）。
+5. **任务⑦**：`GET /api/admin/eval/versions/comparison`（按版本键聚合 COMPLETED run 的六项均值 + runCount）+ EvalCenter 版本对比 tab。
+6. **任务⑥**：AiObservability 展示检索/重排/评分器版本、节点 Token/耗时、WorkUnit 预算诊断（limitedDiagnostics 解析渲染）。
+7. **Golden 测试基建修复**：`_golden_environment` 补 `mock.patch.object(runtime_mod, "_runtime_model_metadata", return_value=_GOLDEN_MODEL_METADATA)`（model 固定 `""`，不再读 settings——冻结样本机器无关）；`_golden_initial_state` 补三通道（直接引用 `runtime_mod.RETRIEVAL_VERSION`/`reranker_mod.RERANK_VERSION` 常量）——捕获与 adapter 两条路径种子完全一致，fixture 再生后字节对齐。
+
+### 验证结果
+
+- Python **368/368**（新增 test_artifact_versioning 5 项：版本块冻结/缺失空串/非 dict 快照/保留原键/四 composer 接入；test_evaluation 新增 timeline/fulfillment 计分与 AI 自动确认违规、未注册模式显式 UNSCORED；golden 三用例修复后全绿）；`mvn compile` 退出码 0
+- 验收口径（所有指标可追溯到具体 Case/Artifact/引用/版本；不允许恒定 1.0 占位计分）的**代码侧已满足**：1.0 占位已移除、UNSCORED 显式化、版本块全链路冻结；"指标可追溯"与各阈值门禁为评测门禁，待评测数据跑分，**当前未声称达标**
+
+### 影响范围
+
+- `agent_runtime/runtime.py`、`reranker.py`、`persistence.py`、`harness/fakes.py`（版本通道）
+- `agent_runtime/graph/`：`versioning.py`（新增）、`state.py`、`contract_extraction.py`、`timeline_extraction.py`、`nodes/artifact.py`、`nodes/human_confirm.py`（stamp 接入）
+- `api/routes.py`（评分器真实化 + 汇总口径）
+- `migrations/V035__agent_run_stack_versions.sql`（新增）
+- Java：`AgentWorkbenchSchemaInitializer`、`EvalAdminController`、`AiObservabilityMapper`；`agent-admin/src/views/EvalCenter.vue`、`AiObservability.vue`
+- `scripts/seed_golden_datasets.py`（task_purpose）；`tests/`（test_evaluation、test_artifact_versioning、test_graph_runtime_adapter、test_harness、test_task_spec_builder、golden fixture 再生）
+- 未动 v2 检索/分析逻辑；未动 legacy 代码；履约最终判定仍 100% 由人工确认写入；scripts/_tmp* 19 个文件按 §14-9 待清理未提交
