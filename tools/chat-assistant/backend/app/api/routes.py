@@ -2919,21 +2919,81 @@ def _eval_bigrams(value: str) -> set[str]:
     return {value[index:index + 2] for index in range(max(0, len(value) - 1))}
 
 
+# Expected findings carry riskDimension; artifact findings carry domainKey
+# (riskDimension is always empty there) plus a coarse clauseType. Both
+# vocabularies must land on one canonical dimension per bucket family.
+_EXPECTED_DIMENSION_ALIASES = {
+    "COMPLIANCE": "DATA",  # corpus uses COMPLIANCE/DATA interchangeably
+}
+_ACTUAL_DIMENSION_BUCKETS = {
+    # payment family
+    "PRICE_PAYMENT_TAX": "PAYMENT",
+    "PAYMENT_SECURITY": "PAYMENT",
+    "PAYMENT_SECURITY_AND_WORK_STOPPAGE": "PAYMENT",
+    "PAYMENT_TERMS_RISK": "PAYMENT",
+    "PAYMENT_TERMS_ACCURACY": "PAYMENT",
+    "PRICE_ADJUSTMENT_MECHANISM": "PAYMENT",
+    "EARLY_TERMINATION_PAYMENT": "PAYMENT",
+    # acceptance family
+    "SCOPE_DELIVERY_ACCEPTANCE": "ACCEPTANCE",
+    "ACCEPTANCE_MECHANISM": "ACCEPTANCE",
+    "ACCEPTANCE_INSPECTION": "ACCEPTANCE",
+    "ACCEPTANCE_CRITERIA": "ACCEPTANCE",
+    "ACCEPTANCE_LOOP_GOVERNANCE": "ACCEPTANCE",
+    "SPECIFICATION_CONFLICT_RESOLUTION": "ACCEPTANCE",
+    # termination family
+    "TERM_CHANGE_TERMINATION": "TERMINATION",
+    "TERMINATION_RIGHTS": "TERMINATION",
+    # liability family
+    "LIABILITY_REMEDIES": "LIABILITY",
+    "PRODUCT_LIABILITY": "LIABILITY",
+    # ip / confidentiality family (corpus files employment restrictions here too)
+    "CONFIDENTIALITY_DATA_IP": "IP",
+    "IP_OWNERSHIP_TRANSFER": "IP",
+    "IP_TRANSFER_VALIDITY": "IP",
+    "IP_OWNERSHIP": "IP",
+    "IP_OWNERSHIP_LICENSE": "IP",
+    "IP_OWNERSHIP_LICENSES": "IP",
+    "IP_OWNERSHIP_LICENSE_SCOPE": "IP",
+    "IP_OWNERSHIP_AND_MORAL_RIGHTS": "IP",
+    "INTELLECTUAL_PROPERTY": "IP",
+    "CONFIDENTIALITY": "IP",
+    # force majeure family
+    "FORCE_MAJEURE": "FORCE_MAJEURE",
+    "FORCE_MAJEURE_RISK": "FORCE_MAJEURE",
+    "FORCE_MAJEURE_RISK_ALLOCATION": "FORCE_MAJEURE",
+    # data protection family
+    "DATA_PROTECTION": "DATA",
+    "DATA_PROTECTION_SECURITY": "DATA",
+    "DATA_PRIVACY": "DATA",
+    "PERSONAL_INFORMATION_PROTECTION": "DATA",
+    "HEALTHCARE_DATA_REGULATION": "DATA",
+    "HEALTH_DATA_REGULATION": "DATA",
+    "DATA_PRIVACY_FOOD_INDUSTRY": "DATA",
+    "CYBERSECURITY": "DATA",
+    "DATA_TRANSFER_PRIVACY": "DATA",
+    # change family
+    "CHANGE_MANAGEMENT": "CHANGE",
+    # dispute family
+    "DISPUTE_RESOLUTION_FAIRNESS": "DISPUTE",
+    "JURISDICTION_PROCEDURE": "DISPUTE",
+    "CROSS_BORDER_LAW_JURISDICTION": "DISPUTE",
+    # party family
+    "PARTY_AUTHORITY": "PARTY",
+    "PARTY_IDENTITY_VERIFICATION": "PARTY",
+}
+
+
 def _risk_dimension(value: dict[str, Any]) -> str:
+    # domainKey before clauseType on the actual side: clauseType=OTHER masked
+    # the specific domainKey on nearly every artifact finding (all 364 in the
+    # eval corpus). Expected findings use riskDimension, but may carry
+    # domainKey-style values, so one combined map normalizes both sides.
     raw = str(
-        value.get("riskDimension") or value.get("clauseType")
-        or value.get("domainKey") or ""
+        value.get("riskDimension") or value.get("domainKey")
+        or value.get("clauseType") or ""
     ).upper()
-    aliases = {
-        "PRICE_PAYMENT_TAX": "PAYMENT",
-        "PAYMENT_SECURITY_AND_WORK_STOPPAGE": "PAYMENT",
-        "SCOPE_DELIVERY_ACCEPTANCE": "ACCEPTANCE",
-        "LIABILITY_REMEDIES": "LIABILITY",
-        "TERM_CHANGE_TERMINATION": "TERMINATION",
-        "CONFIDENTIALITY_DATA_IP": "IP",
-        "IP_OWNERSHIP_AND_MORAL_RIGHTS": "IP",
-    }
-    return aliases.get(raw, raw)
+    return _EXPECTED_DIMENSION_ALIASES.get(raw, _ACTUAL_DIMENSION_BUCKETS.get(raw, raw))
 
 
 def _risk_finding_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
@@ -2945,21 +3005,26 @@ def _risk_finding_matches(expected: dict[str, Any], actual: dict[str, Any]) -> b
         return False
     expected_dimension = _risk_dimension(expected)
     actual_dimension = _risk_dimension(actual)
-    if expected_dimension and actual_dimension and expected_dimension != actual_dimension:
-        return False
     if expected_text in actual_text or actual_text in expected_text:
         return True
     expected_pairs = _eval_bigrams(expected_text)
     actual_pairs = _eval_bigrams(actual_text)
     shared = len(expected_pairs & actual_pairs)
     overlap = shared / max(len(expected_pairs), 1)
-    # Compact actual titles vs long descriptive expected titles: measure
-    # containment from the shorter side so "不可抗力范围过宽" matches an
-    # expected title that embeds the same phrase. Minimum shared-bigram and
-    # length guards keep two-character coincidences from matching, and the
-    # dimension gate above still applies when both sides carry dimensions.
+    # Containment from the shorter side so "不可抗力范围过宽" matches an
+    # expected title that embeds the same phrase.
     shorter_pairs = min(len(expected_pairs), len(actual_pairs))
     containment = shared / max(shorter_pairs, 1)
+    # Strong text evidence bypasses the dimension gate: the two dimension
+    # vocabularies (expected riskDimension vs artifact domainKey/clauseType)
+    # do not line up, and a hard gate was killing text-level true matches
+    # across the corpus. The minimum shared-bigram count keeps the
+    # ACCEPTANCE-vs-PAYMENT guard pair (shared=3) and appendix-description
+    # coincidences (shared<=7) behind the gate.
+    if shared >= 8 and shorter_pairs >= 8 and containment >= 0.5:
+        return True
+    if expected_dimension and actual_dimension and expected_dimension != actual_dimension:
+        return False
     if shared >= 3 and shorter_pairs >= 3 and containment >= 0.5:
         return True
     sequence_ratio = SequenceMatcher(None, expected_text, actual_text).ratio()

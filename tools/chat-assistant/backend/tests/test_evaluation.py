@@ -362,6 +362,71 @@ def test_risk_title_matching_respects_dimension_gate_despite_containment():
     assert not _risk_finding_matches(expected, actual)
 
 
+def test_risk_dimension_prefers_domain_key_over_other_clause_type():
+    from app.api.routes import _risk_dimension
+
+    # Artifact findings carry clauseType=OTHER with a specific domainKey;
+    # clauseType-first normalization masked the domainKey on every artifact
+    # finding and broke the gate (hard3 rescore regression).
+    actual = {"clauseType": "OTHER", "domainKey": "FORCE_MAJEURE_RISK"}
+    assert _risk_dimension(actual) == "FORCE_MAJEURE"
+
+
+def test_risk_title_matching_domain_key_family_aligns_expected_dimension():
+    from app.api.routes import _risk_finding_matches
+
+    # run-36 CR-016: expected DATA finding vs artifact finding whose only
+    # dimension signal is domainKey DATA_PROTECTION_SECURITY — the gate
+    # must let the weak text channel through.
+    expected = {
+        "title": "合同缺失数据安全条款——系统处理医护人员个人信息但无安全保护约定",
+        "riskDimension": "DATA",
+    }
+    actual = {
+        "title": "缺少数据安全与个人信息保护条款",
+        "clauseType": "OTHER",
+        "domainKey": "DATA_PROTECTION_SECURITY",
+        "description": "合同涉及医院HR系统，含个人信息，未约定数据安全保护措施",
+        "severity": "HIGH",
+    }
+    assert _risk_finding_matches(expected, actual)
+
+
+def test_risk_title_matching_strong_text_bypasses_dimension_gate():
+    from app.api.routes import _risk_finding_matches
+
+    # run-25 CR-008: the expected force-majeure finding and the artifact
+    # finding are the same risk under different dimension vocabularies;
+    # strong text evidence must not be killed by the gate.
+    expected = {
+        "title": "不可抗力范围被严重限缩——排除了常见的地质灾害和政府行为",
+        "riskDimension": "FORCE_MAJEURE",
+    }
+    actual = {
+        "title": "不可抗力范围过窄且排除救济",
+        "clauseType": "OTHER",
+        "description": "不可抗力仅限7级以上地震和百年一遇洪水，排除了地质灾害和政府行为",
+        "severity": "HIGH",
+    }
+    assert _risk_finding_matches(expected, actual)
+
+
+def test_risk_title_matching_gate_still_rejects_weak_cross_dimension_overlap():
+    from app.api.routes import _risk_finding_matches
+
+    # Below the strong-evidence bypass, a dimension mismatch must still
+    # reject weak overlaps: shared description wording alone is not a hit.
+    expected = {"title": "验收标准完全由甲方主观判断，且无客观衡量标准可依", "riskDimension": "ACCEPTANCE"}
+    actual = {
+        "title": "付款条件由甲方单方决定",
+        "clauseType": "OTHER",
+        "domainKey": "PRICE_PAYMENT_TAX",
+        "description": "甲方主观判断付款时点，乙方无法预见",
+        "severity": "HIGH",
+    }
+    assert not _risk_finding_matches(expected, actual)
+
+
 def test_score_eval_artifact_vacuous_recall_without_expected_high():
     from app.api.routes import _score_eval_artifact
 
