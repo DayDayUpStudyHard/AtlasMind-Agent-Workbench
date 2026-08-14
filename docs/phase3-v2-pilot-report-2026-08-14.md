@@ -94,6 +94,18 @@ load_run_context → freeze_case_snapshot → inventory_clauses
 
 难例复测（run 36，dataset 23）重算后的真实对比：CR-008/CR-016 两引擎文本层面均完整命中（v1 官方 0.0 系误杀）；CR-018 是唯一真实差异——v1 命中「保密义务永久有效」、漏「已为公众所知」，v2 恰好相反（漏「保密期限永久有效」、命中「已为公众所知」），各 0.5。
 
+**全量重算（2026-08-14 晚，全部存量 run 一视同仁，scripts/rescore_eval_high_recall.py 自动发现）：**
+
+| Run | 引擎 | 官方 | 重算 | 备注 |
+|---|---|---|---|---|
+| 15/16/18/19/22 | langgraph | 57.8-64.4% | 78.3-90.0% | 各 8-10 例修正，与 run 25 的 93.3% 汇合 |
+| 20/26 | legacy | 31.7/35.0% | 41.7/45.0% | 4-5 例修正 |
+| 13/14 | legacy | 1.7% | 3.3/11.7% | artifact 大量缺失（18-19 例无 findings） |
+| 35 | 标称 v2 实为 Legacy（§3.5） | 30.0% | **36.7%** | 2 例修正；低分是静默回退 Legacy 的成绩，非 v2 |
+| 25/30/36 | — | — | 无变化 | 上次重算已覆盖，口径一致 |
+
+重算范围限定为风险审查数据集（ds 9/20/23）：要素/日程/核验 run（23/24/27/28/29）评分器不同、ds=13 压力测试 artifact 全为 infraFailed 空壳、run 9 的 30 例 artifact 均无 findings（早期格式）——均不可重算并已在脚本中显式跳过。unscoreable case 保留官方值占位，run 级分母与官方口径一致。另：run 16 CR-023 与 run 18 CR-030 重算 1.0→0.0，系早期 v1 artifact 的 domainKey 旧词表与当前维度桶映射不对齐（引擎词表演进），非评分器回归（run 25 同 case 为 1.0）。
+
 ### 3.2 Golden 回归集（dataset 20，2 例）
 
 > ⚠️ 已作废：run 33（标称 langgraph_v2）经 agent_run_trace 查证实际执行的是 Legacy 六阶段流水线（trace 为 TOOL_REQUESTED/PLAN_CREATED/REFLECTION，无 GRAPH_NODE），run 34 才是真 v1 图（18×GRAPH_NODE）。下表数据不能作为 v2 证据。golden 对照 runs 31/32 因评测叫停未执行（保持 QUEUED）。
