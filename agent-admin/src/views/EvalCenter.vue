@@ -324,11 +324,16 @@
               </div>
             </template>
           </el-table-column>
-          <el-table-column label="Runtime" width="120" align="center">
+          <el-table-column label="Runtime" width="150" align="center">
             <template #default="{ row }">
-              <el-tag :type="row.runtimeEngine === 'langgraph' ? 'primary' : 'info'" effect="plain" size="small">
-                {{ row.runtimeEngineLabel || formatRuntimeEngine(row.runtimeEngine) }}
-              </el-tag>
+              <div style="display:flex;flex-direction:column;gap:2px;align-items:center">
+                <el-tag :type="row.runtimeEngine === 'langgraph' ? 'primary' : 'info'" effect="plain" size="small">
+                  {{ row.runtimeEngineLabel || formatRuntimeEngine(row.runtimeEngine) }}
+                </el-tag>
+                <el-tooltip v-if="row.runtimeEngineMismatch" content="请求的引擎与实际执行的引擎不一致（如旧版 API 服务不认识 v2 时回退 Legacy）">
+                  <el-tag type="danger" effect="plain" size="small">实际: {{ row.actualRuntimeEngineLabel || row.actualRuntimeEngine }}</el-tag>
+                </el-tooltip>
+              </div>
             </template>
           </el-table-column>
           <el-table-column label="功能组件" width="200" align="center">
@@ -399,6 +404,9 @@
               <el-tag size="small" :type="statusTagType(viewingRun.status)">{{ viewingRun.statusLabel || formatStatus(viewingRun.status) }}</el-tag>
             </el-descriptions-item>
             <el-descriptions-item label="Runtime">{{ viewingRun.runtimeEngineLabel || formatRuntimeEngine(viewingRun.runtimeEngine) }}</el-descriptions-item>
+            <el-descriptions-item v-if="viewingRun.runtimeEngineMismatch" label="实际执行引擎">
+              <el-tag type="danger" size="small">{{ viewingRun.actualRuntimeEngineLabel || viewingRun.actualRuntimeEngine }}</el-tag>
+            </el-descriptions-item>
             <el-descriptions-item label="数据集">{{ viewingRun.datasetName }} v{{ viewingRun.datasetVersion }}</el-descriptions-item>
             <el-descriptions-item label="评测目标">{{ viewingRun.datasetTypeLabel || formatDatasetType(viewingRun.contractType) }}</el-descriptions-item>
             <el-descriptions-item label="图 / 版本">{{ viewingRun.graphName || '-' }} / {{ viewingRun.graphVersion || '-' }}</el-descriptions-item>

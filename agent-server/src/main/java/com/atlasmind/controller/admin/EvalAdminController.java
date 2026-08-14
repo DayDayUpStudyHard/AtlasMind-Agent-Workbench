@@ -3,6 +3,8 @@ package com.atlasmind.controller.admin;
 import com.atlasmind.annotation.OperationLog;
 import com.atlasmind.common.Result;
 import com.atlasmind.gateway.AiGateway;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.*;
@@ -19,6 +21,7 @@ public class EvalAdminController {
 
     private final JdbcTemplate jdbc;
     private final AiGateway aiGateway;
+    private final ObjectMapper objectMapper;
 
     // ── Dataset management ─────────────────────────────────────────
 
@@ -135,6 +138,11 @@ public class EvalAdminController {
     public Result<Map<String, Object>> startEvalRun(@RequestBody Map<String, Object> request) {
         Long datasetId = numberAsLong(request.get("datasetId"));
         String runtime = str(request, "runtime"); // legacy | langgraph | langgraph_v2
+        if (!Set.of("legacy", "langgraph", "langgraph_v2")
+                .contains(runtime.toLowerCase(Locale.ROOT))) {
+            throw new IllegalArgumentException(
+                    "未知运行时引擎: " + runtime + "（支持 legacy / langgraph / langgraph_v2）");
+        }
         String featuresJson = str(request, "features");
         if (featuresJson.isEmpty()) featuresJson = "{}";
         if ("legacy".equalsIgnoreCase(runtime)) {
@@ -354,6 +362,27 @@ public class EvalAdminController {
     private Map<String, Object> decorateRun(Map<String, Object> row) {
         if (row == null) return null;
         row.put("runtimeEngineLabel", runtimeLabel(str(row, "runtimeEngine")));
+        // 实际执行的引擎由 Python 端写入 summary_json（防止旧 API 进程
+        // 静默回退 legacy 时界面仍显示请求的引擎，2026-08-14 事故）。
+        String actualEngine = "";
+        boolean mismatch = false;
+        String summaryJson = str(row, "summaryJson");
+        if (!summaryJson.isEmpty() && !"{}".equals(summaryJson)) {
+            try {
+                Map<String, Object> summary = objectMapper.readValue(
+                        summaryJson, new TypeReference<Map<String, Object>>() {});
+                Object actual = summary.get("actualRuntimeEngine");
+                Object mismatchFlag = summary.get("runtimeEngineMismatch");
+                actualEngine = actual == null ? "" : actual.toString().trim();
+                mismatch = Boolean.TRUE.equals(mismatchFlag);
+            } catch (Exception ignored) {
+                // summary_json 无法解析时按无信息处理
+            }
+        }
+        row.put("actualRuntimeEngine", actualEngine);
+        row.put("actualRuntimeEngineLabel",
+                actualEngine.isEmpty() ? "" : actualEngineLabel(actualEngine));
+        row.put("runtimeEngineMismatch", mismatch);
         row.put("datasetTypeLabel", datasetTypeLabel(str(row, "contractType")));
         row.put("statusLabel", statusLabel(str(row, "status")));
         return row;
@@ -436,6 +465,18 @@ public class EvalAdminController {
             case "langgraph_v2" -> "LangGraph v2（试点）";
             case "legacy" -> "传统流水线";
             default -> value == null || value.isBlank() ? "-" : value;
+        };
+    }
+
+    /** 实际执行引擎标签，值为 "langgraph/图名/版本" 或 "legacy"（由 Python summary 写入）。 */
+    private static String actualEngineLabel(String value) {
+        String[] parts = value.split("/");
+        return switch (parts[0]) {
+            case "legacy" -> "传统流水线（Legacy）";
+            case "langgraph" -> parts.length >= 3
+                    ? "LangGraph " + parts[2] + "（" + parts[1] + "）"
+                    : "LangGraph";
+            default -> value;
         };
     }
 

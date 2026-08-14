@@ -742,6 +742,7 @@ class RuntimeRouter:
 
         Used by eval center to force legacy or langgraph regardless of system config.
         """
+        graph_name = None
         if mode == "langgraph_v2":
             # PRD Phase 3 pilot: contract_review v2 only; other task types
             # fall through to their v1 graphs rather than failing an eval run.
@@ -778,7 +779,7 @@ class RuntimeRouter:
                 "TIMELINE_EXTRACTION": "timeline_extraction",
             }.get(context.task_type, "")
             adapter = self._adapters.get(graph_name) if graph_name else None
-        else:
+        elif mode == "legacy":
             if not is_legacy_task_supported(context.task_type):
                 # Forcing legacy on extraction/timeline tasks used to fall
                 # through to run_project_task and fail per case with a cryptic
@@ -787,11 +788,22 @@ class RuntimeRouter:
                     f"legacy 引擎不支持任务类型 {context.task_type}，请使用 langgraph 引擎"
                 )
             adapter = self._adapters.get("legacy")
+        else:
+            # 未知模式绝不能静默回退（2026-08-14 事故：langgraph_v2 在旧
+            # API 进程里被当作 legacy 执行，评测结果整体失真）。
+            raise RuntimeError(
+                f"未知运行时模式 {mode!r}（支持 legacy / langgraph / langgraph_v2 / shadow_v2）。"
+                "若该值来自最新版管理端，说明本 API 服务进程加载的是旧代码，请重启服务。"
+            )
 
         if adapter is None:
-            adapter = self._adapters.get("legacy")
-        if adapter is None:
-            adapter = next(iter(self._adapters.values()), None)
+            # 请求的图未注册（如旧进程不认识 v2 图）时同样必须显式失败，
+            # 而不是静默跑去执行 legacy 导致结果失真。
+            raise RuntimeError(
+                f"运行时 {mode} 在任务 {context.task_type} 下无可用适配器"
+                f"（图 {graph_name or 'legacy'} 未注册）。"
+                "若该图应为已知图，说明本 API 服务进程加载的是旧代码，请重启服务。"
+            )
 
         engine_name = getattr(adapter, "__class__", type(adapter)).__name__
         logger.info(

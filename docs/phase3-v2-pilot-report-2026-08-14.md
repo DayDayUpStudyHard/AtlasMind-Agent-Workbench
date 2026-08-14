@@ -3,7 +3,7 @@
 > 日期：2026-08-14
 > 对应 PRD：§15（contract_review 高召回 DAG 试点）
 > 代码版本：4574097
-> 状态：评测暂停，改由用户手动评测（run 30 在旧 42-WU 架构下完成 12/30 例后停止；runs 31/32 待手动执行）
+> 状态：手动评测进行中，但 runs 33/35（标称 langgraph_v2）已作废——API 服务进程为 02:09 启动的老进程，其加载的 dispatch 不认识 `langgraph_v2`，静默回退 Legacy 执行（详见 §3.5 事故记录）。主回归集 v1 基线 = run 25（有效，独立进程驱动）。评测改由独立脚本进程驱动（天然加载最新代码）：runs 30（主回归集 dataset 9, langgraph_v2）/ 31（golden dataset 20, langgraph）/ 32（golden dataset 20, langgraph_v2）于 17:05 启动，正在后台运行；首个用例 trace 已确认 GRAPH_NODE-only（真 v2 图执行）。
 
 ---
 
@@ -16,7 +16,7 @@
 | dispatch 扩展 | ✅ | runtime.py `dispatch_with_mode` 新增 `langgraph_v2` 分支（仅 CONTRACT_REVIEW 走 v2，其余回退 v1 图） |
 | 单元测试 | ✅ | tests/test_review_v2.py（22 测试）+ 全套 176 通过 |
 | v1 保持默认且不动 | ✅ | contract_review.py v1 未改；v1 adapter 未动 |
-| v1/v2 对照评测 | ⏳ | run 25（v1 基线）vs run 30（v2）；Golden run 31（v1）vs 32（v2）— 用户手动评测 |
+| v1/v2 对照评测 | ⏳ | runs 33/35（标称 v2）经 trace 查证实际执行 Legacy，作废；待重启 API 服务后重跑 |
 | Shadow Run（任务 10） | ✅ | `shadow_v2` 运行时模式已接线：dispatch_with_mode + DB 配置 `agent.runtime.CONTRACT_REVIEW=shadow_v2`；影子图用独立 `shadow-` checkpoint 线程，不写 run 行/报告/trace，差异落一条 SHADOW_DIFF trace |
 
 ---
@@ -70,10 +70,14 @@ load_run_context → freeze_case_snapshot → inventory_clauses
 
 ### 3.2 Golden 回归集（dataset 20，2 例）
 
-| 用例 | v1（run 31） | v2（run 32） |
+> ⚠️ 已作废：run 33（标称 langgraph_v2）经 agent_run_trace 查证实际执行的是 Legacy 六阶段流水线（trace 为 TOOL_REQUESTED/PLAN_CREATED/REFLECTION，无 GRAPH_NODE），run 34 才是真 v1 图（18×GRAPH_NODE）。下表数据不能作为 v2 证据，待重启 API 服务后重跑。
+
+| 用例 | v1（run 34） | 标称 v2（run 33，实际 Legacy，作废） |
 |---|---|---|
-| GD-RV-001 付款条款引用附件隐藏验收风险 | 待填 | 待填 |
-| GD-RV-002 缺验收条款规则发现须带解释 | 待填 | 待填 |
+| GD-RV-001 付款条款引用附件隐藏验收风险 | ✅ 命中高风险（recall 1.0） | ✅ 命中高风险（recall 1.0） |
+| GD-RV-002 缺验收条款规则发现须带解释 | ✅ 命中高风险（recall 1.0） | ✅ 命中高风险（recall 1.0） |
+
+（重跑前留空，重跑后填写正式对照表）
 
 ### 3.3 最常遗漏 WorkUnit
 
@@ -114,6 +118,7 @@ load_run_context → freeze_case_snapshot → inventory_clauses
 - **started_at 显示缺陷**：建行脚本在 QUEUED 行预填 started_at=NOW()（行创建时间），UI 把 03:44 显示成评测开始时间。已修复：`_update_eval_progress` 在首次 active 触达时 `started_at=COALESCE(started_at, NOW())`，建行脚本不再预填（评测行 31/32 已清空，待驱动触达时打真实时间；行 30 的 03:44 为历史遗留，真实开始 12:40）。
 - **900s 超时杀（已修复）**：recovery.py 规则 #2 原按 create_time+900s 杀 active 状态的 run，与评测配置 caseTimeoutSeconds=2400 无关、心跳不豁免。行 747（case 1 第一次尝试）被 12:20 版驱动的 900s 超时杀死。已修复：规则 #2 改为**心跳失联判定**（`find_timed_out_runs(require_stale_heartbeat=True)`）——持续心跳的 run 即使超过 900s 也视为存活，仅当心跳也丢失（或本无心跳的旧派发路径）才按超时杀；僵尸扫描（60s 心跳失联）不受影响。修复后手动评测与生产 >15min 的 run 不再被误杀。
 - **GraphAdapter 心跳**：graph 派发无心跳导致跨进程误杀，已修复（15s 自终止心跳循环）+ 独立驱动脚本内禁用本进程 RunRecovery 扫描器。
+- **langgraph_v2 静默回退 Legacy（2026-08-14 16:51 发现）**：API 服务进程 02:09 启动时，v2 试点代码（12:21 提交）与 `dispatch_with_mode` 的 `langgraph_v2` 分支（15:26 提交）均不存在；老 dispatch 对未知 mode 走 `else → legacy`。经 UI 发起的 runs 33/35（标称 langgraph_v2）因此实际执行 Legacy 六阶段流水线——trace 证据：33/35 的用例 run 只有 TOOL_REQUESTED/PLAN_CREATED/REFLECTION 事件，34（langgraph）有 18×GRAPH_NODE。run 35 的 recall 30% 是 Legacy 在主回归集上的成绩，不是 v2。修复动作：重启 API 服务加载当前代码（新 dispatch 有 langgraph_v2 分支），重跑 runs 33/35。
 
 ---
 

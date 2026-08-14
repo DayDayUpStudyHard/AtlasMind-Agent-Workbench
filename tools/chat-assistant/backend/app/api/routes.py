@@ -3301,6 +3301,52 @@ async def _dispatch_eval_task(
     )
 
 
+def _read_actual_engine(run_id: int) -> str:
+    """Derive which runtime engine actually executed a dispatched run row.
+
+    Graph adapters stamp agent_run.runtime_engine='langgraph' plus graph
+    name/version; the legacy pipeline leaves them NULL. Used to surface
+    silent fallbacks (e.g. a stale API server process that doesn't know
+    langgraph_v2 and runs legacy instead) in the eval summary.
+    """
+    try:
+        from app.agent_runtime.persistence import _conn
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT runtime_engine, graph_name, graph_version FROM agent_run WHERE id=%s",
+                    (run_id,),
+                )
+                row = cur.fetchone()
+                if not row or not row.get("runtime_engine"):
+                    return "legacy"
+                parts = [str(row["runtime_engine"])]
+                if row.get("graph_name"):
+                    parts.append(str(row["graph_name"]))
+                    if row.get("graph_version"):
+                        parts.append(str(row["graph_version"]))
+                return "/".join(parts)
+    except Exception:
+        logger.exception("Could not read actual engine for run %s", run_id)
+        return "unknown"
+
+
+def _eval_runtime_mismatch(runtime: str, actual_engine: str | None) -> bool:
+    """True when the engine that actually ran differs from the requested one."""
+    if not actual_engine or actual_engine == "unknown":
+        return bool(actual_engine)
+    parts = actual_engine.split("/")
+    if parts[0] == "legacy":
+        return runtime != "legacy"
+    # graph-dispatched run: base is 'langgraph' for all graph modes
+    if runtime not in ("langgraph", "langgraph_v2", "shadow_v2"):
+        return True
+    if runtime == "langgraph_v2" and len(parts) >= 3 and parts[2] != "v2":
+        return True
+    return False
+
+
 def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
     if not run_id:
         return
@@ -3339,6 +3385,7 @@ async def _run_evaluation_background(eval_run_id: int):
     total_cases = 0
     success_count = 0
     avg_recall = 0.0
+    actual_engine: str | None = None
     try:
         _update_eval_progress(
             eval_run_id,
@@ -3451,6 +3498,8 @@ async def _run_evaluation_background(eval_run_id: int):
                         _finish_eval_agent_run(run_id, "FAILED", error)
                         raise RuntimeError(error)
                     _finish_eval_agent_run(run_id, "COMPLETED", "Evaluation case completed")
+                    if actual_engine is None:
+                        actual_engine = _read_actual_engine(run_id)
                     completed_run_ids.add(run_id)
                     stage_outputs[task_type] = artifact
                     if task_type == "CONTRACT_REVIEW":
@@ -3582,6 +3631,8 @@ async def _run_evaluation_background(eval_run_id: int):
             "rerankRequested": requested_rerank,
             "rerankActualMethods": rerank_methods,
             "rerankFallbackCount": rerank_fallback_count,
+            "actualRuntimeEngine": actual_engine or "",
+            "runtimeEngineMismatch": _eval_runtime_mismatch(runtime, actual_engine),
             "percent": 100,
         })
         current_step = {

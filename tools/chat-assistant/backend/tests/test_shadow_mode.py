@@ -177,3 +177,36 @@ def test_router_shadow_v2_falls_back_to_v1_for_other_tasks():
         assert fulfillment.contexts[0].shadow_mode is False
 
     asyncio.run(exercise())
+
+
+def test_router_unknown_mode_raises_instead_of_falling_back():
+    """2026-08-14 incident guard: an unrecognized runtime mode (e.g. one the
+    loaded code predates, like langgraph_v2 in an old API process) must fail
+    loudly, never silently run legacy."""
+
+    async def exercise():
+        router = RuntimeRouter()
+        legacy = _FakeRuntime("legacy")
+        router.register("legacy", legacy)
+
+        with pytest.raises(RuntimeError, match="未知运行时模式"):
+            await router.dispatch_with_mode(_context(), "langgraph_v2_but_old_code")
+
+        assert legacy.contexts == [], "silent legacy fallback is forbidden"
+
+    asyncio.run(exercise())
+
+
+def test_router_missing_adapter_raises_instead_of_falling_back():
+    """Asking for a graph this process does not have registered (e.g. an old
+    process without contract_review_v2) must fail loudly, not run legacy."""
+
+    async def exercise():
+        router = RuntimeRouter()
+        router.register("contract_review", _FakeRuntime("contract_review"))
+        router.register("legacy", _FakeRuntime("legacy"))
+
+        with pytest.raises(RuntimeError, match="无可用适配器"):
+            await router.dispatch_with_mode(_context(), "langgraph_v2")
+
+    asyncio.run(exercise())
