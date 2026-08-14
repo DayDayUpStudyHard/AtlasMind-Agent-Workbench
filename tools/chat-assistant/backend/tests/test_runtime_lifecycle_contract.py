@@ -24,6 +24,11 @@ GraphAdapter — the pieces the harness migration must not regress:
 * Observation   → state reducer dedups by callId; observations survive the
                   WAITING_HUMAN result
 
+Every tiny graph in this module is a TaskSpec compiled through
+``build_task_graph`` — the shared builder sits on all lifecycle paths,
+including the old Checkpoint/Resume flow (验收 P2: the old suite compiled
+StateGraphs directly and never exercised the common builder).
+
 Matrix elements pinned elsewhere (deliberately not duplicated):
 
 * heartbeat loop start / stop-on-terminal → tests/test_graph_runtime_adapter.py
@@ -36,17 +41,18 @@ Matrix elements pinned elsewhere (deliberately not duplicated):
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Callable
 
 import pytest
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphInterrupt
-from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
 from app.agent_runtime.api_models import AgentTaskContext
 from app.agent_runtime.graph.contract_review import _route_after_reflection
-from app.agent_runtime.graph.state import BaseGraphState
 from app.agent_runtime.harness.fakes import FakePersistence
+from app.agent_runtime.harness.graph_builder import build_task_graph
+from app.agent_runtime.harness.models import HumanGate, Role, TaskSpec
 from app.agent_runtime.runtime import (
     GraphAdapter,
     ResumeAction,
@@ -72,6 +78,36 @@ def _adapter(graph, run_id: int, *, run_store=None, name="contract_review"):
     return GraphAdapter(graph, graph_name=name, graph_version="v1", run_store=run_store)
 
 
+def _task_spec(
+    *nodes: tuple[str, Callable],
+    edges: tuple[tuple[str, str], ...] = (),
+    human_gate: HumanGate | None = None,
+) -> TaskSpec:
+    """Tiny fake-graph spec: the first node rides the context role (the §4.2
+    shared base the builder wires from START), the rest ride composer in
+    order. Every graph below compiles through build_task_graph so the shared
+    builder sits on all lifecycle paths (验收 P2 — the old suite compiled
+    StateGraphs directly and never exercised it). The implicit
+    context→first-role edge covers the common chain; anything beyond that
+    stays fully explicit via ``edges``."""
+    return TaskSpec(
+        task_type="CONTRACT_REVIEW",
+        graph_name="contract_review",
+        graph_version="v1",
+        prompt_version="v1",
+        context=Role((nodes[0],)),
+        planner=Role(),
+        retriever=Role(),
+        analyzer=Role(),
+        validator=Role(),
+        coverage_auditor=Role(),
+        composer=Role(tuple(nodes[1:])),
+        persistence=Role(),
+        human_gate=human_gate,
+        edges=edges,
+    )
+
+
 # ── 成功 ─────────────────────────────────────────────────────────────────────
 
 
@@ -84,13 +120,10 @@ def test_success_run_returns_completed_with_artifact_and_metadata():
             "observations": [{"callId": "o1", "toolName": "compose"}],
         }
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("final_node", final_node)
-    builder.add_edge(START, "final_node")
-    builder.add_edge("final_node", END)
-
     store = FakePersistence()
-    adapter = _adapter(builder.compile(), 7001, run_store=store)
+    adapter = _adapter(
+        build_task_graph(_task_spec(("final_node", final_node))), 7001, run_store=store
+    )
 
     async def exercise():
         result = await adapter.run(_context(7001))
@@ -122,12 +155,7 @@ def test_failed_run_captures_exception_as_artifact_error():
     def boom(state):
         raise RuntimeError("检索通道爆炸")
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("boom", boom)
-    builder.add_edge(START, "boom")
-    builder.add_edge("boom", END)
-
-    adapter = _adapter(builder.compile(), 7002)
+    adapter = _adapter(build_task_graph(_task_spec(("boom", boom))), 7002)
 
     async def exercise():
         result = await adapter.run(_context(7002))
@@ -146,12 +174,7 @@ def test_graph_without_artifact_is_failed_with_last_node():
     def noop(state):
         return {"current_node": "noop"}
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("noop", noop)
-    builder.add_edge(START, "noop")
-    builder.add_edge("noop", END)
-
-    adapter = _adapter(builder.compile(), 7003)
+    adapter = _adapter(build_task_graph(_task_spec(("noop", noop))), 7003)
 
     async def exercise():
         result = await adapter.run(_context(7003))
@@ -173,14 +196,15 @@ def test_snapshot_load_failure_fails_the_run(monkeypatch):
 
     monkeypatch.setattr(context_nodes, "load_contract_evidence_snapshot", explode)
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("load_run_context", context_nodes.load_run_context)
-    builder.add_node("finish", lambda state: {"artifact": {"content": {}}})
-    builder.add_edge(START, "load_run_context")
-    builder.add_edge("load_run_context", "finish")
-    builder.add_edge("finish", END)
-
-    adapter = _adapter(builder.compile(), 7009)
+    adapter = _adapter(
+        build_task_graph(
+            _task_spec(
+                ("load_run_context", context_nodes.load_run_context),
+                ("finish", lambda state: {"artifact": {"content": {}}}),
+            )
+        ),
+        7009,
+    )
 
     async def exercise():
         result = await adapter.run(_context(7009))
@@ -323,12 +347,12 @@ def test_heartbeat_loop_self_terminates_on_waiting_human_row(monkeypatch):
 
 
 def test_resume_without_checkpoint_is_failed_with_artifact_error():
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("final_node", lambda state: {"artifact": {"content": {}}})
-    builder.add_edge(START, "final_node")
-    builder.add_edge("final_node", END)
-
-    adapter = _adapter(builder.compile(), 7005)  # no checkpointer → resume impossible
+    adapter = _adapter(  # no checkpointer → resume impossible
+        build_task_graph(
+            _task_spec(("final_node", lambda state: {"artifact": {"content": {}}}))
+        ),
+        7005,
+    )
 
     async def exercise():
         result = await adapter.resume(
@@ -361,16 +385,21 @@ def test_resume_re_interrupt_stays_waiting_human():
     asyncio.run(exercise())
 
 
-def _build_hitl_graph():
+class _HumanGateImpl(HumanGate):
+    """Concrete gate for the fake HITL graph — pauses via interrupt, same
+    node contract as a production human gate."""
+
+    def __call__(self, state):
+        resume_payload = interrupt({"question": "同意?"}) or {}
+        return {"manual_result": resume_payload.get("manual_result")}
+
+
+def _build_hitl_spec() -> TaskSpec:
     def set_wait(state):
         return {
             "wait_state": {"type": "WAITING_HUMAN", "target": "fulfillment"},
             "observations": [{"callId": "pre-interrupt", "toolName": "wait"}],
         }
-
-    def gate(state):
-        resume_payload = interrupt({"question": "同意?"}) or {}
-        return {"manual_result": resume_payload.get("manual_result")}
 
     def apply_human(state):
         return {
@@ -378,22 +407,24 @@ def _build_hitl_graph():
             "current_node": "apply_human",
         }
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("set_wait", set_wait)
-    builder.add_node("gate", gate)
-    builder.add_node("apply_human", apply_human)
-    builder.add_edge(START, "set_wait")
-    builder.add_edge("set_wait", "gate")
-    builder.add_edge("gate", "apply_human")
-    builder.add_edge("apply_human", END)
-    return builder
+    gate = _HumanGateImpl(stage="gate")
+    # set_wait → gate rides the implicit context→first-role edge; the gate's
+    # onward wiring is explicit. The builder registers the gate function as
+    # the node for stage "gate" (spec.nodes["gate"] is spec.human_gate).
+    return _task_spec(
+        ("set_wait", set_wait),
+        ("gate", gate),
+        ("apply_human", apply_human),
+        edges=(("gate", "apply_human"),),
+        human_gate=gate,
+    )
 
 
 def test_resume_against_old_checkpoint_shape_tolerates_missing_fields():
     """旧 Checkpoint: a checkpoint written by an older schema (no wait_state)
     must still resume — missing fields fall back, never crash."""
     saver = MemorySaver()
-    graph = _build_hitl_graph().compile(checkpointer=saver)
+    graph = build_task_graph(_build_hitl_spec(), checkpointer=saver)
     adapter = _adapter(graph, 7006)
 
     async def exercise():
@@ -552,6 +583,164 @@ def test_reranker_external_call_carries_configured_timeout_and_degrades(monkeypa
     assert len(result) == 2  # degraded to keyword fallback, evidence preserved
 
 
+def test_work_unit_budget_verdicts():
+    """单 WorkUnit 预算 (验收 P2): each §7.2 limit is checked against the
+    unit's own usage — exactly-at-limit stays within budget; one-over flips
+    the verdict, names the exceeded limit and carries §6.4 diagnostics."""
+    from app.agent_runtime.harness.budget import (
+        UnitUsage,
+        WorkUnitBudget,
+        check_work_unit_budget,
+    )
+
+    budget = WorkUnitBudget()
+    # §7.2 conservative production defaults are the frozen contract
+    assert (
+        budget.max_queries, budget.max_llm_calls, budget.max_tokens, budget.max_retry_rounds,
+    ) == (2, 3, 16384, 1)
+
+    # exactly at every limit: within budget
+    verdict = check_work_unit_budget(
+        budget,
+        UnitUsage(queries=2, llm_calls=3, tokens=16384, retry_rounds=1),
+        work_unit_id="unit-1",
+    )
+    assert verdict.within_budget and not verdict.exceeded and not verdict.diagnostics
+
+    # one over per dimension → that dimension's limit is named
+    assert check_work_unit_budget(
+        budget, UnitUsage(queries=3), work_unit_id="unit-1",
+    ).exceeded == ("maxQueries",)
+    assert check_work_unit_budget(
+        budget, UnitUsage(llm_calls=4), work_unit_id="unit-1",
+    ).exceeded == ("maxLlmCalls",)
+    assert check_work_unit_budget(
+        budget, UnitUsage(tokens=16385), work_unit_id="unit-1",
+    ).exceeded == ("maxTokens",)
+    assert check_work_unit_budget(
+        budget, UnitUsage(retry_rounds=2), work_unit_id="unit-1",
+    ).exceeded == ("maxRetryRounds",)
+
+    # all four over at once: every name appears, verdict carries the §6.4
+    # disclosure filled in by the caller
+    over = check_work_unit_budget(
+        budget,
+        UnitUsage(queries=3, llm_calls=4, tokens=20000, retry_rounds=2),
+        work_unit_id="unit-1",
+        missing_check_items=("check-2", "check-1", "check-1"),
+        missing_source_types=("POLICY",),
+        retried=True,
+    )
+    assert not over.within_budget
+    assert over.exceeded == ("maxQueries", "maxLlmCalls", "maxTokens", "maxRetryRounds")
+    assert over.diagnostics["workUnitId"] == "unit-1"
+    assert over.diagnostics["missingCheckItems"] == ["check-1", "check-2"]  # sorted + deduped
+    assert over.diagnostics["missingSourceTypes"] == ["POLICY"]
+    assert over.diagnostics["retried"] is True
+    assert over.diagnostics["exceeded"] == ["maxQueries", "maxLlmCalls", "maxTokens", "maxRetryRounds"]
+
+    # a task may tighten per-unit limits — never loosen them silently
+    tight = WorkUnitBudget(max_queries=1, max_retry_rounds=0)
+    assert check_work_unit_budget(
+        tight, UnitUsage(queries=1), work_unit_id="unit-1",
+    ).within_budget
+    assert check_work_unit_budget(
+        tight, UnitUsage(queries=2), work_unit_id="unit-1",
+    ).exceeded == ("maxQueries",)
+
+
+def test_limited_diagnostics_shape():
+    """§6.4 disclosure shape: workUnitId / missingCheckItems /
+    missingSourceTypes / retried / exceeded — the stable keys the UI and
+    eval center render from."""
+    from app.agent_runtime.harness.budget import build_limited_diagnostics
+
+    diagnostics = build_limited_diagnostics(
+        work_unit_id="extraction-9",
+        missing_check_items=("生效日期", "验收条款", "生效日期"),
+        missing_source_types=("CONTRACT", "CONTRACT", "FULFILLMENT"),
+        retried=True,
+        exceeded=("maxQueries",),
+    )
+    assert diagnostics == {
+        "workUnitId": "extraction-9",
+        "missingCheckItems": ["生效日期", "验收条款"],  # sorted + deduped
+        "missingSourceTypes": ["CONTRACT", "FULFILLMENT"],
+        "retried": True,
+        "exceeded": ["maxQueries"],
+    }
+
+    # minimal form: nothing missing, no retry, only the exceeded limits
+    assert build_limited_diagnostics(work_unit_id="w", exceeded=("maxTokens",)) == {
+        "workUnitId": "w",
+        "missingCheckItems": [],
+        "missingSourceTypes": [],
+        "retried": False,
+        "exceeded": ["maxTokens"],
+    }
+
+
+def test_over_budget_workunit_transitions_run_to_limited():
+    """超限转 LIMITED (验收 P2): a graph whose final state carries
+    ``limited_diagnostics`` ends LIMITED — never FAILED, never a false
+    COMPLETED — with the artifact passed through and the diagnostics in
+    graph_info (the route layer persists them with the run row)."""
+    from app.agent_runtime.harness.budget import build_limited_diagnostics
+
+    diagnostics = build_limited_diagnostics(
+        work_unit_id="unit-1",
+        missing_check_items=("check-1",),
+        retried=True,
+        exceeded=("maxQueries",),
+    )
+
+    def final_node(state):
+        return {
+            "artifact": {"reportType": "CONTRACT_REVIEW_REPORT", "content": {"limited": True}},
+            "limited_diagnostics": diagnostics,
+            "state_revision": 1,
+        }
+
+    adapter = _adapter(build_task_graph(_task_spec(("final_node", final_node))), 7016)
+
+    async def exercise():
+        result = await adapter.run(_context(7016))
+        assert result.status == "LIMITED"
+        assert not result.ok  # ok is strictly COMPLETED — LIMITED is its own terminal
+        assert result.artifact["reportType"] == "CONTRACT_REVIEW_REPORT"
+        assert result.graph_info["limitedDiagnostics"] == diagnostics
+
+    asyncio.run(exercise())
+
+
+def test_embedding_client_uses_the_short_configured_timeout(monkeypatch):
+    """Embedding 短超时 (验收 P2): the OpenAI client is built with the
+    embedding-specific timeout — independent of the long chat session
+    timeout — and no automatic retries (a stall degrades, not retries)."""
+    import app.services.embedding_service as embedding_service
+
+    class _Settings:
+        embedding_api_key = "k"
+        embedding_base_url = "http://embedding.internal"
+        embedding_model = "text-embedding-ada-002"
+        embedding_dim = 1536
+        embedding_timeout_seconds = 7
+
+    captured: dict[str, Any] = {}
+
+    class _FakeOpenAI:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(embedding_service, "settings", _Settings)
+    monkeypatch.setattr(embedding_service, "OpenAI", _FakeOpenAI)
+
+    service = embedding_service.EmbeddingService()
+    assert service.configured
+    assert captured["timeout"] == 7  # the short embedding timeout was actually used
+    assert captured["max_retries"] == 0
+
+
 # ── Observation ──────────────────────────────────────────────────────────────
 
 
@@ -573,16 +762,19 @@ def test_observation_reducer_dedups_by_call_id():
     def finish(state):
         return {"artifact": {"content": {}}}
 
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("emit_a", emit_a)
-    builder.add_node("emit_b", emit_b)
-    builder.add_node("finish", finish)
-    builder.add_edge(START, "emit_a")
-    builder.add_edge("emit_a", "emit_b")
-    builder.add_edge("emit_b", "finish")
-    builder.add_edge("finish", END)
-
-    adapter = _adapter(builder.compile(), 7007)
+    # emit_a → emit_b rides the implicit context→first-role edge; only the
+    # onward edge is explicit.
+    adapter = _adapter(
+        build_task_graph(
+            _task_spec(
+                ("emit_a", emit_a),
+                ("emit_b", emit_b),
+                ("finish", finish),
+                edges=(("emit_b", "finish"),),
+            )
+        ),
+        7007,
+    )
 
     async def exercise():
         result = await adapter.run(_context(7007))

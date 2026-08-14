@@ -1479,6 +1479,33 @@ async def _dispatch_via_router(router, request) -> None:
             # HITL: graph paused at interrupt, state in checkpoint
             await run_store.update_run(run_id, status="WAITING_HUMAN", progress=85,
                                        current_step="等待人工确认")
+        elif result.status == "LIMITED":
+            # §7.2: over-budget / coverage-limited runs end LIMITED with
+            # their diagnostics — never FAILED, never a false COMPLETED.
+            diagnostics = (result.graph_info or {}).get("limitedDiagnostics") or {}
+            missing_units = len(diagnostics.get("missingCheckItems") or [])
+            report = await report_store.get_report(run_id)
+            if not report and result.artifact:
+                try:
+                    await report_store.save_report(
+                        request.project_id or request.subject_id,
+                        run_id,
+                        request.task_type,
+                        result.artifact,
+                    )
+                except Exception as exc:
+                    logger.exception("LIMITED report persist failed for run %s", run_id)
+                    await run_store.update_run(
+                        run_id,
+                        status="FAILED",
+                        progress=0,
+                        error_message=f"Report persistence failed: {exc}",
+                    )
+                    return
+            await run_store.update_run(
+                run_id, status="LIMITED", progress=100,
+                current_step=f"范围受限（{missing_units} 项未覆盖，详见运行诊断）",
+            )
         elif result.status == "COMPLETED":
             if request.task_type == "CONTRACT_ELEMENT_EXTRACTION":
                 artifact = result.artifact or {}

@@ -425,7 +425,7 @@ class MySqlRunStore(RunStore):
             if status is not None:
                 sets.append("status=%s")
                 params.append(status)
-                if status in ("COMPLETED", "FAILED", "CANCELLED"):
+                if status in ("COMPLETED", "FAILED", "CANCELLED", "LIMITED"):
                     sets.append("finished_at=NOW()")
                 # set started_at on first transition out of CREATED
                 sets.append("started_at=IF(started_at IS NULL AND %s NOT IN ('CREATED'), NOW(), started_at)")
@@ -451,7 +451,7 @@ class MySqlRunStore(RunStore):
                     cur.execute(
                         f"UPDATE agent_run SET {', '.join(sets)} WHERE id=%s", params
                     )
-                    if status in ("COMPLETED", "FAILED", "CANCELLED"):
+                    if status in ("COMPLETED", "FAILED", "CANCELLED", "LIMITED"):
                         cur.execute(
                             "SELECT workflow_id AS workflowId, run_type AS runType FROM agent_run WHERE id=%s",
                             (run_id,),
@@ -463,7 +463,11 @@ class MySqlRunStore(RunStore):
                         # the same linkage for provenance, but must not make a
                         # not-yet-reviewed contract look completed or failed.
                         if workflow_id and str(workflow.get("runType") or "").upper() == "CONTRACT_REVIEW":
-                            workflow_status = "COMPLETED" if status == "COMPLETED" else "FAILED"
+                            workflow_status = (
+                                "COMPLETED" if status == "COMPLETED"
+                                else "LIMITED" if status == "LIMITED"
+                                else "FAILED"
+                            )
                             cur.execute(
                                 """UPDATE contract_analysis_workflow
                                    SET status=%s, current_stage='RISK_REVIEW',

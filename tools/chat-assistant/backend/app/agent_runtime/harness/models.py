@@ -10,7 +10,7 @@ the declarative graph contract and its common builder.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, TypedDict
 
 
@@ -187,50 +187,108 @@ def default_retrieval_request(
     }
 
 
+@dataclass(frozen=True)
+class Role:
+    """One PRD §6.1 role hook — an ordered chain of named node functions
+    that implements one skeleton stage (§4.2) for this task.
+
+    A role may span several graph nodes when the business graph splits its
+    skeleton stage into multiple nodes (risk v1's analyzer =
+    run_deterministic_rules + draft_domain_findings; its composer =
+    compose_report + compose_limited_report + validate_schema +
+    repair_artifact). The stage order inside a role is declaration order;
+    the wiring between them is fully explicit via TaskSpec.edges /
+    conditional_routes, never inferred.
+
+    §6.1 names the role hooks by their policy type — WorkUnitPlanner,
+    RetrievalPolicy, UnitAnalyzer, ArtifactValidator, CoverageAuditor,
+    ArtifactComposer, PersistencePolicy — all of which are state→update
+    node chains in this implementation.
+    """
+
+    stages: tuple[tuple[str, Callable], ...] = ()
+
+
+@dataclass(frozen=True)
+class HumanGate:
+    """PRD §6.1 — the single stage allowed to pause a run for human input
+    (a LangGraph interrupt inside the node). The role hooks declare the gate
+    as the node function for ``stage`` (the builder validates that identity
+    and wires it like any other stage); the spec's edges / conditional
+    routes decide where the gate sits in the wiring."""
+
+    stage: str
+
+    def __call__(self, state: dict[str, Any]) -> dict[str, Any]:  # pragma: no cover
+        raise NotImplementedError("HumanGate must be implemented by the business graph")
+
+
 @dataclass
 class TaskSpec:
     """Declarative description of one task graph (PRD Phase 4 / §6.1).
 
-    The spec declares how a task differs from the shared lifecycle: its
-    stage sequence, its node functions and its conditional routing.
-    ``harness.graph_builder.build_task_graph`` turns a spec into a compiled
-    LangGraph — business modules declare a spec instead of re-implementing
-    that wiring.
+    The spec declares how a task differs from the shared lifecycle through
+    the §6.1 role hooks plus the explicit wiring (edges / conditional
+    routes). ``harness.graph_builder.build_task_graph`` turns a spec into a
+    compiled LangGraph — business modules declare a spec instead of
+    re-implementing that wiring.
 
     The spec holds no contract content and no DB / LLM clients: the node
     functions it references do the work, and they come from the business
     module (``graph/*.py``), never from the harness.
 
-    PRD §6.1 role hooks map onto ``nodes`` by stage name (risk v1 example):
-    ``planner`` → create_domain_tasks, ``retriever`` →
-    retrieve_domain_evidence, ``analyzer`` → run_deterministic_rules /
-    draft_domain_findings, ``validator`` → validate_claims,
-    ``coverage_auditor`` → coverage_reflection / targeted_retrieval,
-    ``composer`` → compose_report / compose_limited_report / validate_schema
-    / repair_artifact / prepare_human_review, ``persistence`` →
-    persist_report, ``human_gate`` → None for risk v1 (it has no interrupt
-    stage; the FULFILLMENT graph will declare its gate once migrated).
-
     Field contract:
 
-    * ``stages`` — node names in lifecycle order (PRD §4.2 skeleton). The
-      first stage receives the START edge and the last stage flows to END;
-      a stage with a conditional route has no linear outgoing edge.
-    * ``nodes`` — stage name → node function (all business behavior).
-    * ``edges`` — explicit linear / loop-back edges, excluding START / END.
+    * ``context`` — the shared lifecycle base (§4.2 load_snapshot +
+      build_task_context): risk v1 = load_run_context + freeze_case_snapshot.
+    * ``planner`` / ``retriever`` / ``analyzer`` / ``validator`` /
+      ``coverage_auditor`` / ``composer`` / ``persistence`` — the §6.1
+      role hooks. Every role stage must have a unique name (roles
+      partition the stage space); the builder rejects collisions.
+    * ``human_gate`` — optional interrupt stage; when declared, its stage
+      must be one of the role stages and the builder registers the gate
+      function as that stage's node.
+    * ``edges`` — explicit linear / loop-back edges, excluding START / END
+      and the implicit context chain (START → context… → first role stage
+      and the last stage → END are wired by the builder).
     * ``conditional_routes`` — stage name → (router, route_map). The route
       targets must be declared stages.
-    * ``human_gate`` — the single stage allowed to interrupt (HITL
-      contract); declarative metadata, the interrupt itself lives inside
-      the node.
+
+    ``stages`` and ``nodes`` are derived properties: the stage sequence is
+    the §6.1 field order flattened, so the role contract is the single
+    source of truth — not a comment.
     """
 
     task_type: str
     graph_name: str
     graph_version: str
     prompt_version: str
-    stages: tuple[str, ...]
-    nodes: Mapping[str, Callable]
-    edges: tuple[tuple[str, str], ...]
-    conditional_routes: Mapping[str, tuple[Callable, Mapping[str, str]]]
-    human_gate: str | None = None
+    context: Role
+    planner: Role
+    retriever: Role
+    analyzer: Role
+    validator: Role
+    coverage_auditor: Role
+    composer: Role
+    persistence: Role
+    human_gate: HumanGate | None = None
+    edges: tuple[tuple[str, str], ...] = ()
+    conditional_routes: Mapping[str, tuple[Callable, Mapping[str, str]]] = field(default_factory=dict)
+
+    @property
+    def stages(self) -> tuple[str, ...]:
+        """Node names in lifecycle order (§6.1 field order flattened)."""
+        roles = (
+            self.context, self.planner, self.retriever, self.analyzer,
+            self.validator, self.coverage_auditor, self.composer, self.persistence,
+        )
+        return tuple(name for role in roles for name, _fn in role.stages)
+
+    @property
+    def nodes(self) -> dict[str, Callable]:
+        """Stage name → node function (derived from the role declaration)."""
+        roles = (
+            self.context, self.planner, self.retriever, self.analyzer,
+            self.validator, self.coverage_auditor, self.composer, self.persistence,
+        )
+        return {name: fn for role in roles for name, fn in role.stages}

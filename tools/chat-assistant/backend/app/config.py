@@ -26,6 +26,8 @@ class Settings:
     embedding_base_url: str = os.getenv("EMBEDDING_BASE_URL", "")
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "")
     embedding_dim: int = int(os.getenv("EMBEDDING_DIM", "2560"))
+    # PRD §7.2: 外部 Embedding/Rerank 有独立短超时（远低于 LLM 会话超时）
+    embedding_timeout_seconds: float = float(os.getenv("EMBEDDING_TIMEOUT_SECONDS", "10"))
 
     # ====== Elasticsearch ======
     es_host: str = os.getenv("ES_HOST", "http://localhost:9200")

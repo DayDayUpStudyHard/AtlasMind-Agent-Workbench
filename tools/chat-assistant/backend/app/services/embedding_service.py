@@ -27,7 +27,9 @@ class EmbeddingService:
             self.client = OpenAI(
                 api_key=settings.embedding_api_key,
                 base_url=settings.embedding_base_url,
-                timeout=12.0,
+                # PRD §7.2: embeddings get an independent short timeout, not
+                # the default long OpenAI session timeout.
+                timeout=settings.embedding_timeout_seconds,
                 max_retries=0,
             )
             self.model = settings.embedding_model

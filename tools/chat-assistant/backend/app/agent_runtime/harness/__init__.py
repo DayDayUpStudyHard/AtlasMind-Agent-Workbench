@@ -6,9 +6,13 @@ shared lifecycle pieces, without changing v1 output fields.
 
 * ``models``       — WorkUnit / EvidenceNeed / RetrievalRequest / EvidenceBundle /
                      CandidateResult / ValidationOutcome (PRD §10) and
-                     TaskSpec (PRD §6.1, Phase 4)
+                     TaskSpec with the §6.1 role hooks (Role / HumanGate,
+                     Phase 4) — ``stages`` / ``nodes`` derive from the roles
 * ``graph_builder``— build_task_graph: compiles a TaskSpec into a LangGraph
-                     (PRD §4.2 lifecycle skeleton + spec-declared routing)
+                     (PRD §4.2 lifecycle skeleton + spec-declared routing +
+                     reachability validation)
+* ``budget``       — WorkUnitBudget / UnitUsage / check_work_unit_budget +
+                     LIMITED diagnostics (PRD §7.2 / §6.4)
 * ``retrieval``    — RetrievalOrchestrator (PRD §11.2) — risk v1, 要素提取 and
                      review v2 all retrieve through this; v1 nodes re-import
                      the public ``run_async`` / ``normalize_hit`` /
@@ -34,18 +38,28 @@ would change risk v1 output fields, which Phase 4 forbids):
   contextvars wrapper (re-pointing it is a Phase 5 item, not a zero-change
   alias)
 
-TaskSpec and the common graph builder are in the harness (Phase 4 / §14-4);
-WorkUnit planners, artifact composition, risk scoring, date calculation and
-fulfillment persistence stay OUT until the interfaces prove stable across
-the graphs (PRD §14.4).
+TaskSpec with the §6.1 role hooks, the common graph builder and the
+per-WorkUnit budget contract are in the harness (Phase 4 / §14-4); business
+artifact composition, risk scoring, date calculation and fulfillment
+persistence stay OUT until the interfaces prove stable across the graphs
+(PRD §14.4).
 """
 
+from .budget import (  # noqa: F401
+    BudgetVerdict,
+    UnitUsage,
+    WorkUnitBudget,
+    build_limited_diagnostics,
+    check_work_unit_budget,
+)
 from .graph_builder import build_task_graph  # noqa: F401
 from .models import (  # noqa: F401
     CandidateResult,
     EvidenceBundle,
     EvidenceNeed,
+    HumanGate,
     RetrievalRequest,
+    Role,
     TaskSpec,
     ValidationOutcome,
     WorkUnit,

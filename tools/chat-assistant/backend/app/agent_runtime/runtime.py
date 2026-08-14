@@ -122,7 +122,7 @@ class AgentResult:
     """Standard result from any AgentRuntime implementation."""
 
     run_id: int
-    status: str  # COMPLETED | FAILED | WAITING_HUMAN | CANCELLED
+    status: str  # COMPLETED | LIMITED | FAILED | WAITING_HUMAN | CANCELLED
     artifact: dict[str, Any] = field(default_factory=dict)
     observations: list[dict[str, Any]] = field(default_factory=list)
     citations: list[dict[str, Any]] = field(default_factory=list)
@@ -296,9 +296,15 @@ class GraphAdapter:
         finally:
             # run() is over on every exit path — stop beating the run row.
             # The loop's own status check is the backstop; this cancel makes
-            # the stop immediate (no lingering 15s tick after return).
+            # the stop immediate (no lingering 15s tick after return). The
+            # cancelled task is then awaited so its resources are reclaimed
+            # (same pattern as the legacy AgentRunner).
             if heartbeat_task is not None:
                 heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except asyncio.CancelledError:
+                    pass
                 self._heartbeat_task = None
 
         if final_state.get("__interrupt__"):
@@ -350,20 +356,28 @@ class GraphAdapter:
                     "lastNode": final_state.get("current_node", ""),
                 },
             )
+        limited_diagnostics = final_state.get("limited_diagnostics")
+        graph_info = {
+            "runtimeEngine": "langgraph",
+            "graphName": final_state.get("graph_name", ""),
+            "graphVersion": final_state.get("graph_version", ""),
+            "model": final_state.get("model", model),
+            "promptVersion": final_state.get("prompt_version", prompt_version),
+            "stateRevision": final_state.get("state_revision", 0),
+        }
+        if limited_diagnostics:
+            # §7.2/§6.4: an over-budget / coverage-limited run is LIMITED
+            # with its mandatory diagnostics — never FAILED, never a false
+            # COMPLETED. The diagnostics travel in graph_info so callers
+            # persist them with the run row.
+            graph_info["limitedDiagnostics"] = limited_diagnostics
         return AgentResult(
             run_id=context.run_id,
-            status="COMPLETED",
+            status="LIMITED" if limited_diagnostics else "COMPLETED",
             artifact=artifact,
             observations=final_state.get("observations") or [],
             citations=final_state.get("citations") or [],
-            graph_info={
-                "runtimeEngine": "langgraph",
-                "graphName": final_state.get("graph_name", ""),
-                "graphVersion": final_state.get("graph_version", ""),
-                "model": final_state.get("model", model),
-                "promptVersion": final_state.get("prompt_version", prompt_version),
-                "stateRevision": final_state.get("state_revision", 0),
-            },
+            graph_info=graph_info,
         )
 
     async def _heartbeat_loop(self, run_id: int) -> None:

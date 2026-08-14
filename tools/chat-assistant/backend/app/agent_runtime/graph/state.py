@@ -117,6 +117,10 @@ class BaseGraphState(TypedDict, total=False):
     budget: dict[str, Any]
     errors: list[dict[str, Any]]
     retry_state: dict[str, Any]
+    # §7.2/§6.4: when a node marks the run scope-limited (over-budget or
+    # coverage-limited WorkUnit), it writes the mandatory diagnostics here;
+    # the runtime turns the run into LIMITED, never FAILED / false COMPLETED.
+    limited_diagnostics: dict[str, Any] | None
 
     # ── Artifact ──
     artifact: dict[str, Any]

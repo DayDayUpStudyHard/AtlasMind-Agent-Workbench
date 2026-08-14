@@ -10,7 +10,7 @@ import logging
 from typing import Any
 
 from ..harness.graph_builder import build_task_graph
-from ..harness.models import TaskSpec
+from ..harness.models import Role, TaskSpec
 from .nodes.context import load_run_context, freeze_case_snapshot
 from .nodes.inventory import inventory_clauses
 from .nodes.domain_tasks import create_domain_tasks
@@ -62,66 +62,60 @@ def _route_after_targeted(state: dict[str, Any]) -> str:
     return "draft_domain_findings"
 
 
-# Lifecycle stages in declaration order (PRD §4.2 skeleton): context and
-# snapshot → inventory → planning → retrieval → analysis → validation →
-# coverage audit → composition → human-review boundary → persistence.
-# The §6.1 role hooks map onto these stages: planner=create_domain_tasks,
-# retriever=retrieve_domain_evidence, analyzer=run_deterministic_rules +
-# draft_domain_findings, validator=validate_claims, coverage_auditor=
-# coverage_reflection + targeted_retrieval, composer=compose_report +
-# compose_limited_report + validate_schema + repair_artifact +
-# prepare_human_review, persistence=persist_report. Risk v1 has no
-# interrupt stage, so human_gate is None.
-_STAGES = (
-    "load_run_context",
-    "freeze_case_snapshot",
-    "inventory_clauses",
-    "create_domain_tasks",
-    "retrieve_domain_evidence",
-    "run_deterministic_rules",
-    "draft_domain_findings",
-    "validate_claims",
-    "coverage_reflection",
-    "targeted_retrieval",
-    "compose_report",
-    "compose_limited_report",
-    "validate_schema",
-    "repair_artifact",
-    "prepare_human_review",
-    "persist_report",
-)
-
 # Frozen pre-migration wiring: the same nodes, linear / loop-back edges and
-# conditional gates the v1 builder hardcoded before Phase 4. The common
-# builder compiles this spec; output fields are untouched because the node
-# functions are referenced by identity.
+# conditional gates the v1 builder hardcoded before Phase 4, re-declared as
+# the §6.1 role contract. The common builder compiles this spec; output
+# fields are untouched because the node functions are referenced by
+# identity.
+
+# §4.2 role → skeleton stage mapping for risk v1:
+#   context          = load_snapshot + build_task_context
+#   planner          = plan_work_units (inventory + domain tasks)
+#   retriever        = retrieve_evidence
+#   analyzer         = analyze_units (rules + LLM findings)
+#   validator        = validate_candidates
+#   coverage_auditor = audit_coverage (+ one bounded targeted retry)
+#   composer         = compose_artifact (full / limited / schema gate / repair)
+#   persistence      = persist_or_human_gate (review boundary record + persist)
+# Risk v1 has no interrupt stage, so human_gate is None.
 CONTRACT_REVIEW_SPEC = TaskSpec(
     task_type="CONTRACT_REVIEW",
     graph_name="contract_review",
     graph_version="v1",
     prompt_version="contract-review-graph-v1",
-    stages=_STAGES,
-    nodes={
-        "load_run_context": load_run_context,
-        "freeze_case_snapshot": freeze_case_snapshot,
-        "inventory_clauses": inventory_clauses,
-        "create_domain_tasks": create_domain_tasks,
-        "retrieve_domain_evidence": retrieve_domain_evidence,
-        "run_deterministic_rules": run_deterministic_rules,
-        "draft_domain_findings": draft_domain_findings,
-        "validate_claims": validate_claims,
-        "coverage_reflection": coverage_reflection,
-        "targeted_retrieval": targeted_retrieval,
-        "compose_report": compose_report,
-        "compose_limited_report": compose_limited_report,
-        "validate_schema": validate_schema,
-        "repair_artifact": repair_artifact,
-        "prepare_human_review": prepare_human_review,
-        "persist_report": persist_report,
-    },
+    context=Role((
+        ("load_run_context", load_run_context),
+        ("freeze_case_snapshot", freeze_case_snapshot),
+    )),
+    planner=Role((
+        ("inventory_clauses", inventory_clauses),
+        ("create_domain_tasks", create_domain_tasks),
+    )),
+    retriever=Role((
+        ("retrieve_domain_evidence", retrieve_domain_evidence),
+    )),
+    analyzer=Role((
+        ("run_deterministic_rules", run_deterministic_rules),
+        ("draft_domain_findings", draft_domain_findings),
+    )),
+    validator=Role((
+        ("validate_claims", validate_claims),
+    )),
+    coverage_auditor=Role((
+        ("coverage_reflection", coverage_reflection),
+        ("targeted_retrieval", targeted_retrieval),
+    )),
+    composer=Role((
+        ("compose_report", compose_report),
+        ("compose_limited_report", compose_limited_report),
+        ("validate_schema", validate_schema),
+        ("repair_artifact", repair_artifact),
+    )),
+    persistence=Role((
+        ("prepare_human_review", prepare_human_review),
+        ("persist_report", persist_report),
+    )),
     edges=(
-        ("load_run_context", "freeze_case_snapshot"),
-        ("freeze_case_snapshot", "inventory_clauses"),
         ("inventory_clauses", "create_domain_tasks"),
         ("create_domain_tasks", "retrieve_domain_evidence"),
         ("retrieve_domain_evidence", "run_deterministic_rules"),
