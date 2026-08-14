@@ -917,90 +917,117 @@ def _stream_run(graph) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[
 
 
 _NO_CHANGE = object()  # internal sentinel — never serialized
-# Marks a key deleted between two streamed states. A typed object marker, not
-# a scalar string: _apply only treats a delta value as a removal when it is
-# EXACTLY this single-key dict, so real business content (even the string a
-# scalar marker would have collided with) is never misread. Survives the
-# fixture's JSON round-trip unchanged.
-_REMOVED = {"__golden_removed__": True}
+_DELTA_FORMAT = "golden-delta-ops-v1"
 
 
 def _diff(
     base: Any, new: Any, *,
     allow_removals: bool = False, encode_removals: bool = False,
 ) -> Any:
-    """Nested delta from ``base`` to ``new``: dicts recurse, other values
-    are replaced wholesale. Streamed states grow at the top level, but a
-    node may replace a nested dict without one of its keys (the state
-    shrink is real production behavior) — the chained input deltas encode
-    that as a ``_REMOVED`` marker. Node outputs are partial updates:
-    ``allow_removals`` alone skips removed keys ("missing from the output
-    means keep the input value", which _apply already does). Without
-    either flag a removal raises — nothing is silently lost."""
-    if base == new:
+    """Return a collision-free operation delta from ``base`` to ``new``.
+
+    Every change is encoded outside the business value as ``set`` or
+    ``remove`` plus a key path. Values are opaque payloads under ``value``;
+    no possible JSON value can therefore be mistaken for a deletion marker.
+
+    Streamed states encode real removals. Node outputs are partial updates,
+    so ``allow_removals`` alone skips absent keys ("missing from output"
+    means keep the input value). Without either flag, a removal raises.
+    """
+    set_operations: list[list[Any]] = []
+    remove_operations: list[list[Any]] = []
+
+    def collect(left: Any, right: Any, path: list[Any]) -> None:
+        if left == right:
+            return
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key, value in right.items():
+                if key not in left:
+                    set_operations.append([[*path, key], copy.deepcopy(value)])
+                else:
+                    collect(left[key], value, [*path, key])
+            for key in left:
+                if key not in right:
+                    if encode_removals:
+                        remove_operations.append([*path, key])
+                    elif not allow_removals:
+                        raise ValueError(f"golden delta: key {key!r} removed along the stream")
+            return
+        set_operations.append([path, copy.deepcopy(right)])
+
+    collect(base, new, [])
+    if not set_operations and not remove_operations:
         return _NO_CHANGE
-    if isinstance(base, dict) and isinstance(new, dict):
-        delta: dict[str, Any] = {}
-        for key, value in new.items():
-            if key not in base:
-                delta[key] = value
-            else:
-                child = _diff(
-                    base[key], value,
-                    allow_removals=allow_removals, encode_removals=encode_removals,
-                )
-                if child is not _NO_CHANGE:
-                    delta[key] = child
-        for key in base:
-            if key not in new:
-                if encode_removals:
-                    delta[key] = _REMOVED
-                elif not allow_removals:
-                    raise ValueError(f"golden delta: key {key!r} removed along the stream")
-        return delta or _NO_CHANGE
-    return new
+    return {
+        "format": _DELTA_FORMAT,
+        "set": set_operations,
+        "remove": remove_operations,
+    }
 
 
 def _apply(base: Any, delta: Any) -> Any:
-    """Reconstruct ``base`` + ``delta`` (inverse of ``_diff``)."""
+    """Reconstruct ``base`` + an operation delta (inverse of ``_diff``)."""
     if delta is None:
         return base
-    if isinstance(delta, dict) and isinstance(base, dict):
-        result = dict(base)
-        for key, value in delta.items():
-            if isinstance(value, dict) and value == _REMOVED:
-                result.pop(key, None)
-            elif isinstance(value, dict):
-                result[key] = _apply(
-                    base.get(key) if isinstance(base.get(key), dict) else {}, value,
-                )
-            else:
-                result[key] = value
-        return result
-    return delta
+    if not isinstance(delta, dict) or delta.get("format") != _DELTA_FORMAT:
+        raise ValueError("golden delta: unsupported operation format")
+
+    result = copy.deepcopy(base)
+    operations = [
+        *(('remove', path, None) for path in delta.get("remove") or []),
+        *(('set', entry[0], entry[1]) for entry in delta.get("set") or []),
+    ]
+    for op, path, value in operations:
+        if not isinstance(path, list):
+            raise ValueError("golden delta: operation path must be a list")
+        if not path:
+            if op != "set":
+                raise ValueError("golden delta: root operation must be set")
+            result = copy.deepcopy(value)
+            continue
+
+        parent = result
+        for key in path[:-1]:
+            if not isinstance(parent, dict) or key not in parent:
+                raise ValueError(f"golden delta: invalid path {path!r}")
+            parent = parent[key]
+        if not isinstance(parent, dict):
+            raise ValueError(f"golden delta: non-object parent for path {path!r}")
+
+        key = path[-1]
+        if op == "set":
+            parent[key] = copy.deepcopy(value)
+        elif op == "remove":
+            parent.pop(key, None)
+        else:
+            raise ValueError(f"golden delta: unsupported operation {op!r}")
+    return result
 
 
-def test_golden_removal_marker_never_collides_with_content():
-    """The removal marker is a typed object, not a scalar: only a delta value
-    EXACTLY equal to {__golden_removed__: True} removes a key. Real content
-    that merely contains the marker key — or equals the old scalar string —
-    replays unchanged."""
+def test_golden_operations_never_collide_with_business_content():
+    """Deletion metadata lives outside opaque business values.
+
+    Exact copies of both historical marker values must round-trip while a
+    neighboring key is actually removed.
+    """
     base = {
         "nested": {
-            "kept": {"__golden_removed__": True, "real": 1},
-            "literal": "!golden-removed!",
+            "object": {"before": True},
             "gone": 1,
         },
-        "top": "!golden-removed!",
     }
-    delta = {"nested": {"gone": _REMOVED}}
+    expected = {
+        "nested": {
+            "object": {"__golden_removed__": True},
+            "literal": "!golden-removed!",
+        },
+        "top": {"format": _DELTA_FORMAT, "set": [], "remove": []},
+    }
+    delta = _diff(base, expected, encode_removals=True)
 
     applied = _apply(base, delta)
 
-    assert "gone" not in applied["nested"]
-    assert applied["nested"]["kept"] == {"__golden_removed__": True, "real": 1}
-    assert applied["nested"]["literal"] == "!golden-removed!"
-    assert applied["top"] == "!golden-removed!"
+    assert applied == expected
 
 
 def _collect_golden() -> dict[str, Any]:
@@ -1041,7 +1068,10 @@ def _collect_golden() -> dict[str, Any]:
 
         for stage in _GOLDEN_REAL_STAGES:
             input_state = stage_inputs[stage]
-            output_state = _golden_nodes()[stage](input_state)
+            # Some production nodes mutate nested state before returning a
+            # partial update. Keep the frozen input pristine and capture the
+            # returned/mutated copy as the real node output.
+            output_state = _golden_nodes()[stage](copy.deepcopy(input_state))
             output_delta = _diff(input_state, output_state, allow_removals=True)
             node_outputs[stage] = None if output_delta is _NO_CHANGE else output_delta
 
@@ -1059,7 +1089,9 @@ def _collect_golden() -> dict[str, Any]:
             post_compose, limited_state, encode_removals=True,
         )
         node_outputs["compose_limited_report"] = _diff(
-            limited_state, compose_limited_report(limited_state), allow_removals=True,
+            limited_state,
+            compose_limited_report(copy.deepcopy(limited_state)),
+            allow_removals=True,
         )
         broken_artifact = {**post_compose["artifact"], "title": ""}
         repair_state = {
@@ -1076,11 +1108,13 @@ def _collect_golden() -> dict[str, Any]:
             post_compose, repair_state, encode_removals=True,
         )
         node_outputs["repair_artifact"] = _diff(
-            repair_state, repair_artifact(repair_state), allow_removals=True,
+            repair_state,
+            repair_artifact(copy.deepcopy(repair_state)),
+            allow_removals=True,
         )
 
     return {
-        "format": "golden-v2-delta",
+        "format": "golden-v3-ops",
         "initial_state": initial,
         "stream_order": stream_order,
         # The off-path synthetic inputs are deltas against this streamed
@@ -1188,9 +1222,11 @@ def test_golden_node_samples_reproduce_frozen_behavior():
             # Nodes emit partial updates; the frozen output is the full
             # post-node state, so compare against the live partial merged
             # onto the input (nested dicts merge, see _apply).
-            live_merged = _apply(frozen_input, _diff(
-                frozen_input, _golden_nodes()[stage](frozen_input), allow_removals=True,
-            ))
+            live_output = _golden_nodes()[stage](copy.deepcopy(frozen_input))
+            live_merged = _apply(
+                frozen_input,
+                _diff(frozen_input, live_output, allow_removals=True),
+            )
             assert _dump(live_merged) == _dump(frozen_output), (
                 f"{stage} output drifted from the frozen sample"
             )
@@ -1201,9 +1237,11 @@ def test_golden_node_samples_reproduce_frozen_behavior():
         for stage in ("compose_limited_report", "repair_artifact"):
             frozen_input = _apply(off_path_base, node_inputs[stage])
             frozen_output = _apply(frozen_input, node_outputs[stage])
-            live_merged = _apply(frozen_input, _diff(
-                frozen_input, _golden_nodes()[stage](frozen_input), allow_removals=True,
-            ))
+            live_output = _golden_nodes()[stage](copy.deepcopy(frozen_input))
+            live_merged = _apply(
+                frozen_input,
+                _diff(frozen_input, live_output, allow_removals=True),
+            )
             assert _dump(live_merged) == _dump(frozen_output), (
                 f"{stage} output drifted from the frozen sample"
             )
@@ -1218,7 +1256,7 @@ def test_golden_fixture_samples_come_from_real_v1_nodes():
     expected_stages = set(_GOLDEN_REAL_STAGES) | {
         "compose_limited_report", "repair_artifact",
     }
-    assert golden["format"] == "golden-v2-delta"
+    assert golden["format"] == "golden-v3-ops"
     assert golden["off_path_base"] == "validate_schema"
     # node_inputs carries the chained stream increments for every stream
     # stage (stubs included — their output flows into the next input) plus

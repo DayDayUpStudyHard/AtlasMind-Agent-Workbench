@@ -207,3 +207,52 @@ builder.add_edge("targeted_retrieval", "compose_limited_report")
 
 - FULFILLMENT_CHECK / TIMELINE_EXTRACTION 仍走占位计分（100%），待补真实计分器
 - IN-* 中"争议/不一致"类期望（如 IN-164）依赖产物中有显式 discrepancy 报告才能计分，当前 group reason 未纳入提取面
+
+---
+
+## 2026-08-15：第四轮验收修复 — LIMITED 配额结算 / 详情页工作流终态 / LLM 真实计量（e4c207e）
+
+### 问题
+
+1. **LIMITED 配额结算死循环**：结算任务对 LIMITED 调用 `confirm()`，但 `QuotaService.confirm()` 状态集只含 `COMPLETED` → 每次调度都抛"Run 状态不允许额度变更"，预扣额度永久悬挂。
+2. **详情页只认 COMPLETED**：Python 已将工作流终态写成 LIMITED，但 `ContractCaseView` 的 `workflowIsComplete`/`reviewDone` 等只把 COMPLETED 视为完成，风险审查与"分析就绪"阶段一直显示待处理，状态文案也没有 LIMITED。
+3. **LLM 计量低估真实消耗**：图节点固定记 1 次 LLM 调用，但底层 `_call_llm_with_retry` 最多 4 次尝试，结构化解析失败还会再走一轮非结构化调用；token 统计被最后一次响应覆盖。真实调用可超预算却仍判预算内。
+
+### 修复
+
+1. **配额结算**（[QuotaService.java](agent-server/src/main/java/com/atlasmind/service/QuotaService.java)）：`confirm()` 状态集 → `("COMPLETED","LIMITED")`（受限报告=真实消耗，确认而非退还）；QuotaServiceTest 新增 `limitedRunConsumesReservedQuotaExactlyOnce`。
+2. **详情页**（[ContractCaseView.vue](agent-front/src/views/ContractCaseView.vue)）：`workflowIsComplete`/`parseDone`/`reviewDone`/`hasCompletedRun` 均视 LIMITED 为终态；`workflowStatusLabel/Class` 新增"范围受限"+ warn 徽章。
+3. **LLM 真实计量**（[llm_service.py](tools/chat-assistant/backend/app/services/llm_service.py)）：`_call_llm_with_retry` 新增 `usage_out` 累计——`calls` 计每次真实 API 尝试（重试与结构化→非结构化回退都算），token 键跨响应累加；`_structured_completion` 透传；[retrieval.py](tools/chat-assistant/backend/app/agent_runtime/graph/nodes/retrieval.py) 按真实次数/累计 token 记账。单测：3 次尝试记 3 次、两阶段回退记 2 次且 token 累加。
+
+### 验证结果
+
+- Python 263/263（+3 新测试）、Java 43/43（QuotaServiceTest 5/5）、agent-front 构建通过、`git diff --check` 通过
+
+### 影响范围
+
+- `QuotaService.java` / `QuotaServiceTest.java` — confirm 状态集 + 测试
+- `ContractCaseView.vue` — 工作流终态判定 + 状态文案/样式
+- `llm_service.py` / `retrieval.py` / `tests/test_llm_service.py` — usage_out 累计计量
+
+---
+
+## 2026-08-15：Golden delta 操作格式重构 — 删除标记值碰撞根除 + 捕获浅拷贝修复
+
+### 问题
+
+1. Golden 增量里删除键用哨兵值编码：第一版字符串 `"!golden-removed!"` 会与恰好相同的业务内容碰撞，第二版单键字典 `{"__golden_removed__": true}` 仍有理论碰撞面（业务值恰好等于该字典）。
+2. Golden 捕获时把节点输入 shallow-copy 交给真实节点：`prepare_human_review` 等节点原地修改嵌套结构（artifact dict）时，冻结输入被污染，掩盖了节点真实输出与输入之间的差异。
+
+### 修复
+
+1. **显式 set/remove 操作格式**（[test_task_spec_builder.py](tools/chat-assistant/backend/tests/test_task_spec_builder.py)）：delta 改为 `{"format": "golden-delta-ops-v1", "set": [[path, value], ...], "remove": [[path], ...]}`——变更全部编码在路径层，业务值作为 `value` 下的**不透明载荷**保存，任何 JSON 值都不再可能被误判为删除标记；`_apply` 按操作序重放（remove 先于 set，根路径只允许 set）。新增回归测试：两个历史标记值的精确拷贝 + 邻键真实删除可无损往返。
+2. **捕获深拷贝修复**：`_collect_golden` 真实节点重放改为 `node(copy.deepcopy(input_state))`——原地修改留在输出副本上，冻结输入保持 pristine。
+
+### 验证结果
+
+- Golden 定向测试 33/33、Python 263/263、`git diff --check` 通过；fixture 重新生成 517,361B（仍为原始 1.94MB 的约 1/4）
+
+### 影响范围
+
+- `tests/test_task_spec_builder.py` — delta 格式/`_diff`/`_apply`/捕获深拷贝/回归测试
+- `tests/golden/contract_review_v1_golden_artifact.json` — 重新生成
