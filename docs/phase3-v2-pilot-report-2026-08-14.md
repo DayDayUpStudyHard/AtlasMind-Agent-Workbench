@@ -2,8 +2,8 @@
 
 > 日期：2026-08-14
 > 对应 PRD：§15（contract_review 高召回 DAG 试点）
-> 代码版本：4574097
-> 状态：手动评测进行中，但 runs 33/35（标称 langgraph_v2）已作废——API 服务进程为 02:09 启动的老进程，其加载的 dispatch 不认识 `langgraph_v2`，静默回退 Legacy 执行（详见 §3.5 事故记录）。主回归集 v1 基线 = run 25（有效，独立进程驱动）。评测改由独立脚本进程驱动（天然加载最新代码）：runs 30（主回归集 dataset 9, langgraph_v2）/ 31（golden dataset 20, langgraph）/ 32（golden dataset 20, langgraph_v2）正在后台运行。首轮启动（17:05）后因 embedding/reranker 供应商并发劣化每例 ~10min，18:15 已加检索扇出限流（`_CHANNEL_FANOUT_LIMIT=3`）并重启，预期每例 ~4min；首轮已跑的 5 例作废清除。
+> 代码版本：6239e4d
+> 状态：**部分评测**——run 30（主回归集 dataset 9, langgraph_v2）以 6/30 例部分结果终止（20:38 用户因耗时叫停，第 7 例中止，前 6 例有效）；runs 33/35（标称 langgraph_v2）已作废（API 老进程静默回退 Legacy，详见 §3.5）。v1 基线 = run 25（30 例完整，独立进程驱动）。runs 31/32（golden 2 例对照）未执行，保持 QUEUED。限流（`_CHANNEL_FANOUT_LIMIT=3`，6239e4d）消除了供应商超时税但**未达提速预期**：实测 12.3min/例 vs v1 2.4min/例（详见 §3.1/§3.4）。
 
 ---
 
@@ -57,20 +57,34 @@ load_run_context → freeze_case_snapshot → inventory_clauses
 
 ### 3.1 主回归集（dataset 9，30 例）
 
-| 指标 | v1 基线（run 25，冻结代码） | v2 试点（run 30） | 变化 |
+> ⚠️ v2 列为**部分结果**：2026-08-14 20:38 用户因耗时叫停，run 30 只完成前 6 例（case 121-126）即终止，第 7 例中止。v2 列分母为 6 例，不能直接与 v1 全量 30 例对比；下附同 6 例对齐对比。
+
+| 指标 | v1 基线（run 25，30 例全量） | v2 试点（run 30，6/30 部分） |
+|---|---|---|
+| highRiskRecall | 0.6167 | 0.9167（部分） |
+| dualCitationRate | 0.3694 | 0.3906（部分） |
+| falsePositiveRate | 0.0 | 0.0 |
+| schemaValidRate | 1.0 | 1.0 |
+| passed/caseCount | 30/30 | 6/6（部分） |
+| FULL/LIMITED 比例 | 1/29（limited 96.7%） | 0/6（limited 100%） |
+| 平均耗时/例 | 145.7s（91-256s） | 739.8s（372-1182s） |
+| infraFailedCount | 0 | 0（第 7 例系手动中止，不计入） |
+
+**同 6 例对齐（case 121-126，两版都跑过）：**
+
+| 指标 | v1（run 25 前 6 例） | v2（run 30 前 6 例） | 变化 |
 |---|---|---|---|
-| highRiskRecall | 待填 | 待填 | — |
-| dualCitationRate | 待填 | 待填 | — |
-| falsePositiveRate | 待填 | 待填 | — |
-| schemaValidRate | 待填 | 待填 | — |
-| passed/caseCount | 待填 | 待填 | — |
-| FULL/LIMITED 比例 | 待填 | 待填 | — |
-| 平均耗时/例 | 待填 | 待填 | — |
-| infraFailedCount | 待填 | 待填 | — |
+| highRiskRecall | 0.9167 | 0.9167 | 持平 |
+| dualCitationRate | 0.3222 | 0.3906 | **+21%** |
+| falsePositiveRate | 0.0 | 0.0 | 持平 |
+| schemaValidRate | 1.0 | 1.0 | 持平 |
+| 平均耗时/例 | ~150s | 739.8s | **慢 5.1×** |
+
+> 注意：前 6 例是数据集最容易的一批（v1 对其中 5 例 recall 已是 1.0）。v1 全量 recall 0.6167 的低分集中在后续用例（128/136/138-142/144/146/147 等 10 例 hr=0），v2 能否在这些难例上提升召回**未被本次部分评测覆盖**。双引用率 +21% 是 v2 在相同用例上的一个温和正向信号。
 
 ### 3.2 Golden 回归集（dataset 20，2 例）
 
-> ⚠️ 已作废：run 33（标称 langgraph_v2）经 agent_run_trace 查证实际执行的是 Legacy 六阶段流水线（trace 为 TOOL_REQUESTED/PLAN_CREATED/REFLECTION，无 GRAPH_NODE），run 34 才是真 v1 图（18×GRAPH_NODE）。下表数据不能作为 v2 证据，待重启 API 服务后重跑。
+> ⚠️ 已作废：run 33（标称 langgraph_v2）经 agent_run_trace 查证实际执行的是 Legacy 六阶段流水线（trace 为 TOOL_REQUESTED/PLAN_CREATED/REFLECTION，无 GRAPH_NODE），run 34 才是真 v1 图（18×GRAPH_NODE）。下表数据不能作为 v2 证据。golden 对照 runs 31/32 因评测叫停未执行（保持 QUEUED）。
 
 | 用例 | v1（run 34） | 标称 v2（run 33，实际 Legacy，作废） |
 |---|---|---|
@@ -119,12 +133,25 @@ load_run_context → freeze_case_snapshot → inventory_clauses
 - **900s 超时杀（已修复）**：recovery.py 规则 #2 原按 create_time+900s 杀 active 状态的 run，与评测配置 caseTimeoutSeconds=2400 无关、心跳不豁免。行 747（case 1 第一次尝试）被 12:20 版驱动的 900s 超时杀死。已修复：规则 #2 改为**心跳失联判定**（`find_timed_out_runs(require_stale_heartbeat=True)`）——持续心跳的 run 即使超过 900s 也视为存活，仅当心跳也丢失（或本无心跳的旧派发路径）才按超时杀；僵尸扫描（60s 心跳失联）不受影响。修复后手动评测与生产 >15min 的 run 不再被误杀。
 - **GraphAdapter 心跳**：graph 派发无心跳导致跨进程误杀，已修复（15s 自终止心跳循环）+ 独立驱动脚本内禁用本进程 RunRecovery 扫描器。
 - **langgraph_v2 静默回退 Legacy（2026-08-14 16:51 发现）**：API 服务进程 02:09 启动时，v2 试点代码（12:21 提交）与 `dispatch_with_mode` 的 `langgraph_v2` 分支（15:26 提交）均不存在；老 dispatch 对未知 mode 走 `else → legacy`。经 UI 发起的 runs 33/35（标称 langgraph_v2）因此实际执行 Legacy 六阶段流水线——trace 证据：33/35 的用例 run 只有 TOOL_REQUESTED/PLAN_CREATED/REFLECTION 事件，34（langgraph）有 18×GRAPH_NODE。run 35 的 recall 30% 是 Legacy 在主回归集上的成绩，不是 v2。修复动作：重启 API 服务加载当前代码（新 dispatch 有 langgraph_v2 分支），重跑 runs 33/35。
+- **限流信号量跨事件循环崩溃（18:15-18:30）**：首版限流用 asyncio.Semaphore，但 graph 节点经 `_run_async` 每次在新线程的新事件循环里调用 `retrieve_sync`，信号量绑定首个循环后拒绝后续调用，全部检索通道报 "bound to a different event loop"。已修复为 threading.Semaphore + run_in_executor 非阻塞 acquire（6239e4d），并补跨线程单测复现该拓扑。
+- **限流未达提速预期（19:18-20:38 实测）**：window=3 限流消除了 embedding/reranker 超时风暴，但实测 v2 每例 739.8s（372-1182s），与限流前 616s 相比无改善、甚至更慢。**结论：并发劣化不是主瓶颈**——排队成本抵消了省下的超时税，真正的时间在 LLM 分析层（6 域分析 + OmissionAuditor + 两轮 reanalyze）与定向回补轮次本身。对照 v1（无定向回补轮次）每例仅 145.7s。
+- **评测手动中止（20:38）**：用户因耗时叫停，run 30 于第 7/30 例处终止。DB 已落终态：第 7 例 agent_run 807 由心跳失联规则 FAILED；run 30 置 FAILED（current_step 注明手动中止），summary_json 回填 actualRuntimeEngine=langgraph/contract_review/v2（无 mismatch）与 partialMetrics（前 6 例）。runs 31/32 未执行，保持 QUEUED。
 
 ---
 
 ## 4. 结论
 
-待填（用户手动评测后补录）：召回是否过线（PRD §22 门槛）、v2 是否具备转默认条件、Phase 4 通用 Harness 是否放行。
+**部分结论（6/30 例，2026-08-14 20:38 叫停后）**：
+
+1. **召回**：相同前 6 例上 v2 与 v1 持平（0.9167），未观察到 v2 架构带来的召回增益——但这 6 例是数据集易例（v1 对 5/6 例本就 recall=1.0），v1 的丢分难例全在后面，v2 能否改善难例召回**未被覆盖**，不能下结论。
+2. **双引用**：v2 在同 6 例上 +21%（0.3906 vs 0.3222），温和正向信号，与"首轮+定向证据 UNION"的设计预期一致。
+3. **误报/结构**：两版 FPR=0、schema 100%，v2 的负向门禁没有引入新问题。
+4. **耗时（否决项）**：v2 每例 12.3min，是 v1（2.4min）的 5.1 倍。限流已排除检索扇出并发为根因，主耗时在 LLM 分析层与定向回补轮次。**在耗时问题解决前，v2 不具备转默认条件。**
+5. **Phase 4**：不放行，维持原计划（等 Phase 3 评测过线）。
+
+后续方向（待用户决策，评测结论收尾前不动 v2 检索/分析逻辑）：
+- 定向回补收敛性：两轮 targeted_retrieval + reanalyze 是 v2 与 v1 的最大结构性差异，也是 5× 耗时的主要来源；观察回补是否收敛、能否单轮化
+- 若继续评测：runs 31/32（golden 对照）仍为 QUEUED，可直接驱动；run 30 需重建后从第 7 例续跑
 
 评测执行方式备忘（供手动评测）：
 - 评测驱动脚本 scripts/run_v2_evals.py / run_baseline_evals.py（独立进程、自带 RunRecovery 禁用、每例超时由 features caseTimeoutSeconds 控制）；
