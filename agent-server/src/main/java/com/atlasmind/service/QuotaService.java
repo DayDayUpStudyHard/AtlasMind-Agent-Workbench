@@ -12,7 +12,7 @@ import java.util.Set;
  * 合同分析额度服务 — 两阶段预扣机制。
  * <p>
  * reserve → 发起 Agent Run 时预扣 1 次额度（reserved+1）
- * confirm → Run 成功时确认消耗（reserved-1, used+1）
+ * confirm → Run 成功（含 LIMITED 范围受限交付）时确认消耗（reserved-1, used+1）
  * refund  → Run 失败时退还（reserved-1）
  * adjust  → 管理员调整总额
  * <p>
@@ -62,13 +62,14 @@ public class QuotaService {
     }
 
     /**
-     * 确认：Agent Run 成功后调用。幂等：同一 runId 多次 confirm 只生效一次。
+     * 确认：Agent Run 成功后调用（LIMITED 交付了受限报告，同样真实消耗额度——
+     * 确认而非退还）。幂等：同一 runId 多次 confirm 只生效一次。
      */
     @Transactional
     public void confirm(Long userId, Long runId) {
         String idempotencyKey = "run:" + runId + ":CONFIRM";
 
-        lockAndValidateRun(userId, runId, Set.of("COMPLETED"));
+        lockAndValidateRun(userId, runId, Set.of("COMPLETED", "LIMITED"));
 
         var quotaRows = jdbc.queryForList(
             "SELECT reserved_count FROM user_quota WHERE user_id=? FOR UPDATE", userId);

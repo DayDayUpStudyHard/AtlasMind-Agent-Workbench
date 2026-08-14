@@ -1659,9 +1659,11 @@ const extractionSnapshotModeLabel = computed(() => {
   if (extractionSnapshot.value?.id) return '旧版结构化结果'
   return '尚未生成要素快照'
 })
-const workflowIsComplete = computed(() =>
-  String(analysisWorkflow.value?.status || '').toUpperCase() === 'COMPLETED'
-)
+const workflowIsComplete = computed(() => {
+  // LIMITED is terminal too — a scoped report was delivered; the stages
+  // must not sit at "待处理" while the run already finished.
+  return ['COMPLETED', 'LIMITED'].includes(String(analysisWorkflow.value?.status || '').toUpperCase())
+})
 const riskReviewRunActive = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .some(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW'
     && ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
@@ -2025,7 +2027,7 @@ const analysisStages = computed(() => {
   const workflow = analysisWorkflow.value || {}
   const status = String(workflow.status || '').toUpperCase()
   const current = String(workflow.currentStage || '').toUpperCase()
-  const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED'].includes(status)
+  const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED', 'LIMITED'].includes(status)
     || ['HUMAN_CONFIRMATION', 'FACT_EXTRACTION', 'TIMELINE_EXTRACTION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
   const extractionDone = Boolean(extractionSnapshot.value?.id)
   const extractionActive = extractionRunActive.value
@@ -2033,7 +2035,7 @@ const analysisStages = computed(() => {
   const timelineDone = timelineExtractionDone.value
   const timelineActive = timelineExtractionRunActive.value
   const timelineFailed = String(workflow.timelineStatus || '').toUpperCase() === 'FAILED'
-  const reviewDone = status === 'COMPLETED' || current === 'REPORT_READY'
+  const reviewDone = ['COMPLETED', 'LIMITED'].includes(status) || current === 'REPORT_READY'
   const reviewActive = riskReviewRunActive.value || status === 'REVIEWING'
   const failedStage = status === 'FAILED' ? current : ''
   return [
@@ -2493,9 +2495,10 @@ function hasReportOfTypes(types) {
 
 function hasCompletedRun(runType) {
   const targetType = String(runType || '').toUpperCase()
+  // LIMITED delivered a (scoped) report — a finished task, not a pending one.
   return (Array.isArray(c.value.runs) ? c.value.runs : [])
     .some(run => String(run?.runType || '').toUpperCase() === targetType
-      && String(run?.status || '').toUpperCase() === 'COMPLETED')
+      && ['COMPLETED', 'LIMITED'].includes(String(run?.status || '').toUpperCase()))
 }
 async function scrollToSection(section) {
   const targetSection = workbenchTabForSection(section)
@@ -3452,8 +3455,8 @@ function runtimeLabel(run) {
   if (run?.model) parts.push(run.model)
   return parts.join(' · ')
 }
-function workflowStatusLabel(s) { return { PARSING:'文档处理中', WAITING_CONFIRMATION:'待人工确认', READY_FOR_REVIEW:'待风险审查', REVIEWING:'风险审查中', COMPLETED:'分析完成', FAILED:'需要处理' }[s] || '分析流程' }
-function workflowStatusClass(s) { return { PARSING:'active', WAITING_CONFIRMATION:'attention', READY_FOR_REVIEW:'ready', REVIEWING:'active', COMPLETED:'done', FAILED:'error' }[s] || '' }
+function workflowStatusLabel(s) { return { PARSING:'文档处理中', WAITING_CONFIRMATION:'待人工确认', READY_FOR_REVIEW:'待风险审查', REVIEWING:'风险审查中', COMPLETED:'分析完成', LIMITED:'范围受限', FAILED:'需要处理' }[s] || '分析流程' }
+function workflowStatusClass(s) { return { PARSING:'active', WAITING_CONFIRMATION:'attention', READY_FOR_REVIEW:'ready', REVIEWING:'active', COMPLETED:'done', LIMITED:'warn', FAILED:'error' }[s] || '' }
 function findingStatusLabel(s) { return { OPEN:'未处理', REMEDIATED:'已修改', ACCEPTED_EXCEPTION:'已接受例外', DISMISSED:'已驳回' }[s] || s }
 function severityLabel(s) { return { HIGH:'高危', MEDIUM:'中危', LOW:'低危' }[s] || s || '中危' }
 function riskStatusLabel(s) { return { LOW_RISK:'低风险', MEDIUM_RISK:'中风险', HIGH_RISK:'高风险' }[s] || s || '未评分' }
@@ -3611,7 +3614,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .analysis-workflow-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:17px}
 .analysis-workflow-head p{margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
 .workflow-status{flex:0 0 auto;padding:5px 8px;border-radius:3px;font-size:10px;font-weight:900}
-.workflow-status.active{color:#315d8b;background:#edf4fa}.workflow-status.attention{color:#8a5b14;background:#fff4db}.workflow-status.ready{color:#246744;background:#eaf6ef}.workflow-status.done{color:#246744;background:#dceee3}.workflow-status.error{color:#a33f39;background:#fff0ee}
+.workflow-status.active{color:#315d8b;background:#edf4fa}.workflow-status.attention{color:#8a5b14;background:#fff4db}.workflow-status.ready{color:#246744;background:#eaf6ef}.workflow-status.done{color:#246744;background:#dceee3}.workflow-status.warn{color:#8a5b14;background:#fff4db}.workflow-status.error{color:#a33f39;background:#fff0ee}
 .analysis-workflow-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:15px}
 .analysis-workflow-stage{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:10px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:3px}
 .workflow-stage-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:3px;background:#e9edf0;color:var(--atlas-subtle);font-size:10px;font-weight:900}

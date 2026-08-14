@@ -2321,10 +2321,14 @@
             }
           }
         },
-        "downgradedCount": "!golden-removed!",
+        "downgradedCount": {
+          "__golden_removed__": true
+        },
         "missingDomains": [],
         "partialDomains": [],
-        "rejectedCount": "!golden-removed!",
+        "rejectedCount": {
+          "__golden_removed__": true
+        },
         "retryable": false,
         "status": "CONFIRMED",
         "summary": {
@@ -2336,7 +2340,9 @@
           "partialDomains": 0,
           "totalDomains": 6
         },
-        "validatedCount": "!golden-removed!"
+        "validatedCount": {
+          "__golden_removed__": true
+        }
       },
       "current_node": "coverage_reflection",
       "reflection": {

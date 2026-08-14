@@ -917,10 +917,12 @@ def _stream_run(graph) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[
 
 
 _NO_CHANGE = object()  # internal sentinel — never serialized
-# Marks a key deleted between two streamed states. A string (not an object)
-# so it survives the fixture's JSON round-trip; chosen to be impossible as
-# real content, and only ever interpreted inside _apply.
-_REMOVED = "!golden-removed!"
+# Marks a key deleted between two streamed states. A typed object marker, not
+# a scalar string: _apply only treats a delta value as a removal when it is
+# EXACTLY this single-key dict, so real business content (even the string a
+# scalar marker would have collided with) is never misread. Survives the
+# fixture's JSON round-trip unchanged.
+_REMOVED = {"__golden_removed__": True}
 
 
 def _diff(
@@ -966,7 +968,7 @@ def _apply(base: Any, delta: Any) -> Any:
     if isinstance(delta, dict) and isinstance(base, dict):
         result = dict(base)
         for key, value in delta.items():
-            if value == _REMOVED:
+            if isinstance(value, dict) and value == _REMOVED:
                 result.pop(key, None)
             elif isinstance(value, dict):
                 result[key] = _apply(
@@ -976,6 +978,29 @@ def _apply(base: Any, delta: Any) -> Any:
                 result[key] = value
         return result
     return delta
+
+
+def test_golden_removal_marker_never_collides_with_content():
+    """The removal marker is a typed object, not a scalar: only a delta value
+    EXACTLY equal to {__golden_removed__: True} removes a key. Real content
+    that merely contains the marker key — or equals the old scalar string —
+    replays unchanged."""
+    base = {
+        "nested": {
+            "kept": {"__golden_removed__": True, "real": 1},
+            "literal": "!golden-removed!",
+            "gone": 1,
+        },
+        "top": "!golden-removed!",
+    }
+    delta = {"nested": {"gone": _REMOVED}}
+
+    applied = _apply(base, delta)
+
+    assert "gone" not in applied["nested"]
+    assert applied["nested"]["kept"] == {"__golden_removed__": True, "real": 1}
+    assert applied["nested"]["literal"] == "!golden-removed!"
+    assert applied["top"] == "!golden-removed!"
 
 
 def _collect_golden() -> dict[str, Any]:

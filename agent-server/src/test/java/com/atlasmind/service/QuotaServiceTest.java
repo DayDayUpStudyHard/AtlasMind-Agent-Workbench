@@ -74,6 +74,22 @@ class QuotaServiceTest {
     }
 
     @Test
+    void limitedRunConsumesReservedQuotaExactlyOnce() {
+        // LIMITED runs delivered a scoped report — real quota consumed,
+        // confirm (never refund) so the scheduled settlement job releases
+        // the reservation instead of failing on every pass.
+        createRun(20L, 1L, "CREATED");
+        quotaService.reserve(1L, 20L);
+        jdbc.update("UPDATE agent_run SET status='LIMITED' WHERE id=20");
+
+        quotaService.confirm(1L, 20L);
+        quotaService.confirm(1L, 20L);
+
+        assertQuota(1, 0);
+        assertThat(transactionCount(20L, "CONFIRM")).isEqualTo(1);
+    }
+
+    @Test
     void failedRunRefundsReservedQuotaExactlyOnce() {
         createRun(11L, 1L, "CREATED");
         quotaService.reserve(1L, 11L);

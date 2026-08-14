@@ -616,9 +616,10 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
             rule for rule in rule_findings
             if str(rule.get("clauseType") or "OTHER").upper() in allowed
         ]
-        # §7.2: the LLM surfaces its token usage through this dict; the
-        # caller records it in the per-WorkUnit ledger (one llm_call per
-        # analyzed domain, attempt or not).
+        # §7.2: the LLM surfaces its real consumption through this dict —
+        # `calls` counts every API attempt (retries + the structured→
+        # unstructured fallback) and `tokens` sums across all responses;
+        # the caller records them in the per-WorkUnit ledger.
         usage_out: dict[str, int] = {}
         try:
             from app.services.llm_service import LLMService
@@ -661,7 +662,8 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
             results[key] = (findings, status, conclusion)
             record_unit_usage(
                 usage, key,
-                llm_calls=1, tokens=int(call_usage.get("tokens") or 0),
+                llm_calls=int(call_usage.get("calls") or 0),
+                tokens=int(call_usage.get("tokens") or 0),
             )
 
     draft: list[dict[str, Any]] = []

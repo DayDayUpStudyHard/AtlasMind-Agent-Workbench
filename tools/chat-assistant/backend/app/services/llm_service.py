@@ -326,12 +326,18 @@ class LLMService:
 
     # ── retry helper ─────────────────────────────────────────────────
 
-    def _call_llm_with_retry(self, fn, max_retries: int = 3, backoff_base: float = 2.0):
+    def _call_llm_with_retry(self, fn, max_retries: int = 3, backoff_base: float = 2.0,
+                             usage_out: dict[str, int] | None = None):
         """Call *fn()* with exponential backoff retry + circuit breaker.
 
         *fn* is a zero-argument callable that performs a single LLM API call.
         Returns the result on success.  Raises the last exception after all
         retries are exhausted or the circuit breaker is open.
+
+        ``usage_out`` accumulates real consumption when given (§7.2 ledger):
+        ``calls`` counts every ``fn()`` attempt — retries and fallback phases
+        are real API calls, not free — and the token keys sum across every
+        successful response instead of being overwritten by the last one.
 
         Connection errors (APIConnectionError) are retried at most once — if the
         LLM is unreachable, waiting 2+4+8s is worse than failing fast so the
@@ -339,6 +345,19 @@ class LLMService:
         """
         if _llm_circuit_breaker.is_open:
             raise RuntimeError("LLM circuit breaker is open - skipping call")
+
+        if usage_out is not None:
+            original = fn
+
+            def fn():
+                usage_out["calls"] = usage_out.get("calls", 0) + 1
+                result = original()
+                usage = getattr(result, "usage", None)
+                if usage is not None:
+                    usage_out["tokens"] = usage_out.get("tokens", 0) + int(getattr(usage, "total_tokens", 0) or 0)
+                    usage_out["promptTokens"] = usage_out.get("promptTokens", 0) + int(getattr(usage, "prompt_tokens", 0) or 0)
+                    usage_out["completionTokens"] = usage_out.get("completionTokens", 0) + int(getattr(usage, "completion_tokens", 0) or 0)
+                return result
 
         last_exc = None
         effective_max = max_retries
@@ -1321,17 +1340,15 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                 # This path is only used for bounded, schema-validated tasks.
                 kwargs["extra_body"] = {"thinking": {"type": "disabled"}}
             try:
+                # usage_out accumulates across the retry loop AND the
+                # structured→unstructured fallback below — the §7.2 ledger
+                # wants real API calls, not logical invocations.
                 response = self._call_llm_with_retry(
                     lambda kwargs=kwargs: client.chat.completions.create(**kwargs),
                     max_retries=3,
                     backoff_base=2.0,
+                    usage_out=usage_out,
                 )
-                if usage_out is not None:
-                    usage = getattr(response, "usage", None)
-                    if usage is not None:
-                        usage_out["tokens"] = int(getattr(usage, "total_tokens", 0) or 0)
-                        usage_out["promptTokens"] = int(getattr(usage, "prompt_tokens", 0) or 0)
-                        usage_out["completionTokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
                 return self._parse_structured_response(response, required_key)
             except AuthenticationError:
                 raise
