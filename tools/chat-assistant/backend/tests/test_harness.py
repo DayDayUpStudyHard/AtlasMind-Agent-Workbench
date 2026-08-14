@@ -583,3 +583,52 @@ def test_v1_deduplicate_evidence_caps_at_limit():
     assert len(_deduplicate_evidence(items, limit=2)) == 2
     assert len(_deduplicate_evidence(items, limit=18)) == 5
     assert len(_deduplicate_evidence(items)) == 5  # default limit 18 unchanged
+
+
+# ─────────────── PRD Phase 4 task 6: runtime fakes self-test ─────────────────
+
+
+def test_fake_llm_scripts_by_exact_prompt_and_records():
+    from app.agent_runtime.harness.fakes import FakeLLM
+
+    llm = FakeLLM(
+        {"起草一份报告": '{"reportType": "X"}'},
+        fallback='{"reportType": "FALLBACK"}',
+    )
+    assert llm.complete_json("起草一份报告") == {"reportType": "X"}
+    assert llm.complete_json("别的提示") == {"reportType": "FALLBACK"}
+    assert llm.calls == ["起草一份报告", "别的提示"]
+    # exact-prompt keying means callers can script per-round replies
+    llm.complete("起草一份报告")
+    assert llm.calls.count("起草一份报告") == 2
+
+    def exercise():
+        with pytest.raises(ValueError):
+            FakeLLM(fallback="not-json").complete_json("任意提示")
+
+    exercise()
+
+
+def test_fake_persistence_records_runtime_contract_writes():
+    from app.agent_runtime.harness.fakes import FakePersistence
+
+    async def exercise():
+        store = FakePersistence(default_status="CREATED")
+        assert (await store.get_run(9))["status"] == "CREATED"
+        await store.update_run(9, status="COMPLETED")
+        await store.heartbeat(9)
+        await store.set_runtime_metadata(
+            9, runtime_engine="langgraph", graph_name="g", graph_version="v2",
+            model="m", prompt_version="p",
+        )
+        assert store.updates == [(9, {"status": "COMPLETED"})]
+        assert store.heartbeats == [9]
+        assert store.metadata[0] == (9, {
+            "runtime_engine": "langgraph", "graph_name": "g",
+            "graph_version": "v2", "model": "m", "prompt_version": "p",
+        })
+        # raise_on models transient persistence failures
+        with pytest.raises(RuntimeError):
+            await FakePersistence(raise_on="heartbeat").heartbeat(1)
+
+    _run(exercise())

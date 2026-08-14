@@ -3,10 +3,15 @@
 No DB, no ES, no settings access — scripted hits and failure modes only. The
 orchestrator depends solely on the ChannelAdapter protocol and an injectable
 reranker, so tests assemble a full pipeline from these fakes.
+
+FakeLLM / FakePersistence extend the same idea to the graph runtime
+(PRD Phase 4 task 6): scripted completions and scripted run rows, so
+lifecycle contract tests never touch the LLM service or MySQL.
 """
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .retrieval import ChannelResult
@@ -158,3 +163,95 @@ def fake_snapshot(
         "currentDocument": {"id": document_id, "version": document_version},
         "confirmedIntake": confirmed_intake or {},
     }
+
+
+class FakeLLM:
+    """Scripted completion model: response per exact prompt key, one shared
+    fallback otherwise, with call recording.
+
+    ``responses`` maps the full prompt string to the scripted reply.
+    ``complete_json`` parses the reply as JSON (fallback must be valid JSON
+    when used that way). Callers model degradation by setting a fallback that
+    a downstream deterministic path can consume.
+    """
+
+    def __init__(
+        self,
+        responses: dict[str, str] | None = None,
+        *,
+        fallback: str = "{}",
+        recorder: list[str] | None = None,
+    ) -> None:
+        self._responses = dict(responses or {})
+        self._fallback = fallback
+        self._recorder = recorder
+        self.calls: list[str] = []
+
+    def complete(self, prompt: str) -> str:
+        self.calls.append(prompt)
+        if self._recorder is not None:
+            self._recorder.append(prompt)
+        return self._responses.get(prompt, self._fallback)
+
+    def complete_json(self, prompt: str) -> dict[str, Any]:
+        value = json.loads(self.complete(prompt))
+        if not isinstance(value, dict):
+            raise ValueError(f"FakeLLM scripted reply for {prompt!r} is not a JSON object")
+        return value
+
+
+class FakePersistence:
+    """Scripted run-store for runtime lifecycle tests.
+
+    Implements the subset GraphAdapter / RunRecovery touch: ``get_run``,
+    ``update_run``, ``heartbeat``, ``set_runtime_metadata``. Statuses come
+    from a scripted mapping (per run_id) with a shared default; every write
+    is recorded so contract tests can assert *what* was persisted.
+    """
+
+    def __init__(
+        self,
+        statuses: dict[int, str] | None = None,
+        *,
+        default_status: str = "RUNNING",
+        raise_on: str | None = None,
+    ) -> None:
+        self._statuses = dict(statuses or {})
+        self._default_status = default_status
+        self._raise_on = raise_on  # method name to fail, e.g. "heartbeat"
+        self.runs: dict[int, dict[str, Any]] = {}
+        self.heartbeats: list[int] = []
+        self.metadata: list[tuple[int, dict[str, Any]]] = []
+        self.updates: list[tuple[int, dict[str, Any]]] = []
+
+    def _maybe_raise(self, method: str) -> None:
+        if self._raise_on == method:
+            raise RuntimeError(f"FakePersistence {method} failure")
+
+    async def get_run(self, run_id: int) -> dict[str, Any] | None:
+        self._maybe_raise("get_run")
+        status = self._statuses.get(run_id, self._default_status)
+        self.runs.setdefault(run_id, {})["status"] = status
+        return {"id": run_id, "status": status}
+
+    async def update_run(self, run_id: int, **kwargs: Any) -> None:
+        self._maybe_raise("update_run")
+        self.updates.append((run_id, kwargs))
+        self.runs.setdefault(run_id, {}).update(kwargs)
+
+    async def heartbeat(self, run_id: int) -> None:
+        self._maybe_raise("heartbeat")
+        self.heartbeats.append(run_id)
+
+    async def set_runtime_metadata(
+        self, run_id: int, *, runtime_engine: str = "", graph_name: str = "",
+        graph_version: str = "", model: str = "", prompt_version: str = "",
+    ) -> None:
+        self._maybe_raise("set_runtime_metadata")
+        self.metadata.append((run_id, {
+            "runtime_engine": runtime_engine,
+            "graph_name": graph_name,
+            "graph_version": graph_version,
+            "model": model,
+            "prompt_version": prompt_version,
+        }))
