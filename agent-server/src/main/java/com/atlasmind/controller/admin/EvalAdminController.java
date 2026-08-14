@@ -134,7 +134,7 @@ public class EvalAdminController {
     @OperationLog(value = "发起评测运行", type = "CREATE")
     public Result<Map<String, Object>> startEvalRun(@RequestBody Map<String, Object> request) {
         Long datasetId = numberAsLong(request.get("datasetId"));
-        String runtime = str(request, "runtime"); // legacy | langgraph
+        String runtime = str(request, "runtime"); // legacy | langgraph | langgraph_v2
         String featuresJson = str(request, "features");
         if (featuresJson.isEmpty()) featuresJson = "{}";
         if ("legacy".equalsIgnoreCase(runtime)) {
@@ -433,6 +433,7 @@ public class EvalAdminController {
     private static String runtimeLabel(String value) {
         return switch (value == null ? "" : value.trim().toLowerCase(Locale.ROOT)) {
             case "langgraph" -> "LangGraph";
+            case "langgraph_v2" -> "LangGraph v2（试点）";
             case "legacy" -> "传统流水线";
             default -> value == null || value.isBlank() ? "-" : value;
         };

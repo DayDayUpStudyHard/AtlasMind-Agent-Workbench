@@ -203,9 +203,13 @@
               <el-select v-model="startRunRuntime" style="width: 100%">
                 <el-option label="Legacy (六阶段流水线)" value="legacy" :disabled="legacyBlocked" />
                 <el-option label="LangGraph (状态图)" value="langgraph" />
+                <el-option label="LangGraph v2 (风险审查试点)" value="langgraph_v2" :disabled="v2Blocked" />
               </el-select>
               <small v-if="legacyBlocked" style="color:#e6a23c;display:block;margin-top:4px">
                 Legacy 引擎不支持该数据集的任务类型，仅可选用 LangGraph
+              </small>
+              <small v-if="v2Blocked" style="color:#909399;display:block;margin-top:4px">
+                v2 图仅实现风险审查任务，该数据集请选用 Legacy / LangGraph
               </small>
             </el-form-item>
             <el-divider content-position="left" style="margin:12px 0">模型与提示词</el-divider>
@@ -265,6 +269,10 @@
             <el-form-item label="温度">
               <el-input-number v-model="startRunFeatures.temperature" :min="0" :max="2" :step="0.1" :precision="1" size="small" />
               <small style="color:#909399;margin-left:8px">LLM 采样温度，0 = 使用提示词默认值</small>
+            </el-form-item>
+            <el-form-item label="用例超时(秒)">
+              <el-input-number v-model="startRunFeatures.caseTimeoutSeconds" :min="300" :max="7200" :step="300" size="small" />
+              <small style="color:#909399;margin-left:8px">单例超时上限，v2 建议 ≥ 2400</small>
             </el-form-item>
           </el-form>
           <template #footer>
@@ -595,7 +603,12 @@ const legacyBlocked = computed(() => {
   const t = (startRunDs.value?.contractType || '').toUpperCase()
   return ['INTAKE', 'ELEMENT_EXTRACTION', 'FULFILLMENT_TIMELINE', 'TIMELINE_EXTRACTION'].includes(t)
 })
-const startRunFeatures = ref({ rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0 })
+// v2 试点图只实现了风险审查任务，其余类型仍只有 v1 图可跑
+const v2Blocked = computed(() => {
+  const t = (startRunDs.value?.contractType || '').toUpperCase()
+  return !['CONTRACT_REVIEW', 'RISK_REVIEW'].includes(t)
+})
+const startRunFeatures = ref({ rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0, caseTimeoutSeconds: 2400 })
 const showRetrievalOpts = ref(false)
 const startingRun = ref(false)
 const showRunDetail = ref(false)
@@ -686,7 +699,7 @@ async function viewCases(ds) {
 async function startRun(ds) {
   startRunDs.value = ds
   startRunRuntime.value = legacyBlocked.value ? 'langgraph' : 'legacy'
-  startRunFeatures.value = { rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0 }
+  startRunFeatures.value = { rerank: true, model: '', promptVersion: '', recallMultiplier: 0, recallMin: 0, recallMax: 0, targetedRetrievalRetries: 1, coverageReflection: true, temperature: 0, caseTimeoutSeconds: 2400 }
   showRetrievalOpts.value = false
   showStartRun.value = true
 }
@@ -855,6 +868,7 @@ function formatRuntimeEngine(v) {
   return {
     legacy: '传统流水线',
     langgraph: 'LangGraph',
+    langgraph_v2: 'LangGraph v2 (试点)',
   }[v] || v || '-'
 }
 function formatMetric(row, key) {
