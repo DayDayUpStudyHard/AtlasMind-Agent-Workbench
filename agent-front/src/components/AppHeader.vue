@@ -191,10 +191,11 @@ watch(contractActivities, (activities) => {
   for (const activity of activities) {
     const before = previous[activity.id]
     const after = String(activity.status || '').toUpperCase()
-    if (!before || before === after || !['COMPLETED', 'FAILED'].includes(after)) continue
+    if (!before || before === after || !['COMPLETED', 'FAILED', 'LIMITED'].includes(after)) continue
     if (!isActivityActive({ status: before })) continue
     const label = activity.run?.runType ? runTypeLabel(activity.run.runType) : '合同处理'
     if (after === 'COMPLETED') message.success(`${label}已完成 · ${activity.caseTitle}`)
+    else if (after === 'LIMITED') message.warning(`${label}范围受限 · ${activity.caseTitle}`)
     else message.error(`${label}失败 · ${activity.caseTitle}`)
   }
   previousActivityStatuses.value = Object.fromEntries(
@@ -349,6 +350,7 @@ function activityStatusClass(activity) {
   const status = String(activity?.status || '').toUpperCase()
   if (status === 'COMPLETED') return 'done'
   if (status === 'FAILED') return 'error'
+  if (status === 'LIMITED') return 'warn'
   if (activityIsActive(activity)) return 'active'
   return 'unknown'
 }
@@ -356,6 +358,7 @@ function activityStatusLabel(activity) {
   const status = String(activity?.status || '').toUpperCase()
   if (status === 'COMPLETED') return '已完成'
   if (status === 'FAILED') return '失败'
+  if (status === 'LIMITED') return '范围受限'
   if (activityIsActive(activity)) return '处理中'
   return '待处理'
 }
@@ -365,6 +368,7 @@ function activityMainLabel(activity) {
     return activity.run.currentStep || `${runTypeLabel(activity.run.runType)}进行中`
   }
   if (activity?.pipeline?.status === 'FAILED' || activity?.run?.status === 'FAILED') return '合同处理失败，点击查看原因'
+  if (activity?.run?.status === 'LIMITED') return '审查范围受限，点击查看运行诊断'
   if (activity?.run?.status === 'COMPLETED') {
     if (activity.run.runType === 'CONTRACT_ELEMENT_EXTRACTION') return '合同要素已生成，正在衔接正式履约日程'
     if (activity.run.runType === 'TIMELINE_EXTRACTION') return '正式履约日程已生成，正在衔接风险审查'
@@ -375,7 +379,9 @@ function activityMainLabel(activity) {
 }
 function activityProgress(activity) { return getActivityProgress(activity) }
 function runIsActive(status) {
-  return !['COMPLETED', 'FAILED', 'CANCELLED'].includes(String(status || '').toUpperCase())
+  // LIMITED is terminal: the run delivered a scoped report and is not
+  // executing any more.
+  return !['COMPLETED', 'FAILED', 'CANCELLED', 'LIMITED'].includes(String(status || '').toUpperCase())
 }
 function runTypeLabel(type) {
   return {
@@ -402,6 +408,7 @@ function runStatusLabel(status) {
     WAITING_HUMAN: '等待人工确认',
     WAITING_APPROVAL: '等待审批',
     COMPLETED: '已完成',
+    LIMITED: '范围受限',
     FAILED: '失败',
     CANCELLED: '已取消',
   }[status] || status || '未知'
@@ -470,6 +477,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .activity-dot{width:7px;height:7px;flex:0 0 auto;margin-top:5px;border-radius:50%;background:var(--atlas-subtle)}
 .activity-dot.active{background:var(--atlas-warning);animation:dot-pulse 1.5s ease-in-out infinite}
 .activity-dot.done{background:#3f7f5d}.activity-dot.error{background:#b35c56}
+.activity-dot.warn{background:var(--atlas-warning)}
 .contract-activity-copy{display:flex;flex:1;min-width:0;flex-direction:column;gap:4px}
 .activity-headline{display:flex;align-items:center;gap:6px;min-width:0}
 .activity-headline strong{overflow:hidden;color:var(--atlas-text);font-size:11px;line-height:1.4;text-overflow:ellipsis;white-space:nowrap}
@@ -483,7 +491,7 @@ function statusClass(s) { const n = String(s||'').toLowerCase(); if (['ok','comp
 .activity-stage b{color:var(--atlas-muted);font-size:9px;font-weight:800;white-space:nowrap}
 .activity-runtime{grid-column:2 / -1;color:var(--atlas-subtle);font-size:8px;line-height:1.3}
 .activity-meta{display:flex;flex:0 0 auto;flex-direction:column;align-items:flex-end;gap:3px;color:var(--atlas-subtle);font-size:9px}
-.activity-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.contract-activity-row.error .activity-meta b{color:#b35c56}.contract-activity-row.done .activity-meta b{color:#3f7f5d}
+.activity-meta b{color:var(--atlas-primary);font-size:10px;white-space:nowrap}.contract-activity-row.error .activity-meta b{color:#b35c56}.contract-activity-row.done .activity-meta b{color:#3f7f5d}.contract-activity-row.warn .activity-meta b{color:var(--atlas-warning)}
 .activity-error-link{color:#b35c56;font-size:9px;font-weight:800;white-space:nowrap}
 .activity-empty{padding:16px 0 4px;color:var(--atlas-muted);font-size:12px;text-align:center}
 .document-pipeline-feed{display:flex;flex-direction:column;margin-top:8px}

@@ -2579,7 +2579,7 @@ function fulfillmentCheckRunning(node) {
   if (!check) return false
   const checkStatus = String(check.status || '').toUpperCase()
   const runStatus = String(check.runStatus || '').toUpperCase()
-  if (['COMPLETED', 'FAILED', 'CANCELLED'].includes(runStatus)) return false
+  if (['COMPLETED', 'FAILED', 'CANCELLED', 'LIMITED'].includes(runStatus)) return false
   return ['PENDING', 'CREATED', 'CONTEXT_BUILDING', 'ANALYZING', 'VERIFYING'].includes(checkStatus)
     || ['CREATED', 'CONTEXT_BUILDING', 'ANALYZING', 'VERIFYING'].includes(runStatus)
 }
@@ -3216,8 +3216,8 @@ function statusLabel(s) {
 function typeLabel(t) { return { SERVICE_PROCUREMENT:'服务采购', GOODS_PURCHASE:'货物采购', NDA:'保密协议' }[t] || t }
 function partyRoleLabel(r) { return { OUR_ENTITY:'我方', COUNTERPARTY:'对方', GUARANTOR:'担保方' }[r] || r }
 function docTypeLabel(t) { return { MAIN:'主合同', ATTACHMENT:'附件', PRICING:'报价', CERTIFICATE:'资质', FULFILLMENT_EVIDENCE:'履约证据' }[t] || t }
-function runStatusClass(s) { return { COMPLETED:'ok', FAILED:'error' }[s] || '' }
-function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', PLANNING:'规划中', ANALYZING:'审查中', VERIFYING:'验证中', WAITING_HUMAN:'等待人工确认', COMPLETED:'完成', FAILED:'失败', CANCELLED:'已取消' }[s] || s }
+function runStatusClass(s) { return { COMPLETED:'ok', FAILED:'error', LIMITED:'warn' }[s] || '' }
+function runStatusLabel(s) { return { CREATED:'排队', CONTEXT_BUILDING:'分析中', PLANNING:'规划中', ANALYZING:'审查中', VERIFYING:'验证中', WAITING_HUMAN:'等待人工确认', COMPLETED:'完成', LIMITED:'范围受限', FAILED:'失败', CANCELLED:'已取消' }[s] || s }
 function runTypeLabel(t) { return { CONTRACT_REVIEW:'合同审查', CONTRACT_INTAKE:'合同发起', APPROVAL_DECISION:'审批意见草案', VERSION_REVIEW:'版本复核', OBLIGATION_EXTRACTION:'义务提取', FULFILLMENT_CHECK:'履约核验', CONTRACT_ELEMENT_EXTRACTION:'合同要素提取', TIMELINE_EXTRACTION:'正式履约日程' }[t] || t }
 function taskQuestion(t) { return { CONTRACT_REVIEW:'审查当前合同版本', CONTRACT_INTAKE:'发起合同材料准备', APPROVAL_DECISION:'生成合同审批意见草案', VERSION_REVIEW:'复核合同版本变化', OBLIGATION_EXTRACTION:'提取合同履约义务', FULFILLMENT_CHECK:'核验合同时间节点履约证据', CONTRACT_ELEMENT_EXTRACTION:'提取当前合同版本的可引用要素事实', TIMELINE_EXTRACTION:'生成经语义复核的正式履约日程' }[t] || '执行合同任务' }
 function approvalRecommendationLabel(value) {
@@ -3880,7 +3880,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .verification-list ul{margin:0;padding-left:16px;color:var(--atlas-text);font-size:12px;line-height:1.7}
 .verification-list li+li{margin-top:3px}
 .finding-buttons{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}
-.run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}
+.run-row span.ok{color:#3f7f5d}.run-row span.error{color:#b35c56}.run-row span.warn{color:var(--atlas-warning)}
 .run-row-failed{align-items:flex-start;flex-wrap:wrap}.run-row-failed .run-error-message{flex:1 0 100%;margin:0 0 2px 78px;color:#9d4b45;font-size:11px;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere}
 .section-header{display:flex;justify-content:space-between;align-items:center;gap:10px}
 .section-header h3{margin:0!important}

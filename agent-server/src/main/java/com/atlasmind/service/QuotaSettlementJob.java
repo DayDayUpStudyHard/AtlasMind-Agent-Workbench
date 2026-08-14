@@ -24,7 +24,7 @@ public class QuotaSettlementJob {
                 SELECT r.id, r.initiated_by, r.status
                 FROM agent_run r
                 WHERE r.initiated_by IS NOT NULL
-                  AND r.status IN ('COMPLETED','FAILED','CANCELLED')
+                  AND r.status IN ('COMPLETED','FAILED','CANCELLED','LIMITED')
                   AND EXISTS (
                       SELECT 1 FROM quota_transaction q
                       WHERE q.run_id=r.id AND q.type='RESERVE'
@@ -42,7 +42,10 @@ public class QuotaSettlementJob {
             Long userId = ((Number) run.get("initiated_by")).longValue();
             String status = String.valueOf(run.get("status"));
             try {
-                if ("COMPLETED".equals(status)) {
+                // LIMITED runs consumed real quota and delivered a scoped
+                // report — confirm, never refund (the §6.4 diagnostics record
+                // what the scope cut, not a failed execution).
+                if ("COMPLETED".equals(status) || "LIMITED".equals(status)) {
                     quotaService.confirm(userId, runId);
                 } else {
                     quotaService.refund(userId, runId);

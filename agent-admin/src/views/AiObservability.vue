@@ -762,6 +762,7 @@ function statusLabel(status) {
     ANALYZING: '执行中',
     VERIFYING: '反思验证',
     COMPLETED: '完成',
+    LIMITED: '范围受限',
     FAILED: '失败',
     CANCELLED: '已取消',
   }[status] || status || '-'
@@ -771,6 +772,7 @@ function statusTag(status) {
   if (status === 'COMPLETED') return 'success'
   if (status === 'FAILED') return 'danger'
   if (status === 'CANCELLED') return 'warning'
+  if (status === 'LIMITED') return 'warning'
   if (['CREATED', 'CONTEXT_BUILDING', 'PLANNING', 'ANALYZING', 'VERIFYING'].includes(status)) return 'primary'
   return 'info'
 }

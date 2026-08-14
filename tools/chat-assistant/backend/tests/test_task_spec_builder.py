@@ -47,6 +47,7 @@ from app.agent_runtime.graph.nodes.artifact import (
     repair_artifact,
 )
 from app.agent_runtime.graph.state import BaseGraphState
+from app.agent_runtime.harness.budget import record_unit_usage
 from app.agent_runtime.harness.fakes import FakePersistence, fake_clause, fake_snapshot
 from app.agent_runtime.harness.graph_builder import build_task_graph
 from app.agent_runtime.harness.models import HumanGate, Role, TaskSpec
@@ -287,9 +288,11 @@ def test_contract_review_builder_registers_the_spec_built_graph():
 
 
 def _tiny_spec(**overrides: Any) -> TaskSpec:
-    """Tiny valid spec: context ctx, planner a, analyzer b, composer c.
+    """Tiny valid spec: one stage per §6.1 role, chained linearly.
 
-    Implicit wiring (ctx→a) plus explicit edges a→b, b→c; c→END."""
+    Implicit wiring (ctx→a) plus explicit edges a→r→b→v→ca→c; p→END.
+    Every role hook must be non-empty — the builder rejects empty roles
+    (第三轮验收 P2)."""
     base: dict[str, Any] = dict(
         task_type="TINY",
         graph_name="tiny",
@@ -297,13 +300,13 @@ def _tiny_spec(**overrides: Any) -> TaskSpec:
         prompt_version="t",
         context=Role((("ctx", _stage("ctx")),)),
         planner=Role((("a", _stage("a")),)),
-        retriever=Role(),
+        retriever=Role((("r", _stage("r")),)),
         analyzer=Role((("b", _stage("b")),)),
-        validator=Role(),
-        coverage_auditor=Role(),
+        validator=Role((("v", _stage("v")),)),
+        coverage_auditor=Role((("ca", _stage("ca")),)),
         composer=Role((("c", _stage("c")),)),
-        persistence=Role(),
-        edges=(("a", "b"), ("b", "c")),
+        persistence=Role((("p", _stage("p")),)),
+        edges=(("a", "r"), ("r", "b"), ("b", "v"), ("v", "ca"), ("ca", "c"), ("c", "p")),
         conditional_routes={},
     )
     base.update(overrides)
@@ -333,6 +336,19 @@ def test_builder_rejects_empty_context_role():
         build_task_graph(spec)
 
 
+@pytest.mark.parametrize(
+    "role_name",
+    ("planner", "retriever", "analyzer", "validator",
+     "coverage_auditor", "composer", "persistence"),
+)
+def test_builder_rejects_empty_required_role(role_name):
+    """Third-review repro: validator=Role() compiled — every §6.1 role hook
+    must declare at least one stage, not just context."""
+    spec = _tiny_spec(**{role_name: Role()})
+    with pytest.raises(ValueError, match=f"role {role_name} declares no stages"):
+        build_task_graph(spec)
+
+
 def test_builder_rejects_human_gate_on_unknown_stage():
     spec = _tiny_spec(human_gate=HumanGate(stage="ghost"))
     with pytest.raises(ValueError, match="human_gate stage ghost is not a declared stage"):
@@ -352,7 +368,7 @@ def test_builder_registers_human_gate_as_its_stage_node():
     spec = _tiny_spec(
         planner=Role((("gate", gate),)),
         human_gate=gate,  # the §6.1 hook — role declaration + gate field agree
-        edges=(("gate", "b"), ("b", "c")),
+        edges=(("gate", "r"), ("r", "b"), ("b", "v"), ("v", "ca"), ("ca", "c"), ("c", "p")),
     )
     graph = build_task_graph(spec)
     assert "gate" in graph.get_graph().nodes
@@ -364,60 +380,63 @@ def test_builder_registers_human_gate_as_its_stage_node():
 
 
 def test_builder_rejects_edge_from_context_stage():
-    spec = _tiny_spec(edges=(("ctx", "a"), ("a", "b"), ("b", "c")))
+    spec = _tiny_spec(edges=(("ctx", "a"), ("a", "r"), ("r", "b"), ("b", "v"),
+                             ("v", "ca"), ("ca", "c"), ("c", "p")))
     with pytest.raises(ValueError, match="context stage ctx is wired by the builder"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_conditional_route_on_context_stage():
-    spec = _tiny_spec(
-        conditional_routes={"ctx": (lambda s: "a", {"a": "a"})},
-        edges=(("a", "b"), ("b", "c")),
-    )
+    spec = _tiny_spec(conditional_routes={"ctx": (lambda s: "a", {"a": "a"})})
     with pytest.raises(ValueError, match="context stage ctx is wired by the builder"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_disconnected_cycle_unreachable_from_start():
     """Second-review repro: a b↔c cycle with no path from the start must be
-    rejected — compiling it silently drops both nodes."""
+    rejected — compiling it silently drops both nodes plus everything
+    downstream of the break."""
     spec = _tiny_spec(edges=(("b", "c"), ("c", "b")))
-    with pytest.raises(ValueError, match="stages unreachable from START: \\['b', 'c'\\]"):
+    with pytest.raises(ValueError, match="stages unreachable from START: \\['r', 'b', 'v', 'ca', 'c', 'p'\\]"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_stage_that_can_never_reach_end():
-    # a is reachable from START, b is a dead end: no path b → … → c.
-    spec = _tiny_spec(edges=(("a", "b"), ("a", "c")))
-    with pytest.raises(ValueError, match="stages that can never reach END: \\['b'\\]"):
+    # a2 forks off a and never rejoins the chain: reachable from START, but
+    # it can never reach p → the graph must be rejected.
+    spec = _tiny_spec(
+        planner=Role((("a", _stage("a")), ("a2", _stage("a2")))),
+        edges=(("a", "r"), ("r", "b"), ("b", "v"), ("v", "ca"), ("ca", "c"),
+               ("c", "p"), ("a", "a2")),
+    )
+    with pytest.raises(ValueError, match="stages that can never reach END: \\['a2'\\]"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_dangling_stage():
-    spec = _tiny_spec(edges=(("a", "b"),))
-    with pytest.raises(ValueError, match="stages unreachable from START: \\['c'\\]"):
+    spec = _tiny_spec(edges=(("a", "r"),))
+    with pytest.raises(ValueError, match="stages unreachable from START: \\['b', 'v', 'ca', 'c', 'p'\\]"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_route_to_unknown_node():
     spec = _tiny_spec(
         conditional_routes={"a": (lambda s: "ghost", {"ghost": "ghost"})},
-        edges=(("b", "c"),),
     )
     with pytest.raises(ValueError, match="route a -> unknown node ghost"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_edge_to_unknown_node():
-    spec = _tiny_spec(edges=(("a", "b"), ("b", "ghost")))
+    spec = _tiny_spec(edges=(("a", "r"), ("r", "b"), ("b", "ghost")))
     with pytest.raises(ValueError, match="edge b->ghost references unknown node"):
         build_task_graph(spec)
 
 
 def test_builder_rejects_linear_edge_out_of_conditional_stage():
     spec = _tiny_spec(
-        conditional_routes={"a": (lambda s: "b", {"b": "b"})},
-        edges=(("a", "b"), ("b", "c")),
+        conditional_routes={"a": (lambda s: "r", {"r": "r"})},
+        edges=(("a", "r"), ("r", "b"), ("b", "v"), ("v", "ca"), ("ca", "c"), ("c", "p")),
     )
     with pytest.raises(ValueError, match="conditional stage a must not declare linear edges"):
         build_task_graph(spec)
@@ -425,10 +444,9 @@ def test_builder_rejects_linear_edge_out_of_conditional_stage():
 
 def test_builder_rejects_conditional_route_on_last_stage():
     spec = _tiny_spec(
-        conditional_routes={"c": (lambda s: "a", {"a": "a"})},
-        edges=(("a", "b"), ("b", "c")),
+        conditional_routes={"p": (lambda s: "a", {"a": "a"})},
     )
-    with pytest.raises(ValueError, match="last stage c cannot route conditionally"):
+    with pytest.raises(ValueError, match="last stage p cannot route conditionally"):
         build_task_graph(spec)
 
 
@@ -612,7 +630,9 @@ def _golden_load_run_context(state: dict[str, Any]) -> dict[str, Any]:
 
 def _golden_retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
     """I/O stub — deterministic per-domain evidence derived from the planned
-    domain tasks, so every baseline domain has retrievable support."""
+    domain tasks, so every baseline domain has retrievable support. Meters
+    one query per domain exactly like the real node (within budget), so the
+    real validate_schema budget audit runs on the golden path."""
     domain_tasks = state.get("domain_tasks") or []
     case_id = int(state.get("subject_id") or 0)
     evidence_map = _golden_evidence()
@@ -621,8 +641,10 @@ def _golden_retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
     retrieval_validation: dict[str, dict[str, Any]] = {}
     citations: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    usage = dict(state.get("work_unit_usage") or {})
     for task in domain_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
+        record_unit_usage(usage, key, queries=1)
         evidence = evidence_map.get(key) or []
         domain_results[key] = evidence
         citations.extend(evidence)
@@ -661,6 +683,7 @@ def _golden_retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "retrieval_validation": retrieval_validation,
         "citations": citations,
         "observations": observations,
+        "work_unit_usage": usage,
     }
 
 
@@ -722,7 +745,10 @@ def _golden_finding(
 
 def _golden_draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
     """I/O stub — replaces the LLM analysis with the frozen findings fixture
-    and marks every domain COMPLETED so coverage reaches CONFIRMED."""
+    and marks every domain COMPLETED so coverage reaches CONFIRMED. Meters
+    one LLM call + a small fixed token spend per domain exactly like the
+    real node (within budget), so the real validate_schema budget audit
+    runs on the golden path."""
     domain_results = state.get("domain_results") or {}
     domain_tasks = state.get("domain_tasks") or []
     subject_id = state.get("subject_id", 0)
@@ -730,8 +756,10 @@ def _golden_draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
     draft: list[dict[str, Any]] = []
     domain_analysis: dict[str, dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
+    usage = dict(state.get("work_unit_usage") or {})
     for task in domain_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
+        record_unit_usage(usage, key, llm_calls=1, tokens=640)
         fixture = _GOLDEN_FINDINGS[key]
         finding = _golden_finding(key, task.get("domainName"), fixture, domain_results.get(key) or [])
         draft.append(finding)
@@ -765,6 +793,7 @@ def _golden_draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
         "draft_findings": draft,
         "domain_analysis": domain_analysis,
         "observations": observations,
+        "work_unit_usage": usage,
     }
 
 
@@ -788,9 +817,13 @@ def _golden_nodes() -> dict[str, Callable]:
     return nodes
 
 
-def _golden_spec() -> TaskSpec:
-    """CONTRACT_REVIEW_SPEC with the golden node set — same roles / wiring."""
-    nodes = _golden_nodes()
+def _golden_spec(nodes: dict[str, Callable] | None = None) -> TaskSpec:
+    """CONTRACT_REVIEW_SPEC with the golden node set — same roles / wiring.
+
+    ``nodes`` lets a test swap one stub (e.g. to inflate metering) without
+    touching the rest of the pipeline."""
+    if nodes is None:
+        nodes = _golden_nodes()
     return TaskSpec(
         task_type=CONTRACT_REVIEW_SPEC.task_type,
         graph_name=CONTRACT_REVIEW_SPEC.graph_name,
@@ -854,15 +887,16 @@ def _golden_initial_state() -> dict[str, Any]:
         "observations": [],
         "citations": [],
         "errors": [],
-        "shadow_mode": False,
+        "work_unit_usage": {},
     }
 
 
-def _stream_run(graph) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
-    """Run the golden graph once and return (stage → input state) plus the
-    final accumulated state. stream_mode="values" emits the merged state
-    after each node, so ``inputs[stage]`` is exactly what that node received
-    from the graph plumbing.
+def _stream_run(graph) -> tuple[dict[str, dict[str, Any]], dict[str, Any], list[tuple[str, dict[str, Any]]]]:
+    """Run the golden graph once and return (stage → input state), the final
+    accumulated state, and the ordered (stage, input) pairs in stream order.
+    stream_mode="values" emits the merged state after each node, so
+    ``inputs[stage]`` is exactly what that node received from the graph
+    plumbing.
 
     Each input is deep-copied at emission time: downstream nodes
     (prepare_human_review) mutate the artifact dict in place, which would
@@ -870,34 +904,121 @@ def _stream_run(graph) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     references."""
     previous = _golden_initial_state()
     stage_inputs: dict[str, dict[str, Any]] = {}
+    ordered: list[tuple[str, dict[str, Any]]] = []
     final_state: dict[str, Any] = previous
     for state in graph.stream(_golden_initial_state(), stream_mode="values"):
         stage = state.get("current_node")
         if stage:
             stage_inputs[stage] = copy.deepcopy(previous)
+            ordered.append((stage, copy.deepcopy(previous)))
         previous = state
         final_state = state
-    return stage_inputs, final_state
+    return stage_inputs, final_state, ordered
+
+
+_NO_CHANGE = object()  # internal sentinel — never serialized
+# Marks a key deleted between two streamed states. A string (not an object)
+# so it survives the fixture's JSON round-trip; chosen to be impossible as
+# real content, and only ever interpreted inside _apply.
+_REMOVED = "!golden-removed!"
+
+
+def _diff(
+    base: Any, new: Any, *,
+    allow_removals: bool = False, encode_removals: bool = False,
+) -> Any:
+    """Nested delta from ``base`` to ``new``: dicts recurse, other values
+    are replaced wholesale. Streamed states grow at the top level, but a
+    node may replace a nested dict without one of its keys (the state
+    shrink is real production behavior) — the chained input deltas encode
+    that as a ``_REMOVED`` marker. Node outputs are partial updates:
+    ``allow_removals`` alone skips removed keys ("missing from the output
+    means keep the input value", which _apply already does). Without
+    either flag a removal raises — nothing is silently lost."""
+    if base == new:
+        return _NO_CHANGE
+    if isinstance(base, dict) and isinstance(new, dict):
+        delta: dict[str, Any] = {}
+        for key, value in new.items():
+            if key not in base:
+                delta[key] = value
+            else:
+                child = _diff(
+                    base[key], value,
+                    allow_removals=allow_removals, encode_removals=encode_removals,
+                )
+                if child is not _NO_CHANGE:
+                    delta[key] = child
+        for key in base:
+            if key not in new:
+                if encode_removals:
+                    delta[key] = _REMOVED
+                elif not allow_removals:
+                    raise ValueError(f"golden delta: key {key!r} removed along the stream")
+        return delta or _NO_CHANGE
+    return new
+
+
+def _apply(base: Any, delta: Any) -> Any:
+    """Reconstruct ``base`` + ``delta`` (inverse of ``_diff``)."""
+    if delta is None:
+        return base
+    if isinstance(delta, dict) and isinstance(base, dict):
+        result = dict(base)
+        for key, value in delta.items():
+            if value == _REMOVED:
+                result.pop(key, None)
+            elif isinstance(value, dict):
+                result[key] = _apply(
+                    base.get(key) if isinstance(base.get(key), dict) else {}, value,
+                )
+            else:
+                result[key] = value
+        return result
+    return delta
 
 
 def _collect_golden() -> dict[str, Any]:
-    """Drive the spec-built golden graph once; record every real node's
-    (input, output) pair and the final artifact for the frozen fixture.
+    """Drive the spec-built golden graph once; record the state stream as a
+    chain of per-node input increments (each input delta'd against the
+    previous stage's input, so shared content appears once), every real
+    node's output increment, and the single full artifact for the frozen
+    fixture.
+
+    The delta format (initial state + chained node increments + one
+    artifact) keeps the fixture small: normal field changes touch one
+    increment instead of rewriting every node's full-state copy.
 
     The whole collection stays inside the patched environment — the node
     replay calls persist_report directly, and an unpatched run would touch
     the real report store."""
-    node_samples: dict[str, dict[str, Any]] = {}
+    initial = _golden_initial_state()
+    node_inputs: dict[str, dict[str, Any]] = {}
+    node_outputs: dict[str, dict[str, Any]] = {}
     with _golden_environment():
         graph = build_task_graph(_golden_spec())
-        stage_inputs, final_state = _stream_run(graph)
+        stage_inputs, final_state, ordered = _stream_run(graph)
+
+        # Chained input increments along the stream: input[stage] is the
+        # delta from the previous stage's input, so reconstructing is a
+        # left-to-right walk. Stub stages are part of the chain too — their
+        # outputs flow into the next real stage's input.
+        stages_seen = {stage for stage, _ in ordered}
+        assert len(stages_seen) == len(ordered), (
+            "golden stream visits a stage twice — chained deltas cannot represent it"
+        )
+        stream_order = [stage for stage, _ in ordered]
+        previous_input = initial
+        for stage, input_state in ordered:
+            input_delta = _diff(previous_input, input_state, encode_removals=True)
+            node_inputs[stage] = None if input_delta is _NO_CHANGE else input_delta
+            previous_input = input_state
 
         for stage in _GOLDEN_REAL_STAGES:
             input_state = stage_inputs[stage]
-            node_samples[stage] = {
-                "input": input_state,
-                "output": _golden_nodes()[stage](input_state),
-            }
+            output_state = _golden_nodes()[stage](input_state)
+            output_delta = _diff(input_state, output_state, allow_removals=True)
+            node_outputs[stage] = None if output_delta is _NO_CHANGE else output_delta
 
         # Off-path real nodes: pin them against deterministic synthetic
         # inputs (the state the routers would have produced on their
@@ -909,10 +1030,12 @@ def _collect_golden() -> dict[str, Any]:
             **post_compose,
             "coverage": {**post_compose["coverage"], "status": "CANNOT_RESOLVE"},
         }
-        node_samples["compose_limited_report"] = {
-            "input": limited_state,
-            "output": compose_limited_report(limited_state),
-        }
+        node_inputs["compose_limited_report"] = _diff(
+            post_compose, limited_state, encode_removals=True,
+        )
+        node_outputs["compose_limited_report"] = _diff(
+            limited_state, compose_limited_report(limited_state), allow_removals=True,
+        )
         broken_artifact = {**post_compose["artifact"], "title": ""}
         repair_state = {
             **post_compose,
@@ -924,14 +1047,23 @@ def _collect_golden() -> dict[str, Any]:
                 "repair_count": 0,
             },
         }
-        node_samples["repair_artifact"] = {
-            "input": repair_state,
-            "output": repair_artifact(repair_state),
-        }
+        node_inputs["repair_artifact"] = _diff(
+            post_compose, repair_state, encode_removals=True,
+        )
+        node_outputs["repair_artifact"] = _diff(
+            repair_state, repair_artifact(repair_state), allow_removals=True,
+        )
 
     return {
+        "format": "golden-v2-delta",
+        "initial_state": initial,
+        "stream_order": stream_order,
+        # The off-path synthetic inputs are deltas against this streamed
+        # state — consumers walk the chain to that point first.
+        "off_path_base": "validate_schema",
+        "node_inputs": node_inputs,
+        "node_outputs": node_outputs,
         "artifact": final_state.get("artifact") or {},
-        "node_samples": node_samples,
     }
 
 
@@ -997,31 +1129,57 @@ def test_golden_reference_wiring_reproduces_frozen_artifact():
 
 
 def test_golden_node_samples_reproduce_frozen_behavior():
-    """Every real v1 node replays against its frozen input sample and must
-    produce the frozen output; the live graph must also feed each real node
-    exactly the frozen input (ties the samples to the real wiring). The
-    replay stays inside the patched environment — persist_report's sample
-    was captured under it, and an unpatched call would touch the real
-    report store."""
+    """Every real v1 node replays against its frozen input (reconstructed
+    from the initial state + the frozen input delta) and must produce the
+    frozen output (input + output delta); the live graph must also feed
+    each real node exactly the frozen input (ties the samples to the real
+    wiring). The replay stays inside the patched environment —
+    persist_report's sample was captured under it, and an unpatched call
+    would touch the real report store."""
     golden = _load_golden()
-    node_samples = golden["node_samples"]
+    initial = golden["initial_state"]
+    node_inputs = golden["node_inputs"]
+    node_outputs = golden["node_outputs"]
+    stream_order = golden["stream_order"]
 
     with _golden_environment():
         graph = build_task_graph(_golden_spec())
-        stage_inputs, _final_state = _stream_run(graph)
+        stage_inputs, _final_state, _ordered = _stream_run(graph)
+
+        # Walk the chained input increments left to right — each stage's
+        # frozen input is the previous input plus that stage's increment.
+        frozen_inputs: dict[str, dict[str, Any]] = {}
+        state = initial
+        for stage in stream_order:
+            state = _apply(state, node_inputs[stage])
+            frozen_inputs[stage] = copy.deepcopy(state)
 
         for stage in _GOLDEN_REAL_STAGES:
-            sample = node_samples[stage]
-            assert _dump(stage_inputs[stage]) == _dump(sample["input"]), (
+            frozen_input = frozen_inputs[stage]
+            assert _dump(stage_inputs[stage]) == _dump(frozen_input), (
                 f"{stage} live input drifted from the frozen sample"
             )
-            assert _dump(_golden_nodes()[stage](sample["input"])) == _dump(sample["output"]), (
+            frozen_output = _apply(frozen_input, node_outputs[stage])
+            # Nodes emit partial updates; the frozen output is the full
+            # post-node state, so compare against the live partial merged
+            # onto the input (nested dicts merge, see _apply).
+            live_merged = _apply(frozen_input, _diff(
+                frozen_input, _golden_nodes()[stage](frozen_input), allow_removals=True,
+            ))
+            assert _dump(live_merged) == _dump(frozen_output), (
                 f"{stage} output drifted from the frozen sample"
             )
 
+        # Off-path synthetic inputs are deltas against the streamed
+        # off_path_base state — the walk already reconstructed it.
+        off_path_base = frozen_inputs[golden["off_path_base"]]
         for stage in ("compose_limited_report", "repair_artifact"):
-            sample = node_samples[stage]
-            assert _dump(_golden_nodes()[stage](sample["input"])) == _dump(sample["output"]), (
+            frozen_input = _apply(off_path_base, node_inputs[stage])
+            frozen_output = _apply(frozen_input, node_outputs[stage])
+            live_merged = _apply(frozen_input, _diff(
+                frozen_input, _golden_nodes()[stage](frozen_input), allow_removals=True,
+            ))
+            assert _dump(live_merged) == _dump(frozen_output), (
                 f"{stage} output drifted from the frozen sample"
             )
 
@@ -1032,9 +1190,18 @@ def test_golden_fixture_samples_come_from_real_v1_nodes():
     golden = _load_golden()
     real = CONTRACT_REVIEW_SPEC.nodes
 
-    assert set(golden["node_samples"]) == set(_GOLDEN_REAL_STAGES) | {
+    expected_stages = set(_GOLDEN_REAL_STAGES) | {
         "compose_limited_report", "repair_artifact",
     }
+    assert golden["format"] == "golden-v2-delta"
+    assert golden["off_path_base"] == "validate_schema"
+    # node_inputs carries the chained stream increments for every stream
+    # stage (stubs included — their output flows into the next input) plus
+    # the two off-path synthetic samples; node_outputs covers the real
+    # stages and the off-path pair.
+    assert set(golden["stream_order"]) <= set(golden["node_inputs"])
+    assert expected_stages <= set(golden["node_inputs"])
+    assert set(golden["node_outputs"]) == expected_stages
     for stage in _GOLDEN_REAL_STAGES:
         assert _golden_nodes()[stage] is real[stage], f"{stage} is stubbed in the golden pipeline"
 
@@ -1043,3 +1210,53 @@ def test_golden_fixture_samples_come_from_real_v1_nodes():
     assert artifact["analysisMode"] == "FULL"
     assert artifact["humanReviewRequired"] is True
     assert len(artifact["findings"]) == len(_GOLDEN_FINDINGS)
+
+
+def test_over_budget_domain_via_real_chain_limits_the_run():
+    """第三轮验收 P1: spend recorded by chain nodes flows through the real
+    validate_schema audit into limited_diagnostics, and the runtime ends
+    the run LIMITED with the §6.4 disclosure — nothing hand-crafted. Only
+    the retrieval stub inflates its ledger entry (3 queries > maxQueries=2);
+    every other node on the path — audit, budget-aware routing, limited
+    composition, human review, persist — is the real v1 code."""
+    def inflated_retrieve(state: dict[str, Any]) -> dict[str, Any]:
+        result = _golden_retrieve_domain_evidence(state)
+        for key in list(result["work_unit_usage"]):
+            record_unit_usage(result["work_unit_usage"], key, queries=2)
+        return result
+
+    nodes = _golden_nodes()
+    nodes["retrieve_domain_evidence"] = inflated_retrieve
+    graph = build_task_graph(_golden_spec(nodes))
+
+    with _golden_environment():
+        store = FakePersistence()
+        adapter = GraphAdapter(
+            graph, graph_name="contract_review", graph_version="v1", run_store=store
+        )
+        result = asyncio.run(adapter.run(_context(_GOLDEN_RUN_ID)))
+
+    assert result.status == "LIMITED", result
+    diagnostics = result.graph_info["limitedDiagnostics"]
+    assert "BUDGET" in diagnostics["reasons"]
+    assert diagnostics["exceeded"] == ["maxQueries"]
+    # every baseline domain went over — the disclosure names each unit
+    assert len(diagnostics["workUnits"]) == len(_GOLDEN_FINDINGS)
+    assert {unit["workUnitId"] for unit in diagnostics["workUnits"]} == set(_GOLDEN_FINDINGS)
+    # the re-composed artifact is the limited report, budget-limited wording
+    assert result.artifact["analysisMode"] == "LIMITED"
+    assert "预算" in result.artifact["coverageLimitation"]
+
+
+def test_within_budget_golden_chain_stays_completed():
+    """The same real chain with a within-budget ledger stays COMPLETED —
+    the audit must not degrade runs that never exceeded their budgets."""
+    with _golden_environment():
+        store = FakePersistence()
+        adapter = GraphAdapter(
+            build_task_graph(_golden_spec()),
+            graph_name="contract_review", graph_version="v1", run_store=store,
+        )
+        result = asyncio.run(adapter.run(_context(_GOLDEN_RUN_ID)))
+    assert result.status == "COMPLETED", result
+    assert "limitedDiagnostics" not in result.graph_info

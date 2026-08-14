@@ -191,6 +191,7 @@ class RunStore(ABC):
         progress: int | None = None,
         current_step: str | None = None,
         error_message: str | None = None,
+        limited_diagnostics: dict | None = None,
     ) -> None:
         ...
 
@@ -396,6 +397,7 @@ class MySqlRunStore(RunStore):
                                   trigger_type AS triggerType, question, status,
                                   progress, current_step AS currentStep,
                                   error_message AS errorMessage,
+                                  limited_diagnostics AS limitedDiagnostics,
                                   workflow_id AS workflowId, workflow_stage AS workflowStage,
                                   evidence_snapshot_hash AS evidenceSnapshotHash,
                                   runtime_engine AS runtimeEngine, graph_name AS graphName,
@@ -406,7 +408,12 @@ class MySqlRunStore(RunStore):
                            FROM agent_run WHERE id=%s""",
                         (run_id,),
                     )
-                    return cur.fetchone() or {}
+                    row = cur.fetchone() or {}
+                    if row:
+                        row["limitedDiagnostics"] = (
+                            _json_object(row.get("limitedDiagnostics")) or None
+                        )
+                    return row
 
         return await _run_sync(_get)
 
@@ -418,6 +425,7 @@ class MySqlRunStore(RunStore):
         progress: int | None = None,
         current_step: str | None = None,
         error_message: str | None = None,
+        limited_diagnostics: dict | None = None,
     ) -> None:
         def _update():
             sets = []
@@ -436,6 +444,12 @@ class MySqlRunStore(RunStore):
             if current_step is not None:
                 sets.append("current_step=%s")
                 params.append(current_step)
+            if limited_diagnostics is not None:
+                # §6.4: the run row carries the LIMITED disclosure — the
+                # stable read entry behind "详见运行诊断" (get_run /
+                # get_run_detail return it as limitedDiagnostics).
+                sets.append("limited_diagnostics=%s")
+                params.append(_json_dumps(limited_diagnostics))
             if error_message is not None:
                 sets.append("error_message=%s")
                 params.append(error_message[:4000] if error_message else "")
@@ -592,6 +606,7 @@ class MySqlRunStore(RunStore):
                     """SELECT id, project_id AS projectId, run_type AS runType,
                               trigger_type AS triggerType, question, status, progress,
                               current_step AS currentStep, error_message AS errorMessage,
+                              limited_diagnostics AS limitedDiagnostics,
                               workflow_id AS workflowId, workflow_stage AS workflowStage,
                               evidence_snapshot_hash AS evidenceSnapshotHash,
                               started_at AS startedAt, finished_at AS finishedAt,
@@ -602,6 +617,9 @@ class MySqlRunStore(RunStore):
                 run = cur.fetchone()
                 if not run:
                     return {}
+                run["limitedDiagnostics"] = (
+                    _json_object(run.get("limitedDiagnostics")) or None
+                )
 
                 # traces
                 cur.execute(

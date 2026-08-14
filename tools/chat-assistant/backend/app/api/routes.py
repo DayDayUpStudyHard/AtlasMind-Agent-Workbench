@@ -1505,6 +1505,7 @@ async def _dispatch_via_router(router, request) -> None:
             await run_store.update_run(
                 run_id, status="LIMITED", progress=100,
                 current_step=f"范围受限（{missing_units} 项未覆盖，详见运行诊断）",
+                limited_diagnostics=diagnostics or None,
             )
         elif result.status == "COMPLETED":
             if request.task_type == "CONTRACT_ELEMENT_EXTRACTION":

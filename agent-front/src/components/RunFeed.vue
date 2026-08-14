@@ -134,11 +134,12 @@ function navigateToRun(run) {
 }
 
 function isActive(status) {
-  return status && !['COMPLETED', 'FAILED', 'WAITING_APPROVAL'].includes(status)
+  // LIMITED is terminal — a scoped report was delivered, not a running task.
+  return status && !['COMPLETED', 'FAILED', 'WAITING_APPROVAL', 'LIMITED'].includes(status)
 }
 
 function isTerminal(status) {
-  return ['COMPLETED', 'FAILED'].includes(status)
+  return ['COMPLETED', 'FAILED', 'LIMITED'].includes(status)
 }
 
 function dotClass(status) {
@@ -147,6 +148,7 @@ function dotClass(status) {
   if (['failed', 'error'].includes(normalized)) return 'error'
   if (['created', 'context_building', 'analyzing', 'verifying', 'planning'].includes(normalized)) return 'active'
   if (normalized === 'waiting_approval') return 'waiting'
+  if (normalized === 'limited') return 'warn'
   return 'unknown'
 }
 
@@ -167,6 +169,7 @@ function runStatusLabel(status) {
     PLANNING: '规划中',
     WAITING_APPROVAL: '待审批',
     COMPLETED: '已完成',
+    LIMITED: '范围受限',
     FAILED: '失败'
   }[status] || status || '未知'
 }
@@ -241,6 +244,7 @@ function relativeTime(value) {
 }
 
 .run-feed-dot.ok { background: #3f7f5d; }
+.run-feed-dot.warn { background: var(--atlas-warning); }
 .run-feed-dot.error { background: #b35c56; }
 .run-feed-dot.active { background: var(--atlas-warning); animation: dot-pulse 1.5s ease-in-out infinite; }
 .run-feed-dot.waiting { background: var(--atlas-primary); }
@@ -323,6 +327,7 @@ function relativeTime(value) {
 }
 
 .run-feed-status.ok { color: #3f7f5d; }
+.run-feed-status.warn { color: var(--atlas-warning); }
 .run-feed-status.error { color: #b35c56; }
 .run-feed-status.active { color: var(--atlas-warning); }
 .run-feed-status.waiting { color: var(--atlas-primary); }

@@ -746,8 +746,12 @@ class LLMService:
                                       evidence: list[dict],
                                       rule_findings: list[dict],
                                       run_id: int = 0,
-                                      extracted_facts: list[dict] | None = None) -> dict:
-        """Generate detailed, auditable findings for one bounded risk domain."""
+                                      extracted_facts: list[dict] | None = None,
+                                      usage_out: dict[str, int] | None = None) -> dict:
+        """Generate detailed, auditable findings for one bounded risk domain.
+
+        ``usage_out`` receives the completion's token usage when given — the
+        graph nodes feed it into the §7.2 per-WorkUnit spend ledger."""
         template, temperature = self._prompt("contract_risk_domain_analysis", run_id)
         payload = {
             "case": case,
@@ -763,6 +767,7 @@ class LLMService:
             timeout_seconds=max(15.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
             required_key="findings",
             max_tokens=max(8192, settings.chat_max_tokens),
+            usage_out=usage_out,
         )
 
     def contract_intake(self, case: dict, run_id: int = 0) -> dict:
@@ -1290,7 +1295,8 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                                temperature: float = 0.1,
                                timeout_seconds: float | None = None,
                                required_key: str | None = None,
-                               max_tokens: int = 2400) -> dict:
+                               max_tokens: int = 2400,
+                               usage_out: dict[str, int] | None = None) -> dict:
         client = self.analysis_client
         if timeout_seconds is not None:
             client = client.with_options(timeout=max(1.0, float(timeout_seconds)))
@@ -1320,6 +1326,12 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                     max_retries=3,
                     backoff_base=2.0,
                 )
+                if usage_out is not None:
+                    usage = getattr(response, "usage", None)
+                    if usage is not None:
+                        usage_out["tokens"] = int(getattr(usage, "total_tokens", 0) or 0)
+                        usage_out["promptTokens"] = int(getattr(usage, "prompt_tokens", 0) or 0)
+                        usage_out["completionTokens"] = int(getattr(usage, "completion_tokens", 0) or 0)
                 return self._parse_structured_response(response, required_key)
             except AuthenticationError:
                 raise

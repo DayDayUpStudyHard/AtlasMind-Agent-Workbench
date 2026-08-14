@@ -1,5 +1,7 @@
 const TERMINAL_PIPELINE_STATUSES = new Set(['READY', 'COMPLETED', 'FAILED', 'CANCELLED'])
-const TERMINAL_RUN_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED'])
+// LIMITED is a terminal status too — the run delivered a scoped report, it
+// is not still executing.
+const TERMINAL_RUN_STATUSES = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'LIMITED'])
 
 function numericProgress(value) {
   const progress = Number(value)
@@ -37,6 +39,7 @@ function statusFor(pipeline, run) {
   if (run && isRunActive(run)) return String(run.status || 'RUNNING').toUpperCase()
   if (pipeline && ['FAILED', 'CANCELLED'].includes(String(pipeline.status || '').toUpperCase())) return 'FAILED'
   if (run && ['FAILED', 'CANCELLED'].includes(String(run.status || '').toUpperCase())) return 'FAILED'
+  if (run && String(run.status || '').toUpperCase() === 'LIMITED') return 'LIMITED'
   return 'COMPLETED'
 }
 

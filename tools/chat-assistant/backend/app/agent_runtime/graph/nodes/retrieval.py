@@ -7,6 +7,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
+from ...harness.budget import record_unit_usage
 from ...harness.retrieval import dedupe_pool, normalize_hit, run_async
 
 logger = logging.getLogger(__name__)
@@ -102,8 +103,13 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
     retrieval_validation: dict[str, dict[str, Any]] = {}
     observations: list[dict[str, Any]] = []
     citations: list[dict[str, Any]] = []
+    # §7.2: one joined query per domain per invocation. The ledger is
+    # copied, recorded in place, and returned with the node result — the
+    # overwrite reducer needs the full accumulated ledger in one value.
+    usage = dict(state.get("work_unit_usage") or {})
     for task in domain_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
+        record_unit_usage(usage, key, queries=1)
         queries = task.get("queries") or task.get("queryTemplates") or [task.get("objective", "")]
         # v1 keeps one joined query per domain (per-intent fan-out is the
         # Phase 3 v2 behavior); the orchestrator already supports variants.
@@ -173,6 +179,7 @@ def retrieve_domain_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "retrieval_validation": retrieval_validation,
         "citations": citations,
         "observations": observations,
+        "work_unit_usage": usage,
     }
 
 
@@ -601,7 +608,7 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
                 "current_node": "draft_domain_findings",
             }
 
-    def _analyze(task: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str]:
+    def _analyze(task: dict[str, Any]) -> tuple[str, list[dict[str, Any]], str, str, dict[str, int]]:
         key = str(task.get("domainKey") or task.get("domain") or "")
         evidence = domain_results.get(key) or []
         allowed = {str(value).upper() for value in task.get("requiredClauseTypes") or []}
@@ -609,11 +616,16 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
             rule for rule in rule_findings
             if str(rule.get("clauseType") or "OTHER").upper() in allowed
         ]
+        # §7.2: the LLM surfaces its token usage through this dict; the
+        # caller records it in the per-WorkUnit ledger (one llm_call per
+        # analyzed domain, attempt or not).
+        usage_out: dict[str, int] = {}
         try:
             from app.services.llm_service import LLMService
 
             response = LLMService().analyze_contract_risk_domain(
                 case_snapshot, task, evidence, matched_rules, run_id, extracted_facts,
+                usage_out=usage_out,
             )
             findings = []
             for index, raw in enumerate((response or {}).get("findings") or []):
@@ -634,18 +646,23 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
                 item for item in _fallback_rule_findings(task, evidence, matched_rules)
                 if str(item.get("ruleKey") or "").strip() not in seen_rule_keys
             ])
-            return key, findings, "COMPLETED", str((response or {}).get("domainConclusion") or "")
+            return key, findings, "COMPLETED", str((response or {}).get("domainConclusion") or ""), usage_out
         except Exception as exc:
             logger.warning("LLM domain analysis failed for %s: %s", task.get("domainName"), exc)
             fallback = _fallback_rule_findings(task, evidence, matched_rules)
-            return key, fallback, "FALLBACK", str(exc)
+            return key, fallback, "FALLBACK", str(exc), usage_out
 
+    usage = dict(state.get("work_unit_usage") or {})
     results: dict[str, tuple[list[dict[str, Any]], str, str]] = {}
     with ThreadPoolExecutor(max_workers=min(3, max(1, len(domain_tasks)))) as executor:
         future_map = {executor.submit(_analyze, task): task for task in domain_tasks}
         for future in as_completed(future_map):
-            key, findings, status, conclusion = future.result()
+            key, findings, status, conclusion, call_usage = future.result()
             results[key] = (findings, status, conclusion)
+            record_unit_usage(
+                usage, key,
+                llm_calls=1, tokens=int(call_usage.get("tokens") or 0),
+            )
 
     draft: list[dict[str, Any]] = []
     domain_analysis: dict[str, dict[str, Any]] = {}
@@ -713,4 +730,5 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
         "draft_findings": draft,
         "domain_analysis": domain_analysis,
         "observations": observations,
+        "work_unit_usage": usage,
     }

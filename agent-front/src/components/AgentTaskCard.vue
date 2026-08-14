@@ -109,7 +109,8 @@ const showTooltip = ref(false)
 
 const isRunning = computed(() => {
   const status = props.latestRun?.status
-  return status && !['COMPLETED', 'FAILED', 'WAITING_APPROVAL'].includes(status)
+  // LIMITED is terminal — a scoped report was delivered, not a running task.
+  return status && !['COMPLETED', 'FAILED', 'WAITING_APPROVAL', 'LIMITED'].includes(status)
 })
 
 const latestReport = computed(() => {

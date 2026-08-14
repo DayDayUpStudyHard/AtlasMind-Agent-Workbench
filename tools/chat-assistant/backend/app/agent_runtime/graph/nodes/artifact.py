@@ -5,6 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from ...harness.budget import (
+    audit_work_unit_budgets,
+    coverage_limited_diagnostics,
+    merge_limited_diagnostics,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -116,24 +122,67 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _coverage_missing_details(
+    state: dict[str, Any],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """§6.4 disclosure for the uncovered domains: which check items
+    (domain names) are missing, and which evidence source types the run
+    could source elsewhere but did not get for those domains."""
+    coverage = state.get("coverage") or {}
+    missing_domains = coverage.get("missingDomains") or []
+    domains = coverage.get("domains") or {}
+    expected_types = {
+        str(source_type)
+        for info in domains.values()
+        for source_type in (info.get("sourceCounts") or {})
+    }
+    missing_names: list[str] = []
+    missing_sources: set[str] = set()
+    for key in missing_domains:
+        info = domains.get(key) or {}
+        missing_names.append(str(info.get("domainName") or key))
+        missing_sources.update(expected_types - set(info.get("sourceCounts") or {}))
+    schema_errors = (state.get("schema_validation") or {}).get("errors") or []
+    if schema_errors:
+        # The repair path also lands here with a failed schema — surface
+        # the concrete validation errors as missing check items.
+        missing_names.extend(
+            f"报告结构校验未通过: {str(error)[:120]}" for error in schema_errors[:3]
+        )
+    return tuple(missing_names), tuple(sorted(missing_sources))
+
+
 def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
-    """Compose a scope-limited report when coverage is incomplete."""
+    """Compose a scope-limited report when coverage is incomplete (or the
+    §7.2 budget audit flagged the run mid-compose)."""
     validated = state.get("validated_findings") or []
     case_snapshot = state.get("case_snapshot") or {}
     analysis_workflow = state.get("analysis_workflow") or {}
+    # A prior limited_diagnostics carrying BUDGET reasons means the schema
+    # gate re-routed us here for budget, not coverage — the limitation text
+    # and diagnostics must say so instead of blaming the quality gate.
+    prior = state.get("limited_diagnostics")
+    budget_limited = bool(prior and "BUDGET" in (prior.get("reasons") or []))
 
     artifact = {
         "reportType": "CONTRACT_REVIEW_REPORT",
         "title": f"[范围受限] 合同审查报告 — {case_snapshot.get('title', '')}",
         "summary": (
+            "本次审查因工作单元预算超限未能完成全部风险维度。"
+            if budget_limited else
             "本次审查因证据不足未能覆盖全部风险维度。"
-            f"已验证发现 {len(validated)} 条。"
-            "建议补充缺失材料后重新发起完整审查。"
-        ),
+        )
+        + f"已验证发现 {len(validated)} 条。"
+        + ("建议补充预算或精简审查范围后重新发起审查。"
+           if budget_limited else "建议补充缺失材料后重新发起完整审查。"),
         "riskStatus": "HIGH_RISK",
         "riskScore": 0,
         "analysisMode": "LIMITED",
-        "coverageLimitation": "质量门禁未通过：部分风险维度缺少充分证据",
+        "coverageLimitation": (
+            "工作单元预算超限：部分风险维度的查询或分析超出单工作单元预算"
+            if budget_limited else
+            "质量门禁未通过：部分风险维度缺少充分证据"
+        ),
         "findings": validated,
         "risks": validated,
         "riskSummary": _risk_summary(validated, state.get("coverage") or {}),
@@ -163,15 +212,39 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
         },
     }
 
+    # §7.2/§6.4: the limited report carries the mandatory diagnostics —
+    # the runtime turns the run into LIMITED, and the route layer persists
+    # them with the run row. Written here (not just in validate_schema) so
+    # every limited-report path discloses what the gate cut. A budget
+    # re-route keeps the existing budget diagnostics untouched.
+    if budget_limited:
+        return {
+            "state_revision": state.get("state_revision", 0) + 1,
+            "current_node": "compose_limited_report",
+            "artifact": artifact,
+        }
+    missing_names, missing_sources = _coverage_missing_details(state)
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "compose_limited_report",
         "artifact": artifact,
+        "limited_diagnostics": coverage_limited_diagnostics(
+            work_unit_id=f"run-{state.get('run_id', 0)}",
+            missing_check_items=missing_names,
+            missing_source_types=missing_sources,
+            retried=bool((state.get("retry_state") or {}).get("reflection_rounds", 0) > 0),
+        ),
     }
 
 
 def validate_schema(state: dict[str, Any]) -> dict[str, Any]:
-    """Pydantic validation — HARD gate. Writes result to state for conditional routing."""
+    """Pydantic validation — HARD gate. Writes result to state for conditional routing.
+
+    §7.2 budget audit runs on every pass (both compose paths flow through
+    here): each domain's accumulated ledger is checked against its
+    WorkUnitBudget; an over-budget unit merges its §6.4 diagnostics into
+    ``limited_diagnostics``, which the runtime turns into LIMITED.
+    """
     artifact = state.get("artifact") or {}
     repair_count = state.get("retry_state", {}).get("schema_repair_count", 0)
 
@@ -186,6 +259,29 @@ def validate_schema(state: dict[str, Any]) -> dict[str, Any]:
         errors = [str(exc)]
         warnings = []
 
+    # ── §7.2 budget audit ──────────────────────────────────────────────
+    usage = state.get("work_unit_usage") or {}
+    domain_tasks = state.get("domain_tasks") or []
+    coverage_domains = (state.get("coverage") or {}).get("domains") or {}
+    expected_types = {
+        str(source_type)
+        for info in coverage_domains.values()
+        for source_type in (info.get("sourceCounts") or {})
+    }
+    check_items: dict[str, tuple[str, ...]] = {}
+    missing_sources: dict[str, tuple[str, ...]] = {}
+    for task in domain_tasks:
+        key = str(task.get("domainKey") or task.get("domain") or "")
+        check_items[key] = tuple(str(value) for value in task.get("requiredClauseTypes") or [])
+        present = set((coverage_domains.get(key) or {}).get("sourceCounts") or {})
+        missing_sources[key] = tuple(sorted(expected_types - present))
+    over_units = audit_work_unit_budgets(
+        usage, missing_check_items=check_items, missing_source_types=missing_sources,
+    )
+    limited_diagnostics = merge_limited_diagnostics(
+        state.get("limited_diagnostics"), over_units,
+    )
+
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "validate_schema",
@@ -195,6 +291,7 @@ def validate_schema(state: dict[str, Any]) -> dict[str, Any]:
             "warnings": warnings,
             "repair_count": repair_count,
         },
+        "limited_diagnostics": limited_diagnostics,
     }
 
 
@@ -237,14 +334,21 @@ def repair_artifact(state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _route_after_schema(state: dict[str, Any]) -> str:
-    """Route based on schema validation result."""
+    """Route based on schema validation result and the §7.2 budget audit."""
     sv = state.get("schema_validation") or {}
-    if sv.get("valid"):
+    if not sv.get("valid"):
+        repair_count = sv.get("repair_count", 0)
+        return "repair_artifact" if repair_count < 1 else "compose_limited_report"
+    artifact = state.get("artifact") or {}
+    if artifact.get("analysisMode") == "LIMITED":
+        # Already the limited report (coverage / repair path) — its next
+        # schema pass must not recompose, or the loop never exits.
         return "prepare_human_review"
-    repair_count = sv.get("repair_count", 0)
-    if repair_count < 1:
-        return "repair_artifact"
-    return "compose_limited_report"
+    if state.get("limited_diagnostics"):
+        # The budget audit flagged the run mid-compose: recompose as the
+        # limited report, whose own pass then routes on analysisMode.
+        return "compose_limited_report"
+    return "prepare_human_review"
 
 
 def prepare_human_review(state: dict[str, Any]) -> dict[str, Any]:

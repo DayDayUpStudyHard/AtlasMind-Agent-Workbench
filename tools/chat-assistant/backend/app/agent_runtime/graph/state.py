@@ -117,6 +117,11 @@ class BaseGraphState(TypedDict, total=False):
     budget: dict[str, Any]
     errors: list[dict[str, Any]]
     retry_state: dict[str, Any]
+    # §7.2 per-WorkUnit spend ledger: nodes record queries / LLM calls /
+    # tokens / retry rounds here in place (harness.budget.record_unit_usage);
+    # the schema gate audits it against WorkUnitBudget and can flip the run
+    # to LIMITED. Keyed by work unit id (risk v1: domainKey).
+    work_unit_usage: dict[str, dict[str, int]]
     # §7.2/§6.4: when a node marks the run scope-limited (over-budget or
     # coverage-limited WorkUnit), it writes the mandatory diagnostics here;
     # the runtime turns the run into LIMITED, never FAILED / false COMPLETED.

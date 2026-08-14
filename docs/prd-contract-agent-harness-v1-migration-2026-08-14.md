@@ -1,13 +1,13 @@
 # AtlasMind 合同 Agent Harness v1 公共化与任务迁移 PRD
 
-> 文档版本：v1.0  
-> 日期：2026-08-14  
-> 状态：规划中  
-> 前置进度：原《Evidence Agent Harness High Recall DAG》已推进至 Phase 3 试点  
-> 关联文档：  
-> - [Evidence Agent Harness High Recall DAG](./prd-evidence-agent-harness-high-recall-dag-2026-08-14.md)  
-> - [Phase 0 基线报告](./phase0-baseline-report-2026-08-14.md)  
-> - [Phase 3 v2 试点报告](./phase3-v2-pilot-report-2026-08-14.md)  
+> 文档版本：v1.0
+> 日期：2026-08-14
+> 状态：规划中
+> 前置进度：原《Evidence Agent Harness High Recall DAG》已推进至 Phase 3 试点
+> 关联文档：
+> - [Evidence Agent Harness High Recall DAG](./prd-evidence-agent-harness-high-recall-dag-2026-08-14.md)
+> - [Phase 0 基线报告](./phase0-baseline-report-2026-08-14.md)
+> - [Phase 3 v2 试点报告](./phase3-v2-pilot-report-2026-08-14.md)
 > - [合同作业系统六层架构](./contract-operations-six-layer-architecture-2026-08-08.md)
 
 ---
@@ -656,4 +656,3 @@ langgraph_v2_frozen    冻结实验版本，只读对比
 8. 暂不迁移履约核验，等日程的稳定节点 ID 和状态模型确认后再做；
 9. 删除或隔离评测临时脚本，避免误提交和误操作；
 10. 更新 Debug 修复记录，记录 v2 冻结和新迁移路线。
-

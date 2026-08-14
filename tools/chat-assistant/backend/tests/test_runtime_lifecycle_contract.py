@@ -78,33 +78,63 @@ def _adapter(graph, run_id: int, *, run_store=None, name="contract_review"):
     return GraphAdapter(graph, graph_name=name, graph_version="v1", run_store=run_store)
 
 
+_ROLE_ORDER = (
+    "context", "planner", "retriever", "analyzer", "validator",
+    "coverage_auditor", "composer", "persistence",
+)
+
+
+def _stub_role_node(_state: dict[str, Any]) -> dict[str, Any]:
+    """Invisible no-op filling an otherwise-empty required role slot."""
+    return {}
+
+
 def _task_spec(
     *nodes: tuple[str, Callable],
     edges: tuple[tuple[str, str], ...] = (),
     human_gate: HumanGate | None = None,
 ) -> TaskSpec:
     """Tiny fake-graph spec: the first node rides the context role (the §4.2
-    shared base the builder wires from START), the rest ride composer in
-    order. Every graph below compiles through build_task_graph so the shared
-    builder sits on all lifecycle paths (验收 P2 — the old suite compiled
-    StateGraphs directly and never exercised it). The implicit
-    context→first-role edge covers the common chain; anything beyond that
-    stays fully explicit via ``edges``."""
+    shared base the builder wires from START), the remaining nodes fill the
+    §6.1 role slots in declaration order, and slots left over get an
+    invisible no-op stage — every required role hook is present, since the
+    builder rejects empty roles (验收 P2). Every graph below compiles
+    through build_task_graph so the shared builder sits on all lifecycle
+    paths (the old suite compiled StateGraphs directly and never exercised
+    it). All stages chain linearly: the builder owns the context links, the
+    spec declares the rest, with caller edges merged in."""
+    if not nodes:
+        raise ValueError("_task_spec needs at least one node (context)")
+    if len(nodes) > len(_ROLE_ORDER):
+        raise ValueError("_task_spec supports at most one node per §6.1 role")
+
+    roles: dict[str, tuple[tuple[str, Callable], ...]] = {}
+    for role_name, node in zip(_ROLE_ORDER, nodes):
+        roles[role_name] = (node,)
+    for role_name in _ROLE_ORDER[len(nodes):]:
+        roles[role_name] = ((f"__stub_{role_name}", _stub_role_node),)
+
+    stages = [name for role_name in _ROLE_ORDER for name, _fn in roles[role_name]]
+    # stages[0] is wired by the builder (START + context chain), so the
+    # explicit chain starts at the first non-context stage.
+    chain = {(src, dst) for src, dst in zip(stages[1:], stages[2:])}
+    chain.update(edges)
+
     return TaskSpec(
         task_type="CONTRACT_REVIEW",
         graph_name="contract_review",
         graph_version="v1",
         prompt_version="v1",
-        context=Role((nodes[0],)),
-        planner=Role(),
-        retriever=Role(),
-        analyzer=Role(),
-        validator=Role(),
-        coverage_auditor=Role(),
-        composer=Role(tuple(nodes[1:])),
-        persistence=Role(),
+        context=Role(roles["context"]),
+        planner=Role(roles["planner"]),
+        retriever=Role(roles["retriever"]),
+        analyzer=Role(roles["analyzer"]),
+        validator=Role(roles["validator"]),
+        coverage_auditor=Role(roles["coverage_auditor"]),
+        composer=Role(roles["composer"]),
+        persistence=Role(roles["persistence"]),
         human_gate=human_gate,
-        edges=edges,
+        edges=tuple(chain),
     )
 
 

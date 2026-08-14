@@ -32,6 +32,10 @@ def _validate_spec(spec: TaskSpec) -> None:
 
     # Roles must partition the stage space: one role repeating a stage and
     # two roles sharing one are both wiring mistakes and fail fast here.
+    # Every §6.1 role hook is required — an empty role (``validator=Role()``)
+    # would compile a graph missing that lifecycle duty, so empty roles fail
+    # here too. The context role carries the shared §4.2 base, hence its own
+    # message.
     seen_roles: dict[str, str] = {}
     for role_name in (
         "context", "planner", "retriever", "analyzer", "validator",
@@ -50,6 +54,16 @@ def _validate_spec(spec: TaskSpec) -> None:
                 )
             role_seen.add(stage_name)
             seen_roles[stage_name] = role_name
+        if not role_seen:
+            if role_name == "context":
+                raise ValueError(
+                    f"TaskSpec {spec.graph_name}: context role must declare at least one stage "
+                    "(§4.2 load_snapshot + build_task_context are the shared base)"
+                )
+            raise ValueError(
+                f"TaskSpec {spec.graph_name}: role {role_name} declares no stages "
+                "(every §6.1 role hook is required)"
+            )
 
     if spec.human_gate is not None:
         gate_stage = spec.human_gate.stage
@@ -65,11 +79,6 @@ def _validate_spec(spec: TaskSpec) -> None:
     # The builder owns the context chain (§4.2 shared base): START →
     # context… → first role stage. Specs must not re-declare that wiring.
     context_names = [name for name, _fn in spec.context.stages]
-    if not context_names:
-        raise ValueError(
-            f"TaskSpec {spec.graph_name}: context role must declare at least one stage "
-            "(§4.2 load_snapshot + build_task_context are the shared base)"
-        )
     context_set = set(context_names)
     first_role = spec.stages[len(context_names)] if len(spec.stages) > len(context_names) else None
     for node_name in spec.conditional_routes:

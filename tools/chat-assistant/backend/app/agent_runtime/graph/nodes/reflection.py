@@ -270,6 +270,7 @@ def targeted_retrieval(state: dict[str, Any]) -> dict[str, Any]:
     domain_results = dict(state.get("domain_results") or {})
     citations: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
+    usage = dict(state.get("work_unit_usage") or {})
     if tasks:
         from .retrieval import retrieve_domain_evidence
 
@@ -277,6 +278,12 @@ def targeted_retrieval(state: dict[str, Any]) -> dict[str, Any]:
         domain_results.update(retrieved.get("domain_results") or {})
         citations = retrieved.get("citations") or []
         observations = retrieved.get("observations") or []
+        usage = dict(retrieved.get("work_unit_usage") or usage)
+        # §7.2: one targeted-retry round per missing domain per invocation.
+        from ...harness.budget import record_unit_usage
+
+        for key in sorted(missing):
+            record_unit_usage(usage, key, retry_rounds=1)
 
     return {
         "state_revision": state.get("state_revision", 0) + 1,
@@ -285,6 +292,7 @@ def targeted_retrieval(state: dict[str, Any]) -> dict[str, Any]:
         "domain_results": domain_results,
         "citations": citations,
         "observations": observations,
+        "work_unit_usage": usage,
         # Signal draft_domain_findings to only re-analyze domains that
         # received supplementary evidence, keeping existing findings for
         # already-covered domains intact.

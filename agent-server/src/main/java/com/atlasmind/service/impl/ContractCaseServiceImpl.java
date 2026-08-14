@@ -426,7 +426,9 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                       WHERE ar.subject_type='CONTRACT_CASE'
                         AND ar.subject_id=?
                         AND ar.run_type='CONTRACT_REVIEW'
-                        AND ar.status='COMPLETED'
+                        -- LIMITED reviews also persist their validated findings;
+                        -- the §6.4 diagnostics on the run row say what was cut.
+                        AND ar.status IN ('COMPLETED','LIMITED')
                   )
                 ORDER BY FIELD(f.severity,'HIGH','MEDIUM','LOW'), f.id DESC
                 LIMIT 30
