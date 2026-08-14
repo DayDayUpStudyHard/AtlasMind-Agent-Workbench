@@ -407,3 +407,53 @@ def test_observation_summary_has_round_counts():
     assert summary["channelHitCounts"] == {"contract": 1, "policy": 1}
     assert summary["postFusionCounts"]["contract_evidence"] == 1
     assert summary["finalCounts"]["contract_evidence"] == 1
+
+
+# ─────────────────────────── provider pressure gate ──────────────────────────
+
+
+def test_fanout_concurrency_stays_under_provider_safe_limit():
+    """The (query × channel) fan-out must never exceed _CHANNEL_FANOUT_LIMIT
+    concurrent adapter calls — the embedding/reranker provider degrades
+    sharply under bursts (2026-08-14 incident)."""
+    from app.agent_runtime.harness.retrieval import ChannelResult, _CHANNEL_FANOUT_LIMIT
+
+    active = 0
+    peak = 0
+
+    class _SlowContractAdapter:
+        channel_key = "contract"
+
+        async def retrieve(self, case_id: int, query: str,
+                           arguments: dict) -> ChannelResult:
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            try:
+                await asyncio.sleep(0.02)  # hold the gate slot
+            finally:
+                active -= 1
+            return ChannelResult({"hits": [], "stats": {}, "warnings": []})
+
+    async def exercise():
+        orchestrator = RetrievalOrchestrator(
+            adapters=(
+                _SlowContractAdapter(),
+                FakeChannelAdapter("clause_type", []),
+                FakeChannelAdapter("policy", []),
+                FakeChannelAdapter("historical", []),
+            ),
+            reranker=FakeReranker(),
+        )
+        request = default_retrieval_request(
+            1, fake_snapshot(), "wu-1",
+            [f"查询意图{i}" for i in range(4)],
+            require_counter_evidence=True,  # +8 contract calls from counter templates
+        )
+        bundle = await orchestrator.retrieve(fake_snapshot(), request)
+        assert bundle is not None
+        # 20 gated calls ran; concurrency never crossed the provider-safe limit
+        # but did overlap (a fully serialised fan-out would also be a bug).
+        assert 2 <= peak <= _CHANNEL_FANOUT_LIMIT
+
+    _run(exercise())

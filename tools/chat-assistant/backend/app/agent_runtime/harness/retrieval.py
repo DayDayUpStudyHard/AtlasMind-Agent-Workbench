@@ -34,6 +34,28 @@ from .models import EvidenceBundle, RetrievalRequest, default_retrieval_request
 logger = logging.getLogger(__name__)
 
 
+# ── provider pressure gate ────────────────────────────────────────────────
+# 2026-08-14: the embedding/reranker provider degrades sharply under
+# concurrent bursts (solo ~0.3s → 9–15s or read timeouts at ~6 concurrent).
+# The orchestrator fans out up to ~24 calls per work unit, so a process-wide
+# semaphore keeps provider pressure under the cliff while queueing the rest.
+_CHANNEL_FANOUT_LIMIT = 3
+_fanout_semaphore: asyncio.Semaphore | None = None
+
+
+def _fanout_gate() -> asyncio.Semaphore:
+    global _fanout_semaphore
+    if _fanout_semaphore is None:
+        _fanout_semaphore = asyncio.Semaphore(_CHANNEL_FANOUT_LIMIT)
+    return _fanout_semaphore
+
+
+async def _gated_retrieve(adapter: ChannelAdapter, case_id: int, query: str,
+                          arguments: dict[str, Any]) -> ChannelResult:
+    async with _fanout_gate():
+        return await adapter.retrieve(case_id, query, arguments)
+
+
 # ─────────────────────────────── channel protocol ───────────────────────────
 
 
@@ -414,11 +436,13 @@ class RetrievalOrchestrator:
         counter_queries = _counter_variants(queries) if request.get("require_counter_evidence") else []
 
         # One parallel fan-out per (query, channel) — no cross-channel barrier.
+        # Calls are gated through _gated_retrieve to keep provider pressure
+        # under the concurrency cliff (see _CHANNEL_FANOUT_LIMIT).
         calls: list[tuple[str, str, Awaitable[ChannelResult]]] = []
         for query in queries:
             for adapter in self._adapters:
-                calls.append((adapter.channel_key, query, adapter.retrieve(
-                    case_id, query, {
+                calls.append((adapter.channel_key, query, _gated_retrieve(
+                    adapter, case_id, query, {
                         "topK": request["source_quotas"].get("contract"),
                         "limit": request["source_quotas"].get(
                             adapter.channel_key,
@@ -431,8 +455,8 @@ class RetrievalOrchestrator:
             for adapter in self._adapters:
                 if adapter.channel_key not in ("contract",):
                     continue
-                calls.append(("counter", query, adapter.retrieve(
-                    case_id, query, {"topK": request["source_quotas"].get("contract")},
+                calls.append(("counter", query, _gated_retrieve(
+                    adapter, case_id, query, {"topK": request["source_quotas"].get("contract")},
                 )))
 
         results = await asyncio.gather(

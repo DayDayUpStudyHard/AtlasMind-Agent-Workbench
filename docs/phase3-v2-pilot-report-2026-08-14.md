@@ -3,7 +3,7 @@
 > 日期：2026-08-14
 > 对应 PRD：§15（contract_review 高召回 DAG 试点）
 > 代码版本：4574097
-> 状态：手动评测进行中，但 runs 33/35（标称 langgraph_v2）已作废——API 服务进程为 02:09 启动的老进程，其加载的 dispatch 不认识 `langgraph_v2`，静默回退 Legacy 执行（详见 §3.5 事故记录）。主回归集 v1 基线 = run 25（有效，独立进程驱动）。评测改由独立脚本进程驱动（天然加载最新代码）：runs 30（主回归集 dataset 9, langgraph_v2）/ 31（golden dataset 20, langgraph）/ 32（golden dataset 20, langgraph_v2）于 17:05 启动，正在后台运行；首个用例 trace 已确认 GRAPH_NODE-only（真 v2 图执行）。
+> 状态：手动评测进行中，但 runs 33/35（标称 langgraph_v2）已作废——API 服务进程为 02:09 启动的老进程，其加载的 dispatch 不认识 `langgraph_v2`，静默回退 Legacy 执行（详见 §3.5 事故记录）。主回归集 v1 基线 = run 25（有效，独立进程驱动）。评测改由独立脚本进程驱动（天然加载最新代码）：runs 30（主回归集 dataset 9, langgraph_v2）/ 31（golden dataset 20, langgraph）/ 32（golden dataset 20, langgraph_v2）正在后台运行。首轮启动（17:05）后因 embedding/reranker 供应商并发劣化每例 ~10min，18:15 已加检索扇出限流（`_CHANNEL_FANOUT_LIMIT=3`）并重启，预期每例 ~4min；首轮已跑的 5 例作废清除。
 
 ---
 
