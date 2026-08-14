@@ -7,19 +7,16 @@ and review consumes the latest confirmed facts plus the original clauses.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable
 
-from langgraph.graph import END, START, StateGraph
-
+from ..harness.models import Role, TaskSpec
+from .element_normalization import validate_base_field, validate_structured_element
 from .evidence_snapshot import load_contract_evidence_snapshot, state_copy_of_snapshot
-from .state import BaseGraphState
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +43,7 @@ ELEMENT_PACKS: tuple[dict[str, Any], ...] = (
         "queries": ["生效 有效期 到期 终止 结束 交付 服务 履约 验收 提交 材料 通知 期限"],
     },
     {
-        "packKey": "risk_terms", 
+        "packKey": "risk_terms",
         "packName": "责任、知识产权与合规",
         "elementKeys": [
             "liability_terms", "ip_ownership", "confidentiality_terms",
@@ -56,15 +53,53 @@ ELEMENT_PACKS: tuple[dict[str, Any], ...] = (
     },
 )
 
+# Base identity element keys must never be re-extracted by LLM packs — they
+# are deterministic by design (PRD Phase 5, task 1/3).
+_BASE_IDENTITY_ELEMENT_KEYS = frozenset({
+    "contract_title", "contract_type", "party_a", "party_b", "our_side",
+    "contract_amount", "currency", "signed_date", "effective_date", "expiry_date",
+})
+
+# The fixed WorkUnit every extraction plan declares first (PRD Phase 5,
+# task 1: 基础身份字段单独建立固定 WorkUnit). The unit is fully
+# deterministic — no retrieval, no LLM — and its required checks name the
+# dedicated normalizers in element_normalization.
+_BASE_IDENTITY_WORK_UNIT: dict[str, Any] = {
+    "work_unit_id": "base_identity_fields",
+    "task_type": "CONTRACT_ELEMENT_EXTRACTION",
+    "category": "BASE_IDENTITY",
+    "label": "基础身份要素（确定性规范化）",
+    "objective": "合同名称、类型、甲乙方、我方角色、金额、币种与签订/生效/到期日期的固定基础事实单元",
+    "applicability": "ALWAYS",
+    "priority": "CRITICAL",
+    "query_intents": [],
+    "required_clause_types": [],
+    "required_source_types": ["CONFIRMED_INTAKE", "CONFIRMED_CASE"],
+    "expected_output_schema": "canonical-base-field",
+    "required_checks": [
+        "deterministic_money_parse", "currency_enum", "calendar_date_valid",
+        "party_name_nonempty", "title_nonempty", "our_side_allowlist",
+    ],
+    "negative_claim_allowed": False,
+    "human_review_policy": "CONFIRMED_VALUES_ONLY",
+}
+
+_SNAPSHOT_STATUS_FINISHED = {"READY_FOR_CONFIRMATION", "CONFIRMED"}
+_SETTLED_ELEMENT_STATUSES = {"EXTRACTED", "CONFIRMED"}
+_SETTLED_CONFIDENCE = 0.75
+
 
 def _run_async(awaitable: Awaitable[Any]) -> Any:
-    """Run an async store call from a synchronous LangGraph node."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(awaitable)
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        return executor.submit(lambda: asyncio.run(awaitable)).result()
+    """Run an async store call from a synchronous LangGraph node.
+
+    PRD Phase 5: the local third copy converged to the shared harness
+    implementation — the harness one wraps the thread-pool call in a
+    ``contextvars.copy_context()`` so request-scoped context survives the
+    executor hop. The legacy ``_retrieve_pack`` caller keeps this alias.
+    """
+    from ..harness.retrieval import run_async
+
+    return run_async(awaitable)
 
 
 def _json(value: Any) -> str:
@@ -218,26 +253,215 @@ def load_extraction_context(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pack_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9_]+", "_", str(value or "").strip().strip("_").lower())[:64]
+
+
+def _normalize_planned_packs(raw: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Validate an LLM-planned pack list (PRD Phase 5, task 2).
+
+    Returns None when the plan is unusable — the caller falls back to the
+    static packs instead of running a half-broken plan. Planned packs must
+    not re-extract base identity keys (those are deterministic).
+    """
+    items = raw.get("packs") if isinstance(raw, dict) else None
+    if not isinstance(items, list) or not 2 <= len(items) <= 6:
+        return None
+    result: list[dict[str, Any]] = []
+    seen_pack_keys: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        key = _pack_key(item.get("packKey"))
+        queries = [str(value).strip()[:120] for value in (item.get("queries") or []) if str(value).strip()][:6]
+        element_keys = [
+            _pack_key(value) for value in (item.get("elementKeys") or [])
+            if _pack_key(value)
+        ][:8]
+        element_keys = [k for k in element_keys if k not in _BASE_IDENTITY_ELEMENT_KEYS]
+        if not key or key in seen_pack_keys or not queries or not element_keys:
+            continue
+        seen_pack_keys.add(key)
+        result.append({
+            "packKey": key,
+            "packName": str(item.get("packName") or key)[:256],
+            "elementKeys": element_keys,
+            "queries": queries,
+        })
+    return result if len(result) >= 2 else None
+
+
+def _plan_element_packs(
+    context: dict[str, Any],
+    run_id: int,
+    llm_service: Any | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Dynamic element-pack planning with the static packs as deterministic
+    fallback (PRD Phase 5, task 2: 合同类型、标的和画像要素由 LLM 动态规划)."""
+    from ...services.llm_service import LLMService
+
+    if llm_service is None:
+        llm_service = LLMService()
+    case = context.get("case") or {}
+    try:
+        raw = llm_service.plan_contract_elements(
+            case, context.get("clauses") or [], run_id
+        )
+        packs = _normalize_planned_packs(raw)
+        if packs:
+            return packs, {
+                "source": "LLM_PLANNED",
+                "contractTypeRefined": str(raw.get("contractTypeRefined") or case.get("contractType") or "OTHER")[:64],
+                "subjectSummary": str(raw.get("subjectSummary") or "")[:1000],
+                "rationale": str(raw.get("rationale") or "")[:1000],
+            }
+        logger.warning("LLM element plan was unusable; falling back to static packs")
+    except Exception as exc:
+        logger.warning("LLM element planning failed; falling back to static packs: %s", exc)
+    return [dict(pack) for pack in ELEMENT_PACKS], {
+        "source": "STATIC_FALLBACK",
+        "contractTypeRefined": str(case.get("contractType") or "OTHER")[:64],
+        "subjectSummary": "",
+        "rationale": "静态要素包（模型规划不可用时的确定性回退）",
+    }
+
+
+def _previous_settled_elements(
+    case_id: int, document_id: int,
+) -> tuple[list[dict[str, Any]], int | None]:
+    """Elements of the latest finished snapshot for this document.
+
+    Settled = human-reviewed (review_status set) or EXTRACTED/CONFIRMED at
+    confidence ≥ threshold. A field-level rerun carries these instead of
+    re-extracting them (PRD Phase 5, tasks 5/6: 只重跑失败或低置信度字段，
+    不静默覆盖人工确认值).
+    """
+    from ..persistence import _conn, _normalize_value
+
+    if not document_id:
+        return [], None
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT s.id AS snapshotId,
+                          e.id, e.element_key AS elementKey, e.category,
+                          e.value_type AS valueType, e.raw_value AS rawValue,
+                          e.normalized_value_json AS normalizedValue,
+                          e.status, e.confidence, e.source, e.applicable,
+                          e.occurrence_no AS occurrenceNo,
+                          e.validation_json AS validation,
+                          e.manual_override AS manualOverride,
+                          e.review_status AS reviewStatus, e.review_note AS reviewNote,
+                          e.reviewed_by AS reviewedBy, e.reviewed_at AS reviewedAt
+                   FROM contract_extraction_snapshot s
+                   JOIN contract_extracted_element e ON e.snapshot_id = s.id
+                   WHERE s.case_id=%s AND s.document_id=%s
+                     AND s.status IN ('READY_FOR_CONFIRMATION','CONFIRMED')
+                   ORDER BY s.id DESC, e.id""",
+                (case_id, document_id),
+            )
+            rows = cur.fetchall()
+    if not rows:
+        return [], None
+    base_snapshot_id = int(rows[0]["snapshotId"])
+    settled: list[dict[str, Any]] = []
+    seen_keys: set[str] = set()
+    for row in rows:
+        if int(row["snapshotId"]) != base_snapshot_id:
+            continue
+        item = _normalize_value(row)
+        for field in ("normalizedValue", "validation"):
+            try:
+                item[field] = json.loads(item[field]) if isinstance(item.get(field), str) else item.get(field)
+            except Exception:
+                pass
+        key = str(item.get("elementKey") or "")
+        if not key or key in seen_keys:
+            continue
+        reviewed = bool(item.get("reviewStatus"))
+        status = str(item.get("status") or "").upper()
+        confidence = float(item.get("confidence") or 0)
+        if reviewed or (status in _SETTLED_ELEMENT_STATUSES and confidence >= _SETTLED_CONFIDENCE):
+            seen_keys.add(key)
+            settled.append(item)
+    return settled, base_snapshot_id
+
+
 def select_element_packs(state: dict[str, Any]) -> dict[str, Any]:
     context = state.get("extraction_context") or {}
-    contract_type = str((context.get("case") or {}).get("contractType") or "OTHER")
-    packs = [dict(pack) for pack in ELEMENT_PACKS]
+    case = context.get("case") or {}
+    contract_type = str(case.get("contractType") or "OTHER")
+    run_id = int(state.get("run_id") or 0)
+
+    packs, plan_meta = _plan_element_packs(context, run_id)
+
+    # Field-level rerun (PRD Phase 5, task 6): settled elements of the
+    # previous snapshot are carried, and only packs that still have pending
+    # element keys are retrieved/extracted — no repeated OCR, embedding or
+    # whole-contract analysis for settled fields.
+    try:
+        carried, base_snapshot_id = _previous_settled_elements(
+            int(state.get("subject_id") or 0),
+            int((context.get("document") or {}).get("id") or 0),
+        )
+    except Exception as exc:
+        # A transient lookup failure must not kill the whole run — degrade
+        # to a full extraction (the failure strategy keeps the happy path).
+        logger.warning("Settled-element lookup failed; running full extraction: %s", exc)
+        carried, base_snapshot_id = [], None
+    rerun: dict[str, Any] | None = None
+    if carried:
+        carried_keys = {item.get("elementKey") for item in carried}
+        pending_packs = []
+        for pack in packs:
+            pending_keys = [
+                key for key in pack.get("elementKeys") or []
+                if key not in carried_keys
+            ]
+            if pending_keys:
+                pending_packs.append({**pack, "elementKeys": pending_keys})
+        pending_pack_keys = {pack["packKey"] for pack in pending_packs}
+        skipped_packs = [pack["packKey"] for pack in packs if pack["packKey"] not in pending_pack_keys]
+        for item in carried:
+            item.setdefault("validation", {})
+            item["validation"]["carriedFromSnapshotId"] = base_snapshot_id
+        rerun = {
+            "baseSnapshotId": base_snapshot_id,
+            "carriedCount": len(carried),
+            "carriedElementKeys": sorted(carried_keys),
+            "pendingPacks": [pack["packKey"] for pack in pending_packs],
+            "skippedPacks": skipped_packs,
+        }
+        packs = pending_packs
+
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "select_element_packs",
         "element_packs": packs,
+        "carried_elements": carried,
         "plan": {
             "type": "CONTRACT_ELEMENT_EXTRACTION",
             "contractType": contract_type,
             "packs": [pack["packKey"] for pack in packs],
-            "boundedCalls": len(packs) * 2,
+            "boundedCalls": len(packs) * 2 + 1,
+            "baseIdentityWorkUnit": dict(_BASE_IDENTITY_WORK_UNIT),
+            "planning": plan_meta,
+            "rerun": rerun,
         },
         "observations": [{
-            "callId": f"extraction-plan-{state.get('run_id', 0)}",
+            "callId": f"extraction-plan-{run_id}",
             "planStepId": "select_element_packs",
             "toolName": "planContractElementExtraction",
             "arguments": {"contractType": contract_type},
-            "output": {"packs": [pack["packKey"] for pack in packs], "maxRetries": 1},
+            "output": {
+                "packs": [pack["packKey"] for pack in packs],
+                "planningSource": plan_meta["source"],
+                "contractTypeRefined": plan_meta["contractTypeRefined"],
+                "subjectSummary": plan_meta["subjectSummary"],
+                "baseIdentityWorkUnit": _BASE_IDENTITY_WORK_UNIT["work_unit_id"],
+                "rerun": rerun,
+                "maxRetries": 1,
+            },
             "status": "DONE",
         }],
     }
@@ -343,6 +567,42 @@ def retrieve_element_evidence(state: dict[str, Any]) -> dict[str, Any]:
         "element_evidence": evidence_by_pack,
         "citations": citations,
         "observations": observations,
+    }
+
+
+def extract_base_identity_fields(state: dict[str, Any]) -> dict[str, Any]:
+    """Run the fixed base-identity WorkUnit (PRD Phase 5, task 1).
+
+    Deterministic only — confirmed intake/case facts normalized and
+    dedicated-validated, with canonical citations restored from the clause
+    evidence. No retrieval, no LLM, no rerun needed for this unit.
+    """
+    context = state.get("extraction_context") or {}
+    fields = _canonical_base_fields(context)
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "extract_base_identity_fields",
+        "base_identity_fields": fields,
+        "observations": [{
+            "callId": f"extraction-base-identity-{state.get('run_id', 0)}",
+            "planStepId": "extract_base_identity_fields",
+            "toolName": "normalizeBaseIdentityFields",
+            "arguments": {
+                "workUnitId": _BASE_IDENTITY_WORK_UNIT["work_unit_id"],
+                "requiredChecks": _BASE_IDENTITY_WORK_UNIT["required_checks"],
+            },
+            "output": {
+                "fieldCount": len(fields),
+                "deterministicCount": sum(
+                    1 for field in fields if field.get("validation", {}).get("deterministic")
+                ),
+                "needsDeterministicReview": [
+                    field["key"] for field in fields
+                    if not field.get("validation", {}).get("deterministic")
+                ],
+            },
+            "status": "DONE",
+        }],
     }
 
 
@@ -499,8 +759,10 @@ def validate_extracted_elements(state: dict[str, Any]) -> dict[str, Any]:
     context = state.get("extraction_context") or {}
     evidence = [item for values in (state.get("element_evidence") or {}).values() for item in values]
     evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
+    snapshot_hash = str(context.get("evidenceSnapshotHash") or "")
     validated = []
     unsupported = 0
+    typed_flagged = 0
     for item in state.get("extracted_elements") or []:
         value = dict(item)
         citations = [c for c in value.get("citations") or [] if _citation_supported(c, evidence_by_id)]
@@ -508,37 +770,108 @@ def validate_extracted_elements(state: dict[str, Any]) -> dict[str, Any]:
             unsupported += len(value.get("citations") or []) - len(citations)
         value["citations"] = citations
         value["confidence"] = _clamp_confidence(value.get("confidence"))
+        value.setdefault("validation", {})
+        # PRD Phase 5, task 4: every element and citation binds the evidence
+        # snapshot hash it was extracted from.
+        if snapshot_hash:
+            value["validation"]["evidenceSnapshotHash"] = snapshot_hash
+            for citation in value["citations"]:
+                citation.setdefault("snapshotHash", snapshot_hash)
+        # PRD Phase 5, task 3: dedicated deterministic validation for typed
+        # values — a MONEY/DATE/PARTY element whose normalizedValue cannot be
+        # parsed deterministically must not stay EXTRACTED.
+        typed_ok, typed_issues = validate_structured_element(
+            value.get("valueType"), value.get("normalizedValue")
+        )
+        if not typed_ok:
+            typed_flagged += 1
+            value["validation"]["typedIssues"] = typed_issues
+            value["confidence"] = min(value["confidence"], 0.45)
         if not citations:
             value["status"] = "NEEDS_REVIEW"
             value["confidence"] = min(value["confidence"], 0.45)
-        elif value["confidence"] >= 0.75 and value.get("status") != "NOT_FOUND":
+        elif value["confidence"] >= 0.75 and value.get("status") != "NOT_FOUND" and typed_ok:
             value["status"] = "EXTRACTED"
         else:
             value["status"] = "NEEDS_REVIEW"
-        value.setdefault("validation", {})
         value["validation"].update({
             "citationVerified": bool(citations),
             "citationCount": len(citations),
             "documentVersion": (context.get("document") or {}).get("version"),
         })
         validated.append(value)
+    # PRD Phase 5, task 6: settled elements of the previous snapshot are
+    # carried into this run without re-extraction (or re-validation — they
+    # cite their own snapshot's evidence).
+    carried = state.get("carried_elements") or []
     counts = {
-        "total": len(validated),
+        "total": len(validated) + len(carried),
         "extracted": sum(1 for item in validated if item.get("status") == "EXTRACTED"),
         "needsReview": sum(1 for item in validated if item.get("status") == "NEEDS_REVIEW"),
         "unsupportedCitationCount": unsupported,
+        "typedValidationFlaggedCount": typed_flagged,
+        "carriedFromPrevious": len(carried),
     }
     return {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "validate_extracted_elements",
-        "extracted_elements": validated,
+        "extracted_elements": validated + carried,
         "extraction_validation": counts,
         "observations": [{
             "callId": f"extraction-validation-{state.get('run_id', 0)}",
             "planStepId": "validate_extracted_elements",
             "toolName": "validateContractElementCitations",
-            "arguments": {"elementCount": len(validated)},
+            "arguments": {"elementCount": len(validated), "carriedCount": len(carried)},
             "output": counts,
+            "status": "DONE",
+        }],
+    }
+
+
+def audit_element_coverage(state: dict[str, Any]) -> dict[str, Any]:
+    """Coverage audit for extracted elements (PRD Phase 5).
+
+    Observational only: reports citation support and snapshot-hash binding
+    rates so the acceptance metrics (字段级引用支持率 ≥97%, every element
+    traceable to the snapshot) are measurable per run, and names the
+    uncited elements for the reviewer.
+    """
+    context = state.get("extraction_context") or {}
+    elements = state.get("extracted_elements") or []
+    snapshot_hash = str(context.get("evidenceSnapshotHash") or "")
+    uncited = [item.get("elementKey") for item in elements if not item.get("citations")]
+    if snapshot_hash:
+        unbound = [
+            item.get("elementKey") for item in elements
+            if item.get("validation", {}).get("evidenceSnapshotHash") != snapshot_hash
+        ]
+    else:
+        unbound = uncited
+    total = len(elements)
+    audit = {
+        "totalElements": total,
+        "citedElements": total - len(uncited),
+        "citationSupportRate": round((total - len(uncited)) / total, 4) if total else 0.0,
+        "snapshotHashBoundElements": total - len(unbound),
+        "snapshotHashBindingRate": round((total - len(unbound)) / total, 4) if total else 0.0,
+        "uncitedElements": uncited,
+        "snapshotHashUnboundElements": unbound,
+        "carriedElements": sum(
+            1 for item in elements
+            if item.get("validation", {}).get("carriedFromSnapshotId")
+        ),
+        "workUnitId": "element_coverage_audit",
+    }
+    return {
+        "state_revision": state.get("state_revision", 0) + 1,
+        "current_node": "audit_element_coverage",
+        "element_coverage_audit": audit,
+        "observations": [{
+            "callId": f"extraction-coverage-audit-{state.get('run_id', 0)}",
+            "planStepId": "audit_element_coverage",
+            "toolName": "auditElementCoverage",
+            "arguments": {"elementCount": total},
+            "output": audit,
             "status": "DONE",
         }],
     }
@@ -615,7 +948,15 @@ def _canonical_citations(
 
 
 def _canonical_base_fields(context: dict[str, Any]) -> list[dict[str, Any]]:
-    """Project human-confirmed case facts into the profile without another extraction."""
+    """Project human-confirmed case facts into the profile without another
+    extraction (PRD Phase 5, tasks 1+3: the fixed base-identity WorkUnit).
+
+    Every value additionally passes through the deterministic normalizers and
+    the dedicated per-field validation in element_normalization — the
+    confirmed value itself is never rewritten, but a normalizedValue and a
+    deterministic check result are attached so downstream consumers can trust
+    the shape without re-parsing.
+    """
     case = context.get("case") or {}
     our_side = str(case.get("ourSide") or "").upper()
     if our_side == "A":
@@ -641,16 +982,22 @@ def _canonical_base_fields(context: dict[str, Any]) -> list[dict[str, Any]]:
         if value in (None, ""):
             continue
         citations = _canonical_citations(context, intake_key, value)
+        check = validate_base_field(key, value)
         fields.append({
             "key": key,
             "label": label,
             "value": value,
+            "normalizedValue": check.get("normalized"),
             "valueType": value_type,
             "importance": "CORE",
             "confidence": 1.0,
             "status": "EXTRACTED" if citations else "CONFIRMED",
             "source": "CONFIRMED_INTAKE" if (context.get("confirmedIntake") or {}).get("id") else "CONFIRMED_CASE",
             "citations": citations,
+            "validation": {
+                "deterministic": check.get("status") == "EXTRACTED",
+                "issues": check.get("issues") or [],
+            },
             "decision": {
                 "intakeId": (context.get("confirmedIntake") or {}).get("id"),
                 "confirmedAt": (context.get("confirmedIntake") or {}).get("confirmedAt"),
@@ -697,7 +1044,10 @@ def normalize_contract_profile(
     context: dict[str, Any],
     elements: list[dict[str, Any]],
     evidence: list[dict[str, Any]],
+    base_fields: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``base_fields`` comes from the fixed base-identity WorkUnit node when
+    called from the graph; direct callers fall back to recomputing it."""
     evidence_by_id = {str(item.get("sourceId")): item for item in evidence if item.get("sourceId")}
     raw = raw_profile.get("profile") if isinstance(raw_profile, dict) else None
     if not isinstance(raw, dict):
@@ -735,8 +1085,10 @@ def normalize_contract_profile(
 
     # Base fields are canonical intake facts. The optional profile model may
     # discover type-specific groups, but it cannot rewrite confirmed identity,
-    # party, amount or date values.
-    base_fields = _canonical_base_fields(context)
+    # party, amount or date values (PRD Phase 5, task 8).
+    if base_fields is None:
+        base_fields = _canonical_base_fields(context)
+    base_keys = {field["key"] for field in base_fields}
     groups = []
     field_count = len(base_fields)
     citation_count = sum(len(field["citations"]) for field in base_fields)
@@ -748,6 +1100,10 @@ def normalize_contract_profile(
         for field_index, item in enumerate(group.get("fields") or []):
             field = normalize_field(item, f"{group_key}_{field_index + 1}", "合同专属要素")
             if not field or field["status"] == "NOT_FOUND":
+                continue
+            if field["key"] in base_keys:
+                # A group field reusing a base fact key would let a later
+                # profile overwrite a confirmed fact — silently dropped.
                 continue
             fields.append(field)
             field_count += 1
@@ -783,11 +1139,23 @@ def build_contract_profile(state: dict[str, Any]) -> dict[str, Any]:
     context = state.get("extraction_context") or {}
     evidence = [item for values in (state.get("element_evidence") or {}).values() for item in values]
     elements = state.get("extracted_elements") or []
+    base_fields = state.get("base_identity_fields") or _canonical_base_fields(context)
+    # The dynamic plan's refined contract type and subject are hints for the
+    # profile model (PRD Phase 5, task 2) — never authoritative over the
+    # canonical base facts.
+    plan_meta = (state.get("plan") or {}).get("planning") or {}
+    case_hint = dict(context.get("case") or {})
+    if plan_meta.get("contractTypeRefined"):
+        case_hint["plannedContractType"] = plan_meta["contractTypeRefined"]
+    if plan_meta.get("subjectSummary"):
+        case_hint["plannedSubjectSummary"] = plan_meta["subjectSummary"]
     try:
         raw = LLMService().extract_contract_profile(
-            context.get("case") or {}, evidence, elements, int(state.get("run_id") or 0)
+            case_hint, evidence, elements, int(state.get("run_id") or 0)
         )
-        profile, validation = normalize_contract_profile(raw, context, elements, evidence)
+        profile, validation = normalize_contract_profile(
+            raw, context, elements, evidence, base_fields=base_fields
+        )
         status = "DONE"
         error = ""
         model = LLMService().model
@@ -887,6 +1255,20 @@ def mark_extraction_workflow_failed(case_id: int, run_id: int, error_message: st
         logger.warning("Failed to mark extraction workflow %s as failed: %s", run_id, exc)
 
 
+def _top_candidates_by_key(elements: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """PRD Phase 5, task 5: when several versions of the same element key
+    exist (occurrences, LLM vs fallback), every version stays a candidate —
+    only the highest-confidence one is pre-selected, the rest are kept for
+    human confirmation instead of being silently overwritten."""
+    best_by_key: dict[str, dict[str, Any]] = {}
+    for element in elements:
+        key = str(element.get("elementKey") or "")
+        best = best_by_key.get(key)
+        if best is None or float(element.get("confidence") or 0) > float(best.get("confidence") or 0):
+            best_by_key[key] = element
+    return best_by_key
+
+
 def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     from ..persistence import _conn, _json_dumps, _normalize_value
 
@@ -926,7 +1308,10 @@ def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
                     """SELECT id, element_key AS elementKey, category, value_type AS valueType,
                               raw_value AS rawValue, normalized_value_json AS normalizedValue,
                               status, confidence, source, applicable, occurrence_no AS occurrenceNo,
-                              validation_json AS validation
+                              validation_json AS validation,
+                              manual_override AS manualOverride,
+                              review_status AS reviewStatus, review_note AS reviewNote,
+                              reviewed_by AS reviewedBy, reviewed_at AS reviewedAt
                        FROM contract_extracted_element WHERE snapshot_id=%s ORDER BY id""",
                     (snapshot_id,),
                 )
@@ -937,6 +1322,11 @@ def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
                             item[field] = json.loads(item[field]) if isinstance(item.get(field), str) else item.get(field)
                         except Exception:
                             pass
+                    # Human review / correction state is surfaced in the
+                    # reused artifact (PRD Phase 5, task 7: 保存确认、修正).
+                    for field in ("manualOverride", "reviewStatus", "reviewNote", "reviewedBy", "reviewedAt"):
+                        if item.get(field) is None:
+                            item.pop(field, None)
                 try:
                     persisted_profile = json.loads(existing.get("profileJson") or "{}")
                 except Exception:
@@ -985,19 +1375,27 @@ def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
                     (run_id, snapshot_id),
                 )
             else:
+                # Field-level rerun provenance (PRD Phase 5, task 7): the new
+                # snapshot chains to its ancestor and records exactly which
+                # packs/elements were carried vs re-extracted.
+                rerun = (state.get("plan") or {}).get("rerun")
                 cur.execute(
                     """INSERT INTO contract_extraction_snapshot
                        (case_id, document_id, document_version, content_hash,
                         parser_version, schema_version, prompt_version, llm_model,
                        retrieval_version, profile_schema_version, profile_status,
-                       status, source_run_id)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'RUNNING',%s)""",
+                       status, source_run_id, base_snapshot_id, rerun_scope_json)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'RUNNING',%s,%s,%s)""",
                     (case_id, document.get("id"), document.get("version"), content_hash,
                      PARSER_VERSION, EXTRACTION_SCHEMA_VERSION, EXTRACTION_PROMPT_VERSION,
                      str(getattr(__import__("app.config", fromlist=["settings"]), "settings").llm_model or ""),
-                     EXTRACTION_RETRIEVAL_VERSION, PROFILE_SCHEMA_VERSION, "RUNNING", run_id),
+                     EXTRACTION_RETRIEVAL_VERSION, PROFILE_SCHEMA_VERSION, "RUNNING", run_id,
+                     (rerun or {}).get("baseSnapshotId"),
+                     _json(rerun) if rerun else None),
                 )
                 snapshot_id = int(cur.lastrowid)
+            best_by_key = _top_candidates_by_key(elements)
+
             for element in elements:
                 cur.execute(
                     """INSERT INTO contract_extracted_element
@@ -1033,13 +1431,23 @@ def _persist_snapshot(state: dict[str, Any]) -> dict[str, Any]:
                          ",".join(source.get("retrievalSources") or []) or source.get("retrievalType"),
                          source.get("fusionScore") or source.get("score")),
                     )
+                carried_from = (element.get("validation") or {}).get("carriedFromSnapshotId")
+                if carried_from:
+                    selected = 0
+                    reason = f"沿用上一版本已确认要素（字段级重跑未重提取，来源快照 #{carried_from}）"
+                elif best_by_key.get(element.get("elementKey")) is element:
+                    selected = 1
+                    reason = "当前最高置信度候选；最终以人工确认结果为准"
+                else:
+                    selected = 0
+                    reason = "与同键其他版本冲突，保留候选供人工确认"
                 cur.execute(
                     """INSERT INTO contract_element_candidate
                        (element_id, raw_value, normalized_value_json, source, confidence, selected, reason)
-                       VALUES (%s,%s,%s,%s,%s,1,%s)""",
+                       VALUES (%s,%s,%s,%s,%s,%s,%s)""",
                     (element_id, element.get("rawValue"), _json_dumps(element.get("normalizedValue") or {}),
                      element.get("source") or "LLM", element.get("confidence"),
-                     "当前最高置信度候选；最终以人工确认结果为准"),
+                     selected, reason),
                 )
 
             profile_hash = hashlib.sha256(
@@ -1097,6 +1505,10 @@ def persist_extraction_snapshot(state: dict[str, Any]) -> dict[str, Any]:
         "elements": snapshot.get("elements") or state.get("extracted_elements") or [],
         "contractProfile": snapshot.get("profile") or state.get("contract_profile") or {},
         "elementSummary": validation,
+        "baseIdentity": state.get("base_identity_fields") or [],
+        "coverageAudit": state.get("element_coverage_audit") or {},
+        "rerun": (state.get("plan") or {}).get("rerun"),
+        "planning": (state.get("plan") or {}).get("planning"),
         "citations": state.get("citations") or [],
         "retrievalVersion": EXTRACTION_RETRIEVAL_VERSION,
         "promptVersion": EXTRACTION_PROMPT_VERSION,
@@ -1132,26 +1544,66 @@ def persist_extraction_snapshot(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_contract_extraction_graph(checkpointer: Any = None) -> Any:
-    builder = StateGraph(BaseGraphState)
-    builder.add_node("load_extraction_context", load_extraction_context)
-    builder.add_node("select_element_packs", select_element_packs)
-    builder.add_node("retrieve_element_evidence", retrieve_element_evidence)
-    builder.add_node("extract_element_batches", extract_element_batches)
-    builder.add_node("validate_extracted_elements", validate_extracted_elements)
-    builder.add_node("build_contract_profile", build_contract_profile)
-    builder.add_node("persist_extraction_snapshot", persist_extraction_snapshot)
+# §4.2 role → skeleton stage mapping for element extraction (PRD Phase 5):
+#   context          = load_extraction_context
+#   planner          = select_element_packs (base identity WorkUnit + dynamic
+#                      LLM pack planning + field-level rerun scope)
+#   retriever        = retrieve_element_evidence
+#   analyzer         = extract_base_identity_fields (deterministic) +
+#                      extract_element_batches (LLM)
+#   validator        = validate_extracted_elements
+#   coverage_auditor = audit_element_coverage
+#   composer         = build_contract_profile
+#   persistence      = persist_extraction_snapshot
+# Extraction has no interrupt stage (confirmation happens on the Java side),
+# so human_gate is None.
+CONTRACT_EXTRACTION_SPEC = TaskSpec(
+    task_type="CONTRACT_ELEMENT_EXTRACTION",
+    graph_name="contract_extraction",
+    graph_version="v1",
+    prompt_version=EXTRACTION_PROMPT_VERSION,
+    context=Role((
+        ("load_extraction_context", load_extraction_context),
+    )),
+    planner=Role((
+        ("select_element_packs", select_element_packs),
+    )),
+    retriever=Role((
+        ("retrieve_element_evidence", retrieve_element_evidence),
+    )),
+    analyzer=Role((
+        ("extract_base_identity_fields", extract_base_identity_fields),
+        ("extract_element_batches", extract_element_batches),
+    )),
+    validator=Role((
+        ("validate_extracted_elements", validate_extracted_elements),
+    )),
+    coverage_auditor=Role((
+        ("audit_element_coverage", audit_element_coverage),
+    )),
+    composer=Role((
+        ("build_contract_profile", build_contract_profile),
+    )),
+    persistence=Role((
+        ("persist_extraction_snapshot", persist_extraction_snapshot),
+    )),
+    edges=(
+        ("select_element_packs", "retrieve_element_evidence"),
+        ("retrieve_element_evidence", "extract_base_identity_fields"),
+        ("extract_base_identity_fields", "extract_element_batches"),
+        ("extract_element_batches", "validate_extracted_elements"),
+        ("validate_extracted_elements", "audit_element_coverage"),
+        ("audit_element_coverage", "build_contract_profile"),
+        ("build_contract_profile", "persist_extraction_snapshot"),
+    ),
+)
 
-    builder.add_edge(START, "load_extraction_context")
-    builder.add_edge("load_extraction_context", "select_element_packs")
-    builder.add_edge("select_element_packs", "retrieve_element_evidence")
-    builder.add_edge("retrieve_element_evidence", "extract_element_batches")
-    builder.add_edge("extract_element_batches", "validate_extracted_elements")
-    builder.add_edge("validate_extracted_elements", "build_contract_profile")
-    builder.add_edge("build_contract_profile", "persist_extraction_snapshot")
-    builder.add_edge("persist_extraction_snapshot", END)
-    kwargs = {"checkpointer": checkpointer} if checkpointer else {}
-    return builder.compile(**kwargs)
+
+def build_contract_extraction_graph(checkpointer: Any = None) -> Any:
+    """Build and compile the ContractExtractionGraph from its TaskSpec."""
+    from ..harness.graph_builder import build_task_graph
+
+    return build_task_graph(CONTRACT_EXTRACTION_SPEC, checkpointer)
 
 
 def register(registry=None) -> None:

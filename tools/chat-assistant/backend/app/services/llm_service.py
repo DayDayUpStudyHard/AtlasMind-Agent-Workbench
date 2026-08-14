@@ -1161,6 +1161,83 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
             max_tokens=7200,
         )
 
+    def plan_contract_elements(
+        self,
+        case: dict,
+        clauses_preview: list[dict],
+        run_id: int = 0,
+    ) -> dict:
+        """Dynamically plan extraction element packs for one contract
+        (PRD Phase 5, task 2: 合同类型、标的和画像要素由 LLM 动态规划).
+
+        The static element packs stay the deterministic fallback when this
+        call fails or returns an unusable plan — the graph decides, not the
+        model. Each proposed pack must carry stable keys and Chinese queries;
+        unknown element keys are fine (dynamic elements) but must be
+        snake_case ASCII.
+        """
+        system_prompt = """
+你是合同事实提取的计划节点。输入是合同案例元数据与若干条款预览。
+你的任务是规划本次提取要覆盖的要素包（pack），而不是提取事实本身。
+
+只输出一个 JSON 对象：
+{
+  "contractTypeRefined": "模型判断的合同类型（英文枚举或 OTHER）",
+  "subjectSummary": "标的一句话中文摘要，如：为某电厂提供勘察设计服务",
+  "rationale": "为什么这样规划，一句中文",
+  "packs": [
+    {
+      "packKey": "稳定的英文业务键（snake_case）",
+      "packName": "中文业务分组名称",
+      "elementKeys": ["该包要提取的要素键（snake_case，与通用包不重复）"],
+      "queries": ["用于检索合同条款的中文查询词"]
+    }
+  ]
+}
+
+规则：
+1. 不要创建重复覆盖基础身份要素（合同名称、类型、甲乙方、总金额、币种、
+   签订/生效/到期日期）的包——这些由系统确定性规范化处理，模型不得重提。
+2. pack 数量 2～6 个，每包 elementKeys 2～8 个、queries 2～6 条。
+3. 包要贴合本合同类型：勘察设计合同关注设计范围、交付成果、验收标准；
+   采购合同关注付款、交付、质保；服务合同关注 SLA、考核指标。不要套模板。
+4. 每个 elementKey 与查询词都必须能在合同条款中找到对应内容，
+   “通常有”不是创建要素的理由。
+5. contractTypeRefined 只写英文枚举或 OTHER，不要解释。
+6. 输出不能包含 Markdown 或额外字段。
+""".strip()
+        compact_preview = []
+        for item in (clauses_preview or [])[:8]:
+            compact_preview.append({
+                "clauseId": item.get("clauseId"),
+                "clauseNumber": item.get("clauseNumber"),
+                "title": item.get("title"),
+                "clauseText": str(item.get("clauseText") or item.get("content") or "")[:800],
+            })
+        payload = {
+            "case": {
+                "caseKey": case.get("caseKey"),
+                "title": case.get("title"),
+                "contractType": case.get("contractType"),
+                "ourSide": case.get("ourSide"),
+            },
+            "clausesPreview": compact_preview,
+        }
+        try:
+            template, temperature = self._prompt("contract_element_planning", run_id)
+        except Exception:
+            template, temperature = system_prompt, 0.0
+        if not template:
+            template, temperature = system_prompt, 0.0
+        return self._structured_completion(
+            template,
+            payload,
+            temperature=0.0 if temperature is None else min(float(temperature), 0.1),
+            timeout_seconds=max(10.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
+            required_key="packs",
+            max_tokens=3200,
+        )
+
     def enrich_contract_timeline(self, candidates: list[dict]) -> dict:
         """Classify timeline candidates using their complete source clauses."""
         system_prompt = """

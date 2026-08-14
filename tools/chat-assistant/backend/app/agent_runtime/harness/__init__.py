@@ -34,9 +34,9 @@ would change risk v1 output fields, which Phase 4 forbids):
 * ``run_deterministic_rules`` / ``retrieve_fulfillment_evidence``
 * dead legacy ``_retrieve_one_domain`` / ``_load_type_clauses`` (kept per
   project rule: legacy code is not deleted)
-* ``contract_extraction.py:_run_async`` — a third copy that lacks the
-  contextvars wrapper (re-pointing it is a Phase 5 item, not a zero-change
-  alias)
+* ``contract_extraction.py:_retrieve_pack`` (kept as legacy; its ``_run_async``
+  alias was re-pointed to the shared contextvars-safe ``run_async`` in
+  Phase 5, so there is no third copy anymore)
 
 TaskSpec with the §6.1 role hooks, the common graph builder and the
 per-WorkUnit budget contract are in the harness (Phase 4 / §14-4); business
