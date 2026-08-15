@@ -1,5 +1,17 @@
 # Debug 修复记录
 
+## 2026-08-15：GitHub Actions Docker 依赖构建修复
+
+### 问题
+
+后端与前端测试全部通过后，Docker 镜像验证在 AI 服务镜像构建阶段失败。`requirements.txt` 已引用 `requirements-graph.txt`，但 Dockerfile 在执行 `pip install -r requirements.txt` 前只复制了主依赖文件，容器内找不到被引用的依赖清单。
+
+### 修复
+
+AI Dockerfile 现在在安装依赖前同时复制 `requirements.txt` 和 `requirements-graph.txt`，使本地开发、CI 测试和生产镜像使用同一组依赖声明。
+
+---
+
 ## 2026-08-15：GitHub Actions 二次 CI 修复
 
 ### 问题

@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY requirements.txt requirements-graph.txt ./
 RUN pip install -r requirements.txt
 
 # Contract PDF auto-reparse uses PaddleOCR when the extracted text layer is
