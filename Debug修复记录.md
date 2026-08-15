@@ -1,5 +1,23 @@
 # Debug 修复记录
 
+## 2026-08-15：GitHub Actions 二次 CI 修复
+
+### 问题
+
+首次 CI 修复后，Java 与 Python 已从环境启动错误转为实际执行失败。GitHub 日志确认 Java Maven Wrapper 在 Runner 上下载 wrapper JAR 时写入失败；Python 有 13 项测试隐式依赖开发机 `.env` 中的 LLM Key，干净 CI 环境应当使用测试替身而不是外部模型。
+
+### 修复
+
+1. Java CI 直接使用 GitHub Ubuntu Runner 自带的 Maven 执行 `mvn test -B`，不再依赖运行时下载 Maven Wrapper JAR；同时升级 `actions/setup-java` 至 v5。
+2. Python Test 步骤仅注入测试占位的 `LLM_API_KEY`、本地不可达 `LLM_BASE_URL` 与测试模型名。测试中的 mock 与 Golden 环境仍负责替代模型调用，因此 CI 不读取真实密钥、不访问真实模型服务。
+
+### 验证结果
+
+- 使用相同的占位 LLM 配置执行 Python 全量测试：387 项通过。
+- Java 本地 `mvnw.cmd test -B`：43 项通过；CI 改为使用与 GitHub Runner 一致的 Maven 调用路径。
+
+---
+
 ## 2026-08-15：GitHub Actions 后端 CI 失败修复
 
 ### 问题
