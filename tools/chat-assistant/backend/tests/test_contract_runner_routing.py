@@ -1,9 +1,10 @@
 import unittest
+from unittest.mock import patch
 
 from app.agent_runtime.api_models import AgentTaskContext, StartRunRequest
 from app.agent_runtime.contract_tools import ContractToolRegistry
 from app.agent_runtime.policy import AgentExecutionPolicy
-from app.agent_runtime.runner import AgentRunner
+from app.agent_runtime.runner import AgentRunner, RunDispatcher
 
 
 def contract_context() -> AgentTaskContext:
@@ -60,6 +61,49 @@ class ContractRunnerRoutingTest(unittest.IsolatedAsyncioTestCase):
 
         names = [call["name"] for call in reflection["suggestedToolCalls"]]
         self.assertEqual(["readContractClause", "searchPolicyKnowledge"], names)
+
+    async def test_quota_callback_uses_java_internal_token(self):
+        captured = {}
+
+        class FakeResponse:
+            status = 200
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+        class FakeSession:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            def post(self, url, headers):
+                captured["url"] = url
+                captured["headers"] = headers
+                return FakeResponse()
+
+        dispatcher = RunDispatcher(
+            runner=object(), run_store=object(), report_store=object()
+        )
+        with (
+            patch("app.agent_runtime.runner.aiohttp.ClientSession", return_value=FakeSession()),
+            patch("app.agent_runtime.runner.settings.java_backend_url", "http://agent-server:18080"),
+            patch("app.agent_runtime.runner.settings.java_internal_token", "java-callback-token"),
+        ):
+            await dispatcher._settle_quota(42, "COMPLETED")
+
+        self.assertEqual(
+            "http://agent-server:18080/api/internal/quota/confirm/42",
+            captured["url"],
+        )
+        self.assertEqual(
+            "java-callback-token",
+            captured["headers"]["X-Internal-Token"],
+        )
 
     async def test_contract_evidence_guarantee_requires_policy_knowledge(self):
         class TraceSpy:

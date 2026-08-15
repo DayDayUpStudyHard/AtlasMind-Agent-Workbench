@@ -73,7 +73,8 @@ public class AiSessionServiceImpl implements AiSessionService {
         return message;
     }
 
-    private void requireSession(Long sessionId, String ownerToken) {
+    @Override
+    public KbQaSession requireSession(Long sessionId, String ownerToken) {
         if (sessionId == null || ownerToken == null || ownerToken.isBlank()) {
             throw new IllegalArgumentException("AI 会话不存在");
         }
@@ -84,6 +85,7 @@ public class AiSessionServiceImpl implements AiSessionService {
                 ownerToken.getBytes(StandardCharsets.UTF_8))) {
             throw new IllegalArgumentException("AI 会话不存在");
         }
+        return session;
     }
 
     private String stringValue(Map<String, Object> request, String key, String fallback) {

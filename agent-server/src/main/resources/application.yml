@@ -10,6 +10,10 @@ spring:
   profiles:
     active: dev
 
+  mvc:
+    async:
+      request-timeout: 300000
+
   servlet:
     multipart:
       max-file-size: ${KB_MAX_FILE_SIZE:300MB}
@@ -53,7 +57,7 @@ management:
         enabled: true
   endpoint:
     health:
-      show-details: always
+      show-details: when_authorized
 
 atlasmind:
   search:
@@ -62,6 +66,8 @@ atlasmind:
     url: ${CHAT_ASSISTANT_URL:http://127.0.0.1:18088}
     token: ${CHAT_ASSISTANT_TOKEN:}
     timeout-seconds: ${CHAT_ASSISTANT_TIMEOUT_SECONDS:12}
+    stream-timeout-seconds: ${CHAT_ASSISTANT_STREAM_TIMEOUT_SECONDS:300}
+    rate-limit-per-minute: ${CHAT_RATE_LIMIT_PER_MINUTE:12}
   embedding:
     api-key: ${EMBEDDING_API_KEY:}
     base-url: ${EMBEDDING_BASE_URL:https://api.siliconflow.cn/v1}

@@ -57,3 +57,6 @@ agent-server/target/
 .claude/
 __pycache__/
 *.pyc
+
+# Local one-off diagnostics
+scripts/_tmp_*

@@ -1390,7 +1390,7 @@ class RunDispatcher:
             async with aiohttp.ClientSession() as session:
                 async with session.post(
                     url,
-                    headers={"X-Internal-Token": settings.internal_token},
+                    headers={"X-Internal-Token": settings.java_internal_token},
                 ) as resp:
                     if resp.status != 200:
                         logger.warning(

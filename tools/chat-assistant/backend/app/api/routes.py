@@ -735,8 +735,12 @@ def _dedupe_sources(items: list[dict], limit: int) -> list[dict]:
 
 
 @router.post("/send")
-async def chat_send(request: ChatRequest):
+async def chat_send(
+    request: ChatRequest,
+    x_internal_token: str | None = Header(default=None),
+):
     """Stream a RAG answer and persist session messages, trace, hits, and tool steps."""
+    _check_internal_token(x_internal_token)
 
     async def generate():
         store = None

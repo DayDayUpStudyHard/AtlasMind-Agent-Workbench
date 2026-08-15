@@ -13,6 +13,8 @@ public interface AiSessionService {
 
     KbQaSession createSession(Map<String, Object> request);
 
+    KbQaSession requireSession(Long sessionId, String ownerToken);
+
     List<KbQaMessage> listMessages(Long sessionId, String ownerToken);
 
     KbQaMessage appendMessage(Long sessionId, String ownerToken, Map<String, Object> request);

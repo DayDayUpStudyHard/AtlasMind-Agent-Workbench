@@ -66,10 +66,30 @@ class Settings:
     reranker_min_recall: int = int(os.getenv("RERANKER_MIN_RECALL", "30"))
     reranker_max_recall: int = int(os.getenv("RERANKER_MAX_RECALL", "50"))
 
+    # Java -> Python requests use CHAT_ASSISTANT_TOKEN. Python -> Java
+    # callbacks use a separate token so either direction can be rotated alone.
     internal_token: str = os.getenv("CHAT_ASSISTANT_TOKEN", "")
+    java_internal_token: str = os.getenv(
+        "JAVA_INTERNAL_TOKEN", internal_token
+    )
     java_backend_url: str = os.getenv("JAVA_BACKEND_URL", "http://localhost:18080")
     kb_chunk_insert_batch_size: int = int(os.getenv("KB_CHUNK_INSERT_BATCH_SIZE", "200"))
     kb_embedding_batch_size: int = int(os.getenv("KB_EMBEDDING_BATCH_SIZE", "16"))
+
+    # ====== External regulation MCP ======
+    regulation_mcp_enabled: bool = _bool_env("REGULATION_MCP_ENABLED", "false")
+    regulation_mcp_url: str = os.getenv("REGULATION_MCP_URL", "").strip()
+    regulation_mcp_api_key: str = os.getenv("REGULATION_MCP_API_KEY", "").strip()
+    regulation_mcp_tool_name: str = os.getenv("REGULATION_MCP_TOOL_NAME", "search_regulations").strip()
+    regulation_mcp_timeout_seconds: float = float(os.getenv("REGULATION_MCP_TIMEOUT_SECONDS", "12"))
+    regulation_mcp_max_calls_per_run: int = int(os.getenv("REGULATION_MCP_MAX_CALLS_PER_RUN", "2"))
+    regulation_mcp_max_results: int = int(os.getenv("REGULATION_MCP_MAX_RESULTS", "5"))
+    regulation_mcp_cache_seconds: int = int(os.getenv("REGULATION_MCP_CACHE_SECONDS", "21600"))
+    regulation_mcp_allowed_domains: tuple[str, ...] = tuple(
+        domain.strip().lower()
+        for domain in os.getenv("REGULATION_MCP_ALLOWED_DOMAINS", "gov.cn,court.gov.cn,samr.gov.cn").split(",")
+        if domain.strip()
+    )
 
     # ====== OCR（扫描版 PDF，可选） ======
     pdf_parse_provider: str = os.getenv("PDF_PARSE_PROVIDER", "auto").strip().lower()

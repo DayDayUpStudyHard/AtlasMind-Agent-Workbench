@@ -9,6 +9,12 @@ import json
 import logging
 from typing import Any
 
+from app.integrations.mcp.regulation import (
+    RegulationQuery,
+    RegulationResearchGateway,
+    get_regulation_gateway,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── OpenAI function-calling definitions ────────────────────────────
@@ -177,6 +183,24 @@ CONTRACT_TOOL_DEFINITIONS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "searchExternalRegulation",
+            "description": "仅在内部合同与制度证据不足时，检索已配置的官方法规 MCP；返回外部参考来源，不得替代合同原文或内部制度证据",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "待核验的法规问题"},
+                    "jurisdiction": {"type": "string", "enum": ["CN"]},
+                    "effectiveDate": {"type": "string", "description": "法规生效日期截点，ISO 日期"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 5},
+                },
+                "required": ["query"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "calculateContractRisk",
             "description": "用固定规则和当前发现快照计算合同风险分；LLM 不得自行评分",
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -268,23 +292,31 @@ _CONCURRENT_GROUP = {
     "searchPolicyKnowledge":    "search",
     "findStandardClause":       "search",
     "searchHistoricalDecisions": "search",
+    "searchExternalRegulation": "external",
     "evaluateReviewRules":      "compute",
     "calculateContractRisk":    "compute",
 }
-_GROUP_ORDER = ["read", "search", "compute"]
+_GROUP_ORDER = ["read", "search", "external", "compute"]
 
 
 class ContractToolRegistry:
     """Registry of allowlisted contract tools."""
 
-    def __init__(self, store):  # ContractStore
+    def __init__(self, store, regulation_gateway: RegulationResearchGateway | None = None):  # ContractStore
         self.store = store
+        self.regulation_gateway = regulation_gateway or get_regulation_gateway()
 
     def definitions(self) -> list[dict]:
-        return CONTRACT_TOOL_DEFINITIONS
+        return [
+            definition for definition in CONTRACT_TOOL_DEFINITIONS
+            if definition["function"]["name"] != "searchExternalRegulation"
+            or self.regulation_gateway.available
+        ]
 
     def supports(self, tool_name: str) -> bool:
-        return tool_name in CONTRACT_TOOL_NAMES
+        return tool_name in CONTRACT_TOOL_NAMES and (
+            tool_name != "searchExternalRegulation" or self.regulation_gateway.available
+        )
 
     @staticmethod
     def concurrency_group(tool_name: str) -> str:
@@ -336,6 +368,10 @@ class ContractToolRegistry:
         if tool_name == "searchHistoricalDecisions":
             return {"items": await self.store.search_historical(case_id, arguments)}
 
+        if tool_name == "searchExternalRegulation":
+            query = RegulationQuery.from_arguments(arguments, max_results=5)
+            return (await self.regulation_gateway.search(query, ctx.run_id)).payload()
+
         if tool_name == "evaluateReviewRules":
             return {"findings": await self.store.evaluate_rules(case_id, arguments)}
 
@@ -377,7 +413,7 @@ class ContractToolRegistry:
             output = obs.get("output")
             if not isinstance(output, dict):
                 continue
-            for key in ("items", "clauses", "matches", "documents"):
+            for key in ("items", "clauses", "matches", "documents", "sources"):
                 items = output.get(key)
                 if isinstance(items, list):
                     for item in items:

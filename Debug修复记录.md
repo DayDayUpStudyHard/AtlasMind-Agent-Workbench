@@ -1,5 +1,40 @@
 # Debug 修复记录
 
+## 2026-08-15：部署安全收敛、聊天鉴权与外部法规 MCP Client 接入
+
+### 问题
+
+1. Nginx 曾将 `/api/chat/` 直接转发到 Python 服务，绕过 Java 登录态、活跃账号校验和合同可见性策略；Linux 部署还依赖 `host.docker.internal`。
+2. `/upload/` 被 Nginx 标记为七天公共缓存，覆盖了私有文件控制器的 `no-store` 和权限语义。
+3. CI 未运行 Python 测试、未构建 AI 镜像，也没有 Compose 启动后的实际冒烟验证；健康端点长期暴露详情。
+4. 合同 Agent 只能使用内部工具，无法在内部证据不足时受控检索外部法规来源。
+
+### 修复
+
+1. 浏览器聊天请求改为 `Nginx -> Java /api/chat -> Python AI`。Java 新增 SSE 转发、会话归属校验、合同访问校验和 Redis 每用户每分钟限流；Python `/api/chat/send` 必须验证内部服务令牌。`/api/chat/**` 纳入 Sa-Token 活跃账号拦截。
+2. 删除 `/upload/` 的公共缓存头，保留反向代理转发头，使 `PrivateFileController` 的权限校验和 `Cache-Control: no-store` 生效。
+3. CI 新增 Python 测试、AI Docker 镜像构建、Compose 配置校验、启动/HTTP 冒烟/失败日志/清理；健康详情改为 `when_authorized`。
+4. 新增只读外部法规 MCP Client。合同 Agent 仅在配置完整时暴露 `searchExternalRegulation`；网关强制单一 Streamable HTTP 端点、Bearer Token、工具白名单、HTTPS 官方域名白名单、结果上限、进程内缓存和每个 Run 两次调用预算。外部内容标记为 `UNTRUSTED_REFERENCE_ONLY`，以 `EXTERNAL_REGULATION` 引用写入既有工具调用审计链路。
+
+### 验证结果
+
+- Java：`agent-server/mvnw.cmd test -B`，43 项测试通过。
+- Python：`python -m pytest`，387 项测试通过，包含聊天内部令牌、合同工具路由和 MCP 参数/域名白名单/缓存/调用预算回归。
+- 前端：`agent-front` 与 `agent-admin` 生产构建通过。
+- 部署：使用临时 CI 密钥执行 `docker compose config --quiet` 通过；完整 Compose 启动冒烟已写入 CI。
+- 外部 MCP：Fake Adapter 覆盖协议调用前的全部安全与数据转换逻辑；尚未使用真实 MCP 服务商地址和 API Key 连通验收。
+
+### 影响范围
+
+- `nginx/nginx.conf`、`docker-compose.yml`、`.github/workflows/ci.yml`
+- `agent-server/src/main/java/com/atlasmind/controller/ChatController.java`
+- `agent-server/src/main/java/com/atlasmind/service/ChatProxyService.java`
+- `tools/chat-assistant/backend/app/integrations/mcp/regulation.py`
+- `tools/chat-assistant/backend/app/agent_runtime/contract_tools.py`
+- `docs/external-regulation-mcp.md`
+
+---
+
 ## 2026-08-15：前台 localhost 首页命中陈旧二进制缓存
 
 ### 问题

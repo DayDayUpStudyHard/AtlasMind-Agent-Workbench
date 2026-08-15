@@ -6,7 +6,7 @@
 
     <div v-if="!docs.length" class="blank-state">
       <p>暂无上传的文件。在合同工作台上传合同正文或附件后，解析任务会出现在这里。</p>
-      <a href="http://localhost:15174/contracts" target="_blank">打开合同工作台 →</a>
+      <a :href="contractsUrl" target="_blank">打开合同工作台 →</a>
     </div>
 
     <el-table v-else :data="docs" stripe v-loading="loading">
@@ -49,6 +49,8 @@ import api from '../api/index.js'
 
 const docs = ref([])
 const loading = ref(true)
+const portalFront = String(import.meta.env.VITE_PORTAL_FRONT || '').replace(/\/$/, '')
+const contractsUrl = `${portalFront}/contracts`
 
 onMounted(fetchDocs)
 
