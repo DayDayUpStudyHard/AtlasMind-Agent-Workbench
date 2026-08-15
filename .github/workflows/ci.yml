@@ -118,22 +118,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 构建 agent-server 镜像
-        run: docker build -t agent-server:test ./agent-server
-
-      - name: 构建 nginx 镜像
-        run: docker build -t atlasmind-agent-nginx:test -f Dockerfile.nginx .
-
-      - name: 构建 AI 服务镜像
-        run: docker build -t atlasmind-agent-ai-service:test ./tools/chat-assistant/backend
+      - name: Compose 构建镜像
+        run: docker compose build
 
       - name: 校验 Compose 配置
         run: docker compose config --quiet
 
       - name: Compose 启动冒烟测试
         run: |
-          docker compose up --build -d --wait --wait-timeout 180
+          docker compose up --no-build -d --wait --wait-timeout 180
           curl --fail --retry 5 --retry-connrefused http://127.0.0.1:8080/
+
+      - name: 验证镜像存在
+        run: |
+          docker compose images
+          test -n "$(docker compose images -q agent-server)"
+          test -n "$(docker compose images -q nginx)"
+          test -n "$(docker compose images -q ai-service)"
 
       - name: 输出 Compose 日志
         if: failure()
@@ -142,9 +143,3 @@ jobs:
       - name: 清理 Compose 冒烟环境
         if: always()
         run: docker compose down -v --remove-orphans
-
-      - name: 验证镜像存在
-        run: |
-          docker images | grep agent-server
-          docker images | grep atlasmind-agent-nginx
-          docker images | grep atlasmind-agent-ai-service

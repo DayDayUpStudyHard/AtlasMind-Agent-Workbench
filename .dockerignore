@@ -1,0 +1,25 @@
+# Root Docker context is used by Dockerfile.nginx only.
+# Keep it narrow so the nginx image build does not upload backend code,
+# Python workers, docs, local env files, caches, or generated artifacts.
+*
+
+!Dockerfile.nginx
+!nginx/
+!nginx/**
+!agent-front/
+!agent-front/**
+!agent-admin/
+!agent-admin/**
+
+agent-front/node_modules/
+agent-front/dist/
+agent-front/.env*.local
+agent-admin/node_modules/
+agent-admin/dist/
+agent-admin/.env*.local
+
+**/.git/
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/*.log
