@@ -2053,7 +2053,23 @@ async def _eval_environment_gate(features: dict) -> dict[str, Any]:
         snapshot["components"][name] = value or {"status": "unknown"}
         return status
 
-    probe = await health(probe=True)
+    # External embedding / LLM providers occasionally drop a single health
+    # request while remaining usable. Accuracy evaluations must not silently
+    # fall back, but a bounded re-probe avoids recording that transient as an
+    # entire unusable evaluation run.
+    probe_attempts = max(1, min(int(features.get("environmentProbeAttempts", 3)), 3))
+    probe: dict[str, Any] = {}
+    for attempt in range(probe_attempts):
+        probe = await health(probe=True)
+        probe_components = probe.get("components") or {}
+        if all(
+            str((probe_components.get(name) or {}).get("status") or "").lower() == "ok"
+            for name in ("llm", "embedding")
+        ):
+            break
+        if attempt + 1 < probe_attempts:
+            await asyncio.sleep(0.5 * (attempt + 1))
+    snapshot["probeAttempts"] = attempt + 1
     components = probe.get("components") or {}
     hard_fail = False
     for name in ("llm", "embedding"):
@@ -2106,8 +2122,12 @@ def _eval_task_plan(dataset_type: str) -> list[str]:
         "CONTRACT_ELEMENT_EXTRACTION": ["CONTRACT_ELEMENT_EXTRACTION"],
         "FULFILLMENT_TIMELINE": ["TIMELINE_EXTRACTION"],
         "TIMELINE_EXTRACTION": ["TIMELINE_EXTRACTION"],
-        "FULFILLMENT_CHECK": ["FULFILLMENT_CHECK"],
-        "FULFILLMENT_VERIFICATION": ["FULFILLMENT_CHECK"],
+        # Fulfillment verification is evidence-based.  It must first produce
+        # the target timeline node from the contract, then verify separately
+        # uploaded proof against that node.  Never mix proof text into the
+        # contract fixture just to make an evaluation executable.
+        "FULFILLMENT_CHECK": ["TIMELINE_EXTRACTION", "FULFILLMENT_CHECK"],
+        "FULFILLMENT_VERIFICATION": ["TIMELINE_EXTRACTION", "FULFILLMENT_CHECK"],
         "COMPREHENSIVE": [
             "CONTRACT_ELEMENT_EXTRACTION",
             "TIMELINE_EXTRACTION",
@@ -2115,6 +2135,10 @@ def _eval_task_plan(dataset_type: str) -> list[str]:
         ],
     }
     return mapping.get(raw, ["CONTRACT_REVIEW"])
+
+
+class EvalCaseConfigurationError(ValueError):
+    """The case cannot exercise the requested production workflow honestly."""
 
 
 async def _run_evaluation_background_legacy(eval_run_id: int):
@@ -2171,16 +2195,22 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                 conn.commit()
                 return run_id
 
-    def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
+    def _finish_eval_agent_run(
+        run_id: int,
+        status: str,
+        message: str = "",
+        limited_diagnostics: dict | None = None,
+    ) -> None:
         try:
             with _conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
                         """UPDATE agent_run
                            SET status=%s,
-                               progress=CASE WHEN %s='COMPLETED' THEN 100 ELSE progress END,
+                               progress=CASE WHEN %s IN ('COMPLETED','LIMITED') THEN 100 ELSE progress END,
                                current_step=%s,
                                error_message=CASE WHEN %s='FAILED' THEN %s ELSE NULL END,
+                               limited_diagnostics=COALESCE(%s, limited_diagnostics),
                                finished_at=NOW(),
                                last_heartbeat_at=NOW()
                            WHERE id=%s""",
@@ -2190,6 +2220,7 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                             message[:120] if message else status,
                             status,
                             message[:4000] if message else None,
+                            _json_safe(limited_diagnostics) if limited_diagnostics is not None else None,
                             run_id,
                         ),
                     )
@@ -2402,7 +2433,12 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                 )
                 artifact = result.artifact or {}
                 findings = artifact.get("findings") or []
-                if result.status != "COMPLETED" or artifact.get("artifactError") or not isinstance(findings, list):
+                if not _is_scoreable_eval_result(
+                    result,
+                    artifact,
+                    findings,
+                    require_findings=True,
+                ):
                     error = str(
                         artifact.get("artifactError")
                         or f"Agent runtime ended with status {result.status}"
@@ -2419,6 +2455,14 @@ async def _run_evaluation_background_legacy(eval_run_id: int):
                         eval_run_id, idx + 1, len(cases), error,
                     )
                     continue
+                _finish_eval_agent_run(
+                    eval_agent_run_id,
+                    result.status,
+                    "Evaluation case completed" if result.status == "COMPLETED"
+                    else "Evaluation case completed with limited coverage",
+                    limited_diagnostics=(result.graph_info or {}).get("limitedDiagnostics")
+                    if result.status == "LIMITED" else None,
+                )
                 # ── Per-case metrics: shared scorer registry (same entry as
                 # the LangGraph worker — no duplicate scoring logic) ─────
                 import json as _json
@@ -2605,7 +2649,7 @@ _EVAL_BUSINESS_TYPES = {
     "SERVICE_PROCUREMENT", "GOODS_PURCHASE", "NDA",
     "ENGINEERING_EPC", "SOFTWARE_IT", "OPS_MAINTENANCE", "MIXED", "OTHER",
 }
-_EVAL_FIXTURE_CHUNKING_VERSION = "eval-split-v2"
+_EVAL_FIXTURE_CHUNKING_VERSION = "eval-split-v3"
 
 
 def _eval_business_contract_type(case: dict[str, Any]) -> str:
@@ -2639,10 +2683,49 @@ def _eval_fixture_key(case: dict[str, Any]) -> tuple[str, str]:
         "embeddingDim": int(settings.embedding_dim or 0),
         "chunkingVersion": _EVAL_FIXTURE_CHUNKING_VERSION,
     }
+    # A fulfillment fixture owns uploaded evidence as well as its contract.
+    # Keeping that payload in the key prevents one case's proof material from
+    # leaking into another case that happens to use the same contract text.
+    # ``contract_type`` is the business scenario (or legacy ``OTHER``), while
+    # the task purpose belongs to the parent dataset.  The worker injects it
+    # before fixture construction so evidence-bearing fulfillment cases do not
+    # share a cache entry merely because their contract text is identical.
+    if str(case.get("evaluation_dataset_type") or case.get("contract_type") or "").upper() in {
+        "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION",
+    }:
+        payload["fulfillmentEvidence"] = str(case.get("fulfillment_evidence_json") or "")
+        payload["timelineSelector"] = str(case.get("target_timeline_selector_json") or "")
     digest = hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     ).hexdigest()
     return f"EVAL-FIX-{digest[:40]}", digest
+
+
+def _eval_fixture_intake_metadata(contract_text: str) -> dict[str, Any]:
+    """Seed an evaluation fixture with the deterministic intake facts.
+
+    Production contracts receive these fields during document intake. Evaluation
+    fixtures bypass that workflow for speed, so they must explicitly carry the
+    same deterministic facts before the extraction graph treats base identity
+    as immutable. This does not call an LLM or use expected-answer data.
+    """
+    from app.agent_runtime.contract_intake_extractor import deterministic_hints
+
+    hints = deterministic_hints(contract_text, "evaluation.txt")
+
+    def value(key: str) -> Any:
+        item = hints.get(key) or {}
+        return item.get("value") if isinstance(item, dict) else None
+
+    return {
+        "our_entity": value("partyA"),
+        "counterparty": value("partyB") or "Evaluation Counterparty",
+        "amount": value("amount"),
+        "currency": value("currency") or "CNY",
+        "signed_date": value("signedDate"),
+        "effective_date": value("effectiveDate"),
+        "expiry_date": value("expiryDate"),
+    }
 
 
 def _eval_fixture_ready(cur, case_id: int) -> bool:
@@ -2760,14 +2843,24 @@ def _create_eval_temp_case(
                 )
                 conn.commit()
 
+            intake_metadata = _eval_fixture_intake_metadata(contract_text)
             cur.execute(
                 """INSERT INTO contract_case
-                   (case_key, title, contract_type, status, counterparty, description, is_evaluation)
-                   VALUES (%s,%s,%s,'MATERIAL_PENDING','Evaluation Counterparty',%s,1)""",
+                   (case_key, title, contract_type, status, our_entity, counterparty,
+                    amount, currency, signed_date, effective_date, expiry_date, our_side,
+                    description, is_evaluation)
+                   VALUES (%s,%s,%s,'MATERIAL_PENDING',%s,%s,%s,%s,%s,%s,%s,'A',%s,1)""",
                 (
                     fixture_key,
                     case.get("title") or "",
                     _eval_business_contract_type(case),
+                    intake_metadata["our_entity"],
+                    intake_metadata["counterparty"],
+                    intake_metadata["amount"],
+                    intake_metadata["currency"],
+                    intake_metadata["signed_date"],
+                    intake_metadata["effective_date"],
+                    intake_metadata["expiry_date"],
                     json.dumps({
                         "evalFixture": True,
                         "evalFixtureHash": fixture_hash,
@@ -2919,6 +3012,165 @@ def _latest_eval_timeline_node_id(temp_case_id: int) -> int:
             )
             row = cur.fetchone()
             return int(row["id"]) if row else 0
+
+
+def _eval_json_object(raw: Any, field_name: str) -> dict[str, Any]:
+    if not str(raw or "").strip():
+        return {}
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError as exc:
+        raise EvalCaseConfigurationError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(value, dict):
+        raise EvalCaseConfigurationError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _eval_json_list(raw: Any, field_name: str) -> list[dict[str, Any]]:
+    if not str(raw or "").strip():
+        return []
+    try:
+        value = json.loads(str(raw))
+    except json.JSONDecodeError as exc:
+        raise EvalCaseConfigurationError(f"{field_name} must be valid JSON") from exc
+    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
+        raise EvalCaseConfigurationError(f"{field_name} must be a JSON array of objects")
+    return [dict(item) for item in value]
+
+
+def _eval_fulfillment_input(case: dict[str, Any]) -> dict[str, Any]:
+    """Read the explicit non-contract inputs needed by a fulfillment case."""
+    selector = _eval_json_object(
+        case.get("target_timeline_selector_json"), "targetTimelineSelectorJson"
+    )
+    evidence = _eval_json_list(
+        case.get("fulfillment_evidence_json"), "fulfillmentEvidenceJson"
+    )
+    expected_judgements = _eval_json_list(
+        case.get("expected_judgements_json"), "expectedJudgementsJson"
+    )
+    manual_result = str(case.get("expected_manual_result") or "").upper()
+    if not selector:
+        raise EvalCaseConfigurationError(
+            "FULFILLMENT_CHECK requires targetTimelineSelectorJson; refusing arbitrary latest node"
+        )
+    if not evidence:
+        raise EvalCaseConfigurationError(
+            "FULFILLMENT_CHECK requires fulfillmentEvidenceJson; proof must be independent from contract text"
+        )
+    if manual_result not in {"SATISFIED", "NOT_SATISFIED", "PENDING"}:
+        raise EvalCaseConfigurationError(
+            "FULFILLMENT_CHECK requires expectedManualResult: SATISFIED, NOT_SATISFIED, or PENDING"
+        )
+    return {
+        "selector": selector,
+        "evidence": evidence,
+        "expectedJudgements": expected_judgements,
+        "expectedManualResult": manual_result,
+    }
+
+
+def _select_eval_timeline_node_id(temp_case_id: int, selector: dict[str, Any]) -> int:
+    """Select one extracted node using an auditable semantic selector."""
+    clauses: list[str] = ["case_id=%s", "(source='AGENT_FINAL' OR manual_override=1)"]
+    params: list[Any] = [temp_case_id]
+    fields = {
+        "nodeType": "node_type",
+        "date": "node_date",
+        "labelContains": "label",
+        "conditionContains": "condition_text",
+    }
+    for key, column in fields.items():
+        value = str(selector.get(key) or "").strip()
+        if not value:
+            continue
+        if key.endswith("Contains"):
+            clauses.append(f"{column} LIKE %s")
+            params.append(f"%{value}%")
+        else:
+            clauses.append(f"{column}=%s")
+            params.append(value.upper() if key == "nodeType" else value)
+    if len(clauses) == 2:
+        raise EvalCaseConfigurationError("targetTimelineSelectorJson has no supported selector field")
+    from app.agent_runtime.persistence import _conn
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT id FROM contract_timeline_node WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 2",
+                params,
+            )
+            rows = cur.fetchall() or []
+    if len(rows) != 1:
+        raise EvalCaseConfigurationError(
+            f"timeline selector must match exactly one final node; matched {len(rows)}"
+        )
+    return int(rows[0]["id"])
+
+
+def _seed_eval_fulfillment_evidence(
+    temp_case_id: int, timeline_node_id: int, evidence: list[dict[str, Any]]
+) -> list[int]:
+    """Attach immutable synthetic proof documents to the selected node."""
+    from app.agent_runtime.persistence import _conn
+
+    document_ids: list[int] = []
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            # contract_document.version is unique per case, not per document
+            # type.  The main contract has normally consumed version 1, and a
+            # fulfillment case may attach several proof documents.
+            cur.execute(
+                "SELECT COALESCE(MAX(version), 0) AS max_version FROM contract_document WHERE case_id=%s",
+                (temp_case_id,),
+            )
+            next_version = int((cur.fetchone() or {}).get("max_version") or 0)
+            for index, item in enumerate(evidence, 1):
+                content = str(item.get("content") or item.get("text") or "").strip()
+                if not content:
+                    raise EvalCaseConfigurationError(
+                        f"fulfillmentEvidenceJson[{index - 1}] requires content"
+                    )
+                content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                file_name = str(item.get("fileName") or f"evaluation-proof-{index}.txt")[:255]
+                cur.execute(
+                    """SELECT id FROM contract_document
+                       WHERE case_id=%s AND document_type='FULFILLMENT_EVIDENCE'
+                         AND content_hash=%s AND COALESCE(deleted,0)=0
+                       ORDER BY id DESC LIMIT 1""",
+                    (temp_case_id, content_hash),
+                )
+                row = cur.fetchone()
+                if row:
+                    document_id = int(row["id"])
+                else:
+                    next_version += 1
+                    cur.execute(
+                        """INSERT INTO contract_document
+                           (case_id, document_type, file_name, file_path, version, parse_status,
+                            content_hash, content_text)
+                           VALUES (%s,'FULFILLMENT_EVIDENCE',%s,%s,%s,'READY',%s,%s)""",
+                        (
+                            temp_case_id,
+                            file_name,
+                            f"eval://fulfillment-evidence/{content_hash}",
+                            next_version,
+                            content_hash,
+                            content,
+                        ),
+                    )
+                    document_id = int(cur.lastrowid)
+                document_ids.append(document_id)
+                cur.execute(
+                    """INSERT INTO contract_timeline_evidence_link
+                       (case_id, timeline_node_id, document_id, check_id, link_source,
+                        relation_type, evidence_version, evidence_hash, deleted)
+                       VALUES (%s,%s,%s,NULL,'EVALUATION','FULFILLMENT_EVIDENCE',1,%s,0)
+                       ON DUPLICATE KEY UPDATE deleted=0, evidence_hash=VALUES(evidence_hash)""",
+                    (temp_case_id, timeline_node_id, document_id, content_hash),
+                )
+            conn.commit()
+    return document_ids
 
 
 def _set_eval_feature_overrides(features: dict) -> None:
@@ -3135,6 +3387,8 @@ def _score_risk_review(case: dict[str, Any], artifact: dict[str, Any]) -> dict[s
     )
     return {
         "success": True,
+        "scored": True,
+        "scorerVersion": EVAL_SCORER_VERSION,
         "highRecall": high_recall,
         "dualCitationRate": dual_cited / max(len(findings), 1),
         "falsePositives": false_pos,
@@ -3211,9 +3465,37 @@ def _element_expectation_matches(expected: dict[str, Any], surface: str) -> bool
         return False
     if expected_text in actual_text or actual_text in expected_text:
         return True
+    raw_expected = str(expected.get("title") or "")
+    if any(token in raw_expected for token in ("金额", "总价", "价款", "单价", "付款")):
+        expected_amounts = _eval_amount_values(raw_expected)
+        actual_amounts = _eval_amount_values(surface)
+        if expected_amounts and actual_amounts and any(
+            abs(left - right) <= max(1.0, abs(left) * 0.0001)
+            for left in expected_amounts for right in actual_amounts
+        ):
+            return True
     if len(expected_text) >= 12:
         return SequenceMatcher(None, expected_text, actual_text).ratio() >= 0.5
     return False
+
+
+_EVAL_AMOUNT_PATTERN = re.compile(
+    r"(?<![\d.])(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(万元|万|元|cny|rmb)?",
+    re.IGNORECASE,
+)
+
+
+def _eval_amount_values(text: str) -> list[float]:
+    """Normalize amounts only for semantic evaluation matching, not contract data."""
+    values: list[float] = []
+    for match in _EVAL_AMOUNT_PATTERN.finditer(str(text or "")):
+        value = float(match.group(1).replace(",", ""))
+        unit = str(match.group(2) or "").lower()
+        if unit in {"万", "万元"}:
+            value *= 10_000
+        if value > 0:
+            values.append(value)
+    return values
 
 
 def _score_element_extraction(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
@@ -3282,6 +3564,8 @@ def _score_element_extraction(case: dict[str, Any], artifact: dict[str, Any]) ->
     )
     return {
         "success": True,
+        "scored": True,
+        "scorerVersion": EVAL_SCORER_VERSION,
         "highRecall": matched / max(len(expected), 1),
         "dualCitationRate": sum(1 for item in items if item.get("citations")) / max(len(items), 1),
         "falsePositives": false_pos,
@@ -3340,7 +3624,11 @@ def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -
 
     Every rate carries its explicit denominator for Phase 8 task 5.
     """
-    nodes = artifact.get("nodes") or []
+    stages = artifact.get("evaluationStages") or {}
+    stage = stages.get("TIMELINE_EXTRACTION") if isinstance(stages, dict) else None
+    if not isinstance(stage, dict):
+        stage = artifact
+    nodes = stage.get("nodes") or []
     if not isinstance(nodes, list):
         nodes = []
     try:
@@ -3411,7 +3699,7 @@ def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -
             if token and token in surface:
                 false_pos += 1
 
-    validation = (artifact.get("content") or {}).get("validation") or {}
+    validation = (stage.get("content") or {}).get("validation") or {}
     cited = sum(
         1 for node in nodes
         if isinstance(node, dict) and (node.get("citation") or {}).get("quote")
@@ -3424,9 +3712,9 @@ def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -
         "expectedNodeCount": len(expected),
         "dualCitationRate": cited / max(len(nodes), 1),
         "falsePositives": false_pos,
-        "schemaValid": 1 if isinstance(artifact.get("nodes"), list) else 0,
-        "analysisMode": artifact.get("analysisMode", "FULL"),
-        "riskScore": artifact.get("riskScore", 0),
+        "schemaValid": 1 if isinstance(stage.get("nodes"), list) else 0,
+        "analysisMode": stage.get("analysisMode") or artifact.get("analysisMode", "FULL"),
+        "riskScore": stage.get("riskScore") or artifact.get("riskScore", 0),
         "findingCount": len(nodes),
         "dateAccuracy": date_correct / date_expected if date_expected else 1.0,
         "dateDenominator": date_expected,
@@ -3466,6 +3754,10 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
       - aiSuggestionSchemaRate — fraction of rows whose advisory suggestion
         layer normalized cleanly (LLM_ENRICHED), PRD ≥99%.
     """
+    stages = artifact.get("evaluationStages") or {}
+    stage = stages.get("FULFILLMENT_CHECK") if isinstance(stages, dict) else None
+    if isinstance(stage, dict):
+        artifact = stage
     content = artifact.get("content") or {}
     if not isinstance(content, dict):
         content = {}
@@ -3503,6 +3795,7 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
         in ("INSUFFICIENT", "EVIDENCE_INSUFFICIENT", "NEEDS_REVIEW", "UNCLEAR", "UNCLEAR_TERMS")
     )
     manual_result = str(content.get("manualResult") or "").strip().upper()
+    expected_manual_result = str(case.get("expected_manual_result") or "").strip().upper()
     conclusion = str(artifact.get("conclusion") or "").strip()
     ai_violations = 1 if (conclusion and not manual_result) else 0
     conflict_rows = sum(
@@ -3527,6 +3820,33 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
         in _normalize_eval_text(_fulfillment_requirement_surface(row))
         if _normalize_eval_text(entry)
     )
+    try:
+        expected_judgements = json.loads(case.get("expected_judgements_json") or "[]")
+    except Exception:
+        expected_judgements = []
+    if not isinstance(expected_judgements, list):
+        expected_judgements = []
+    judgement_matches = 0
+    for expected_judgement in expected_judgements:
+        if not isinstance(expected_judgement, dict):
+            continue
+        requirement_token = _normalize_eval_text(
+            expected_judgement.get("requirementContains") or expected_judgement.get("requirement")
+        )
+        for actual in requirements:
+            if not isinstance(actual, dict):
+                continue
+            surface = _normalize_eval_text(_fulfillment_requirement_surface(actual))
+            if requirement_token and requirement_token not in surface:
+                continue
+            expected_status = str(expected_judgement.get("proofStatus") or "").upper()
+            expected_judgement_value = str(expected_judgement.get("judgement") or "").upper()
+            if expected_status and str(actual.get("proofStatus") or "").upper() != expected_status:
+                continue
+            if expected_judgement_value and str(actual.get("judgement") or "").upper() != expected_judgement_value:
+                continue
+            judgement_matches += 1
+            break
     return {
         "success": True,
         "scored": True,
@@ -3552,6 +3872,14 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
         "aiAutoConfirmViolations": ai_violations,
         "conflictRecognitionRate": conflict_rows / max(len(requirements), 1),
         "humanAdoptionRate": 1.0 if manual_result else 0.0,
+        "humanResultMatch": (
+            1.0 if manual_result == expected_manual_result else 0.0
+        ) if expected_manual_result else (1.0 if manual_result else 0.0),
+        "judgementAccuracy": (
+            judgement_matches / len(expected_judgements)
+            if expected_judgements else 1.0
+        ),
+        "judgementDenominator": len(expected_judgements),
         "artifact": artifact,
     }
 
@@ -3594,6 +3922,28 @@ def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_m
     }
 
 
+def _is_scoreable_eval_result(
+    result: Any,
+    artifact: dict[str, Any],
+    findings: Any = None,
+    *,
+    require_findings: bool = False,
+) -> bool:
+    """Return whether a terminal agent result is valid input for an eval scorer.
+
+    A scope-limited report is still a real evidence-backed result. Preserve its
+    findings, citations, and version metadata for scoring; its LIMITED mode
+    makes the aggregate evaluation degraded rather than completed.
+    """
+    if getattr(result, "status", None) not in {"COMPLETED", "LIMITED"}:
+        return False
+    if artifact.get("artifactError"):
+        return False
+    if not require_findings:
+        return True
+    return isinstance(artifact.get("findings") if findings is None else findings, list)
+
+
 async def _dispatch_eval_task(
     *,
     eval_run_id: int,
@@ -3615,10 +3965,18 @@ async def _dispatch_eval_task(
         "evaluationTaskType": task_type,
     }
     if task_type == "FULFILLMENT_CHECK":
-        node_id = _latest_eval_timeline_node_id(temp_case_id)
-        if not node_id:
-            raise ValueError("No timeline node available for fulfillment check")
+        fulfillment_input = _eval_fulfillment_input(case)
+        node_id = _select_eval_timeline_node_id(temp_case_id, fulfillment_input["selector"])
+        evidence_document_ids = _seed_eval_fulfillment_evidence(
+            temp_case_id, node_id, fulfillment_input["evidence"]
+        )
         task_input["timelineNodeId"] = node_id
+        task_input["evaluationFulfillment"] = {
+            "selector": fulfillment_input["selector"],
+            "evidenceDocumentIds": evidence_document_ids,
+            "expectedJudgements": fulfillment_input["expectedJudgements"],
+            "expectedManualResult": fulfillment_input["expectedManualResult"],
+        }
 
     with _conn() as conn:
         with conn.cursor() as cur:
@@ -3700,6 +4058,35 @@ def _read_actual_engine(run_id: int) -> str:
         return "unknown"
 
 
+def _read_eval_run_versions(run_id: int) -> dict[str, str]:
+    """Read the immutable execution stack for one scored evaluation stage."""
+    try:
+        from app.agent_runtime.persistence import _conn
+
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """SELECT evidence_snapshot_hash, graph_name, graph_version,
+                              model, prompt_version, retrieval_version, rerank_version
+                         FROM agent_run WHERE id=%s""",
+                    (run_id,),
+                )
+                row = cur.fetchone() or {}
+        return {
+            "snapshotHash": str(row.get("evidence_snapshot_hash") or ""),
+            "graphName": str(row.get("graph_name") or ""),
+            "graphVersion": str(row.get("graph_version") or ""),
+            "model": str(row.get("model") or ""),
+            "promptVersion": str(row.get("prompt_version") or ""),
+            "retrievalVersion": str(row.get("retrieval_version") or ""),
+            "rerankVersion": str(row.get("rerank_version") or ""),
+            "scorerVersion": EVAL_SCORER_VERSION,
+        }
+    except Exception:
+        logger.exception("Could not read version snapshot for eval run %s", run_id)
+        return {"scorerVersion": EVAL_SCORER_VERSION}
+
+
 def _eval_runtime_mismatch(runtime: str, actual_engine: str | None) -> bool:
     """True when the engine that actually ran differs from the requested one."""
     if not actual_engine or actual_engine == "unknown":
@@ -3715,7 +4102,12 @@ def _eval_runtime_mismatch(runtime: str, actual_engine: str | None) -> bool:
     return False
 
 
-def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
+def _finish_eval_agent_run(
+    run_id: int,
+    status: str,
+    message: str = "",
+    limited_diagnostics: dict | None = None,
+) -> None:
     if not run_id:
         return
     from app.agent_runtime.persistence import _conn
@@ -3726,9 +4118,10 @@ def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
                 cur.execute(
                     """UPDATE agent_run
                        SET status=%s,
-                           progress=CASE WHEN %s='COMPLETED' THEN 100 ELSE progress END,
+                           progress=CASE WHEN %s IN ('COMPLETED','LIMITED') THEN 100 ELSE progress END,
                            current_step=%s,
                            error_message=CASE WHEN %s='FAILED' THEN %s ELSE NULL END,
+                           limited_diagnostics=COALESCE(%s, limited_diagnostics),
                            finished_at=NOW(),
                            last_heartbeat_at=NOW()
                        WHERE id=%s""",
@@ -3738,6 +4131,7 @@ def _finish_eval_agent_run(run_id: int, status: str, message: str = "") -> None:
                         message[:120] if message else status,
                         status,
                         message[:4000] if message else None,
+                        _json_safe(limited_diagnostics) if limited_diagnostics is not None else None,
                         run_id,
                     ),
                 )
@@ -3787,7 +4181,9 @@ async def _run_evaluation_background(eval_run_id: int):
                     """SELECT id, case_key, title, contract_type, contract_text,
                               expected_findings_json, should_not_find_json,
                               scenario, industry, difficulty, noise_level,
-                              must_have_contract_citation, must_have_policy_citation
+                              must_have_contract_citation, must_have_policy_citation,
+                              fulfillment_evidence_json, target_timeline_selector_json,
+                              expected_judgements_json, expected_manual_result
                        FROM agent_eval_case
                        WHERE dataset_id=%s AND status='ACTIVE'
                        ORDER BY id""",
@@ -3795,6 +4191,12 @@ async def _run_evaluation_background(eval_run_id: int):
                 )
                 cases = cur.fetchall()
                 total_cases = len(cases)
+
+        # The case table stores a business scenario, whereas the parent
+        # dataset owns the evaluation task.  Keep both meanings explicit for
+        # fixture-key construction and stage dispatch.
+        for case in cases:
+            case["evaluation_dataset_type"] = dataset_type
 
         if not cases:
             _fail_eval_run(eval_run_id, "No active cases in dataset")
@@ -3859,15 +4261,52 @@ async def _run_evaluation_background(eval_run_id: int):
                             timeout_seconds=timeout_seconds,
                         )
                         case_run_ids.append(run_id)
+                    except EvalCaseConfigurationError:
+                        raise
                     except ValueError as skip_exc:
                         stage_outputs[task_type] = {"skipped": True, "reason": str(skip_exc)}
                         continue
+                    if task_type == "FULFILLMENT_CHECK" and result.status == "WAITING_HUMAN":
+                        # Preserve the AI proposal before the controlled human
+                        # decision.  A fulfillment graph is not considered a
+                        # completed report until the same production resume
+                        # path has applied the expected manual decision.
+                        stage_outputs["FULFILLMENT_CHECK_PRE_HUMAN"] = {
+                            "status": "WAITING_HUMAN",
+                            "waitState": (result.graph_info or {}).get("waitState") or {},
+                        }
+                        from app.agent_runtime.runtime import ResumeAction, ResumeCommand
+
+                        expected_manual_result = _eval_fulfillment_input(case)["expectedManualResult"]
+                        command = ResumeCommand(
+                            action=(
+                                ResumeAction.KEEP_PENDING
+                                if expected_manual_result == "PENDING"
+                                else ResumeAction.CONFIRM
+                            ),
+                            manual_result=expected_manual_result,
+                            note="Controlled evaluation human decision",
+                            operator_id="evaluation-harness",
+                        )
+                        adapter = get_contract_runtime_router().get_adapter("fulfillment_check")
+                        if adapter is None:
+                            raise RuntimeError("Fulfillment graph adapter is unavailable for evaluation resume")
+                        result = await asyncio.wait_for(
+                            adapter.resume(run_id, command), timeout=timeout_seconds
+                        )
                     artifact = result.artifact or {}
-                    if result.status != "COMPLETED" or artifact.get("artifactError"):
+                    if not _is_scoreable_eval_result(result, artifact):
                         error = str(artifact.get("artifactError") or f"Agent runtime ended with status {result.status}")
                         _finish_eval_agent_run(run_id, "FAILED", error)
                         raise RuntimeError(error)
-                    _finish_eval_agent_run(run_id, "COMPLETED", "Evaluation case completed")
+                    _finish_eval_agent_run(
+                        run_id,
+                        result.status,
+                        "Evaluation case completed" if result.status == "COMPLETED"
+                        else "Evaluation case completed with limited coverage",
+                        limited_diagnostics=(result.graph_info or {}).get("limitedDiagnostics")
+                        if result.status == "LIMITED" else None,
+                    )
                     if actual_engine is None:
                         actual_engine = _read_actual_engine(run_id)
                     completed_run_ids.add(run_id)
@@ -3881,6 +4320,14 @@ async def _run_evaluation_background(eval_run_id: int):
                     "evaluationStages": stage_outputs,
                 }
                 row = _score_eval_artifact(case, artifact_for_score, score_mode)
+                if row.get("scored", True):
+                    row["scorerVersion"] = EVAL_SCORER_VERSION
+                    score_artifact = row.get("artifact")
+                    if isinstance(score_artifact, dict) and case_run_ids:
+                        score_artifact["versions"] = {
+                            **dict(score_artifact.get("versions") or {}),
+                            **_read_eval_run_versions(case_run_ids[-1]),
+                        }
                 rerank_observation = _eval_rerank_observation(artifact_for_score)
                 if rerank_observation["actualMethod"] == "NOT_USED":
                     # Legacy artifacts lack retrievalValidation; the per-case

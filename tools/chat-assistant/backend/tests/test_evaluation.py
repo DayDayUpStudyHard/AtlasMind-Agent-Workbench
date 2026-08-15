@@ -1,9 +1,11 @@
 """Tests for the evaluation framework."""
 
+import asyncio
 import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -112,6 +114,114 @@ def test_only_current_failed_stage_is_marked_failed():
         [101, 102, 103],
         completed_run_ids={101, 102},
     ) == [103]
+
+
+def test_limited_agent_result_remains_scoreable_for_evaluation():
+    """LIMITED is an evidence-coverage outcome, not an execution failure."""
+    from app.api.routes import _is_scoreable_eval_result
+
+    artifact = {"analysisMode": "LIMITED", "findings": []}
+    assert _is_scoreable_eval_result(SimpleNamespace(status="LIMITED"), artifact)
+    assert _is_scoreable_eval_result(SimpleNamespace(status="COMPLETED"), artifact)
+    assert _is_scoreable_eval_result(
+        SimpleNamespace(status="COMPLETED"),
+        {"elements": []},
+    )
+    assert not _is_scoreable_eval_result(
+        SimpleNamespace(status="COMPLETED"),
+        {"elements": []},
+        require_findings=True,
+    )
+    assert not _is_scoreable_eval_result(SimpleNamespace(status="FAILED"), artifact)
+    assert not _is_scoreable_eval_result(
+        SimpleNamespace(status="LIMITED"),
+        {"findings": [], "artifactError": "bad artifact"},
+    )
+
+
+def test_limited_eval_run_persists_coverage_diagnostics(monkeypatch):
+    import app.agent_runtime.persistence as persistence
+    from app.api.routes import _finish_eval_agent_run
+
+    captured = {}
+
+    class Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params):
+            captured["sql"] = sql
+            captured["params"] = params
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def commit(self): pass
+
+    monkeypatch.setattr(persistence, "_conn", lambda: Connection())
+    _finish_eval_agent_run(
+        1,
+        "LIMITED",
+        "Evaluation case completed with limited coverage",
+        {"missingCheckItems": ["payment"], "retried": True},
+    )
+
+    assert "limited_diagnostics=COALESCE" in captured["sql"]
+    assert captured["params"][0] == "LIMITED"
+    assert json.loads(captured["params"][-2])["missingCheckItems"] == ["payment"]
+
+
+def test_eval_environment_gate_retries_transient_embedding_probe(monkeypatch):
+    import app.api.routes as routes
+
+    responses = [
+        {"components": {
+            "llm": {"status": "ok"},
+            "embedding": {"status": "error"},
+            "elasticsearch": {"status": "ok"},
+        }},
+        {"components": {
+            "llm": {"status": "ok"},
+            "embedding": {"status": "ok"},
+            "elasticsearch": {"status": "ok"},
+        }},
+    ]
+
+    async def fake_health(*, probe):
+        assert probe is True
+        return responses.pop(0)
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(routes, "health", fake_health)
+    monkeypatch.setattr(routes.asyncio, "sleep", no_sleep)
+    snapshot = asyncio.run(routes._eval_environment_gate({"environmentProbeAttempts": 2}))
+
+    assert snapshot["environmentStatus"] == "READY"
+    assert snapshot["probeAttempts"] == 2
+
+
+def test_eval_fixture_seeds_deterministic_intake_metadata():
+    from app.api.routes import _eval_fixture_intake_metadata
+
+    metadata = _eval_fixture_intake_metadata(
+        "甲方：杭州甲公司\n乙方：深圳乙公司\n合同总价：人民币100万元整"
+    )
+
+    assert metadata["our_entity"] == "杭州甲公司"
+    assert metadata["counterparty"] == "深圳乙公司"
+    assert metadata["amount"] == 1000000.0
+    assert metadata["currency"] == "CNY"
+
+
+def test_element_scorer_matches_equivalent_chinese_and_normalized_amounts():
+    from app.api.routes import _element_expectation_matches
+
+    assert _element_expectation_matches(
+        {"title": "合同总价:100万元"},
+        "amount 合同金额 1000000.0 CNY",
+    )
 
 
 def test_unnumbered_comprehensive_contract_is_split_by_business_lines():
@@ -463,6 +573,8 @@ def test_score_eval_artifact_registry_routes_risk_review():
     assert result["highRecall"] == 1.0
     assert result["dualCitationRate"] == 1.0
     assert result["schemaValid"] == 1
+    assert result["scored"] is True
+    assert result["scorerVersion"] == "eval-scorers-v2"
 
 
 def test_score_eval_artifact_element_extraction_scores_elements_and_missing():
@@ -507,6 +619,8 @@ def test_score_eval_artifact_element_extraction_scores_elements_and_missing():
     assert result["dualCitationRate"] == pytest.approx(0.5)
     assert result["schemaValid"] == 1
     assert result["findingCount"] == 2
+    assert result["scored"] is True
+    assert result["scorerVersion"] == "eval-scorers-v2"
 
 
 def test_score_eval_artifact_element_missing_not_detected_scores_zero():
@@ -626,6 +740,33 @@ def test_score_eval_artifact_timeline_date_mismatch_and_fabricated_node():
     assert result["falsePositives"] == 1
 
 
+def test_timeline_scorer_reads_evaluation_stage_wrapper():
+    from app.api.routes import _score_eval_artifact
+
+    case = {"expected_findings_json": json.dumps([
+        {"title": "生效:2026-01-01", "severity": "LOW"},
+    ])}
+    artifact = {
+        "evaluationStages": {
+            "TIMELINE_EXTRACTION": {
+                "analysisMode": "FULL",
+                "nodes": [{
+                    "label": "生效",
+                    "date": "2026-01-01",
+                    "condition": None,
+                    "citation": {"quote": "合同自2026-01-01生效"},
+                }],
+                "content": {"validation": {}},
+            }
+        }
+    }
+
+    result = _score_eval_artifact(case, artifact, "TIMELINE_EXTRACTION")
+    assert result["highRecall"] == 1.0
+    assert result["schemaValid"] == 1
+    assert result["dualCitationRate"] == 1.0
+
+
 def test_score_eval_artifact_fulfillment_check_scores_requirements():
     from app.api.routes import _score_eval_artifact
 
@@ -696,3 +837,135 @@ def test_legacy_task_support_guard():
     assert not is_legacy_task_supported("CONTRACT_ELEMENT_EXTRACTION")
     assert not is_legacy_task_supported("TIMELINE_EXTRACTION")
     assert not is_legacy_task_supported("")
+
+
+def test_fulfillment_eval_plan_requires_timeline_before_evidence_check():
+    from app.api.routes import _eval_task_plan
+
+    assert _eval_task_plan("FULFILLMENT_CHECK") == [
+        "TIMELINE_EXTRACTION", "FULFILLMENT_CHECK",
+    ]
+
+
+def test_fulfillment_fixture_key_separates_proof_for_same_contract():
+    from app.api.routes import _eval_fixture_key
+
+    common = {
+        "contract_text": "The supplier shall deliver the system by 2026-09-01.",
+        "title": "Same contract",
+        "scenario": "SERVICE_PROCUREMENT",
+        # New UI-created cases normalize the case-level type to OTHER.  The
+        # evaluation task must therefore come from the parent dataset.
+        "contract_type": "OTHER",
+        "evaluation_dataset_type": "FULFILLMENT_CHECK",
+        "target_timeline_selector_json": '{"nodeType":"DELIVERY"}',
+    }
+    _, first_hash = _eval_fixture_key({
+        **common,
+        "fulfillment_evidence_json": '[{"content":"delivery receipt A"}]',
+    })
+    _, second_hash = _eval_fixture_key({
+        **common,
+        "fulfillment_evidence_json": '[{"content":"delivery receipt B"}]',
+    })
+
+    assert first_hash != second_hash
+
+
+def test_fulfillment_eval_requires_separate_evidence_selector_and_manual_result():
+    from app.api.routes import EvalCaseConfigurationError, _eval_fulfillment_input
+
+    with pytest.raises(EvalCaseConfigurationError, match="targetTimelineSelectorJson"):
+        _eval_fulfillment_input({
+            "fulfillment_evidence_json": '[{"content":"交付清单"}]',
+            "expected_manual_result": "SATISFIED",
+        })
+
+    result = _eval_fulfillment_input({
+        "target_timeline_selector_json": '{"nodeType":"DELIVERY","labelContains":"交付"}',
+        "fulfillment_evidence_json": '[{"fileName":"交付清单.txt","content":"已交付"}]',
+        "expected_judgements_json": '[{"requirementContains":"交付","proofStatus":"SUPPORTED"}]',
+        "expected_manual_result": "SATISFIED",
+    })
+
+    assert result["selector"]["nodeType"] == "DELIVERY"
+    assert result["evidence"][0]["content"] == "已交付"
+    assert result["expectedManualResult"] == "SATISFIED"
+
+
+def test_fulfillment_scorer_uses_stage_artifact_and_expected_human_decision():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([{"title": "交付系统"}]),
+        "expected_judgements_json": json.dumps([
+            {"requirementContains": "交付", "proofStatus": "SUPPORTED"},
+        ]),
+        "expected_manual_result": "SATISFIED",
+    }
+    artifact = {
+        "evaluationStages": {
+            "FULFILLMENT_CHECK": {
+                "requirements": [{
+                    "requirement": "交付系统",
+                    "proofStatus": "SUPPORTED",
+                    "evidenceCitationIds": [1],
+                    "aiSuggestion": {"status": "LLM_ENRICHED"},
+                }],
+                "content": {"manualResult": "SATISFIED", "requirements": []},
+            }
+        }
+    }
+
+    result = _score_eval_artifact(case, artifact, "FULFILLMENT_CHECK")
+    assert result["highRecall"] == 1.0
+    assert result["judgementAccuracy"] == 1.0
+    assert result["humanResultMatch"] == 1.0
+
+
+def test_fulfillment_eval_evidence_versions_follow_main_contract(monkeypatch):
+    import app.agent_runtime.persistence as persistence
+    from app.api.routes import _seed_eval_fulfillment_evidence
+
+    class Cursor:
+        def __init__(self):
+            self.phase = ""
+            self.lastrowid = 0
+            self.created_versions = []
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+
+        def execute(self, sql, params=()):
+            if "MAX(version)" in sql:
+                self.phase = "max"
+            elif "SELECT id FROM contract_document" in sql:
+                self.phase = "existing"
+            elif "INSERT INTO contract_document" in sql:
+                self.created_versions.append(params[3])
+                self.lastrowid = 100 + len(self.created_versions)
+            elif "contract_timeline_evidence_link" in sql:
+                self.phase = "link"
+
+        def fetchone(self):
+            if self.phase == "max":
+                return {"max_version": 1}
+            if self.phase == "existing":
+                return None
+            return None
+
+    cursor = Cursor()
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return cursor
+        def commit(self): pass
+
+    monkeypatch.setattr(persistence, "_conn", lambda: Connection())
+    ids = _seed_eval_fulfillment_evidence(7, 8, [
+        {"content": "proof one"}, {"content": "proof two"},
+    ])
+
+    assert ids == [101, 102]
+    assert cursor.created_versions == [2, 3]

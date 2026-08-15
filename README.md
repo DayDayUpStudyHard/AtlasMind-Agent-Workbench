@@ -1,234 +1,228 @@
-# AtlasMind Agent Workbench — ContractOps
+# AtlasMind Agent Workbench - ContractOps
 
-企业合同全生命周期智能运营平台。将合同案件管理、条款审查、风险评分、履约跟踪与 AI Agent 自动化结合，面向法务、采购和业务团队提供可审计的合同智能服务。
+企业合同全生命周期智能运营平台。AtlasMind 将合同文件处理、合同事实、风险审查、履约核验和人工复核组织为可追溯的合同作业系统，而不是只生成一份审查报告。
 
-> **当前产品方向**：企业合同生命周期运营 Agent（Contract Lifecycle Operations Agent）
->
-> **已落地能力**：合同案件管理、19 条审查规则、5 维风险评分、12 个 Agent 工具、履约义务提取、版本对比、管理端规则/条款库
+> 当前状态：生产路径使用 LangGraph v1 任务图和公共 Agent Graph Harness；历史 `legacy` 与风险审查 v2 试验路径保留用于回归对比，不作为新功能的默认实现。
 
----
+## 核心能力
 
-## 产品架构
+- 合同创建、PDF/DOCX/DOC/TXT/Markdown 解析、条款切分和页码/段落证据定位。
+- 解析质量检测；低质量 PDF 可按配置使用 OCR 或 MinerU 重解析。
+- 合同要素提取：少量基础身份字段确定性规范化，合同专属要素由 LLM 按原文动态规划，并保留候选、引用和快照谱系。
+- 正式履约日程：规则候选、LLM 语义复核和确定性校验分层执行；不将未复核的候选作为正式日程。
+- 风险审查：规则、关键词、向量检索、RRF 融合与重排序协作；补证后会重新分析受影响领域，再生成完整或范围受限报告。
+- 履约核验：将合同要求与独立上传的证明材料逐项比对。AI 只能给出证据判断和缺口，最终履约结论必须由人工确认。
+- 前台合同工作台、合同范围 Chat、风险处置、修改后合同上传；管理端规则库、知识库、Agent 可观测性和评测中心。
+
+## 六层架构
 
 ```text
-      合同文件 / 纯文字
-          ↓
-    AI 结构化提取 + 原文引用核验
-          ↓
-    人工确认我方主体与关键字段
-          ↓
-    合同案件创建（前台 / API）
-          ↓
-    Agent 审查 / 发起 / 审批决策
-          ↓
-    Python Harness：12 工具 × 6 Phase
-          ↓
-    审查发现 + 风险评分 + 履约义务
-          ↓
-    报告 → 审批 → 动作执行
-          ↓
-    履约跟踪 / 到期提醒 / 续签评估
+L1 合同入口与文档解析
+   文件 / 正文 -> 解析质量 -> OCR/MinerU（可选）-> 条款与页码定位
+                     |
+L2 证据快照与混合检索
+   合同条款 + 制度库 + 规则库 + 履约证明
+   ES 向量/关键词 + MySQL 关键词 + RRF + 分池重排序
+                     |
+L3 Planner + Harness + LangGraph
+   TaskSpec -> 公共 Graph Builder -> Checkpoint / Resume / 节点观测
+                     |
+L4 业务 Agent
+   合同画像 | 履约日程 | 风险审查 | 履约核验
+                     |
+L5 确定性校验与质量门禁
+   Schema、原文引用、证据快照、字段规范化、范围受限披露
+                     |
+L6 合同作业与人工复核
+   确认事实、处理风险、上传证明、人工终审、审计与评测
 ```
 
-**核心原则**：
+详细设计见 [合同作业系统六层架构](docs/contract-operations-six-layer-architecture-2026-08-08.md) 与 [Agent Harness 迁移 PRD](docs/prd-contract-agent-harness-v1-migration-2026-08-14.md)。
 
-- **确定性规则优先**：19 条审查规则覆盖缺失检查 / 关键词 / 阈值 / 语义四类，支持一票否决
-- **LLM 增强非替代**：规则引擎兜底评分，LLM 负责语义理解和报告生成
-- **所有结论可追溯**：审查发现带双引用（合同原文 + 制度依据），Agent Run 保存完整调用链
-- **人工审批边界**：高风险动作（创建协商任务、排期提醒等）必须经过审批
+## 任务图与业务边界
 
----
+| 任务类型 | 图名称 | 主要产物 | 人工边界 |
+| --- | --- | --- | --- |
+| `CONTRACT_ELEMENT_EXTRACTION` | `contract_extraction` | 合同事实快照、动态合同画像、字段引用 | 可确认或修正事实；已确认字段不会被后续重跑静默覆盖 |
+| `TIMELINE_EXTRACTION` | `timeline_extraction` | 正式时间节点、条件、责任方、日期基准与引用 | 可复核节点；低质量/OCR 风险会被显式标记 |
+| `CONTRACT_REVIEW` | `contract_review` | 风险发现、合同/制度依据、处理建议、覆盖诊断 | 人工决定处理、接受例外或关闭风险 |
+| `FULFILLMENT_CHECK` | `fulfillment_check` | 要求分解、证据比对、AI 建议、缺口 | 图在 `WAITING_HUMAN` 中断，只有人工结论能生成最终履约状态 |
 
-## 功能概览
+所有任务复用已解析的合同证据和证据快照，不重复 OCR 或全文切分。每次运行冻结图、Prompt、模型、检索、重排序和评分器版本，并记录节点耗时、工具调用、fallback 与预算诊断。
 
-### 前台工作台 (port 15174)
+## 产品界面
 
-| 模块 | 功能 |
-|------|------|
-| 合同组合驾驶舱 | 12 KPI 卡片（案件数/待审/履约中/即将到期/逾期义务等）+ 4 快捷动作 |
-| 智能合同录入 | 粘贴正文或选择 TXT/Markdown 文件，DeepSeek 提取 8 个核心字段，逐项展示原文引用，人工确认后建案 |
-| 合同案件详情 | 元信息 / 主体 / 文件（含纯文字上传）/ Agent Run / 审查发现 / 履约义务 |
-| 文件上传 | 支持文件登记 + **纯文字粘贴**两种模式 |
-| Agent 对话 | ChatWindow 合同对话模式 |
+### 用户端 - `15174`
 
-### 管理端 (port 15173)
+- 合同工作台：案件、待办、履约和风险概览。
+- 合同录入与文件处理：处理进度进入消息中心，用户可离开页面等待后台任务完成。
+- 合同详情：合同画像、履约日程、风险研判、合同原文/页码证据、Agent 基础运行状态。
+- 事实确认：对要素与时间节点确认、修正或标注待复核。
+- 履约处理：向节点上传独立证明材料，查看 AI 的证据判断后人工确认。
+- 合同对话：只在当前合同证据范围内回答，并展示来源。
 
-| 模块 | 功能 |
-|------|------|
-| 合同驾驶舱 | 合同案件统计 + 最近 Run + 最近文件 |
-| 审查规则管理 | 19 条规则 CRUD、启用/停用、一票否决配置、4 种检查方式 |
-| 标准条款库 | 4 类标准条款、语义要素编辑、谈判底线配置 |
-| 文件解析任务 | 跨案件文档列表、停止解析（PENDING/PARSING）、删除 |
-| Agent 运行记录 | 强制停止运行中 Run、删除 Run + 关联数据 |
-| 知识来源 | KB 空间/文档管理、RAG 检索测试 |
-| 报告与审批 | 报告列表 + 动作队列审计 |
+### 管理端 - `15173`
 
-### Agent 能力（12 工具）
-
-| 工具 | 说明 |
-|------|------|
-| `getContractCase` | 读取合同基本信息 |
-| `getContractParties` | 读取合同主体和风险评分 |
-| `listContractDocuments` | 列出合同文件版本 |
-| `readContractClause` | 按类型读取条款原文+语义要素 |
-| `searchPolicyKnowledge` | 检索企业采购制度和标准条款 |
-| `findStandardClause` | 匹配标准条款库 |
-| `searchHistoricalDecisions` | 检索历史审查发现 |
-| `evaluateReviewRules` | 执行确定性规则检查 |
-| `calculateContractRisk` | 5 维加权风险评分（含一票否决） |
-| `extractObligations` | 从条款提取履约义务 |
-| `verifyFulfillmentEvidence` | 核验履约证据 |
-| `compareContractVersions` | 版本差异对比 |
-
-### 5 维风险评分
-
-| 维度 | 权重 | 说明 |
-|------|------|------|
-| 主体与授权 | 15% | 签约主体资质、授权链条 |
-| 商务与付款 | 20% | 付款条件、预付款比例、账期 |
-| 责任与违约 | 25% | 责任上限、违约金、间接损失 |
-| 合规与保密 | 20% | 数据保护、保密期限、合规要求 |
-| 履约可执行性 | 20% | 验收标准、交付物、里程碑 |
-
----
+- 合同、文档处理任务、规则库、标准条款库与知识库管理。
+- Agent 运行详情：图节点、Trace、工具调用、模型/Prompt/检索版本、错误与范围受限诊断。
+- 评测中心：要素提取、履约日程、风险审查、履约核验和综合评测；支持版本比较与 case/artifact/引用追溯。
 
 ## 技术架构
 
-| 层级 | 技术 |
-|------|------|
-| Java 业务后端 | Spring Boot 3.2.5, Java 17, Sa-Token, JdbcTemplate |
-| Agent 调度 | Redis Stream (XADD → Consumer Group) + HTTP fallback |
-| AI 服务 | Python FastAPI, DeepSeek API, sentence-transformers |
-| 数据层 | MySQL 8.x, Redis, Elasticsearch |
-| 前端（用户） | Vue 3, Naive UI, marked |
-| 前端（管理） | Vue 3, Element Plus |
-| 向量记忆 | all-MiniLM-L6-v2 (F7) |
-| Prompt 管理 | DB 驱动 + 30s 缓存 + A/B 分流 (F6) |
+| 层 | 实现 |
+| --- | --- |
+| 业务后端 | Spring Boot 3.2, Java 17, Sa-Token, JdbcTemplate / MyBatis-Plus |
+| AI 服务 | FastAPI, LangGraph, Pydantic, OpenAI-compatible LLM / Embedding API |
+| 图编排 | `TaskSpec` + 公共 Graph Builder + MySQL Checkpoint + Runtime Router |
+| 数据与队列 | MySQL 8, Redis Stream, Elasticsearch 8 |
+| 检索 | ES 向量/关键词、MySQL 关键词、规则候选、RRF 融合、合同/制度分池重排序 |
+| 前端 | Vue 3, Naive UI（用户端）, Element Plus（管理端） |
 
 ### 服务边界
 
 ```text
-agent-server/         Java API、鉴权、审批、Redis Stream 调度
-tools/.../backend/    Python Agent Runtime、6-Phase Harness、LLM 调用、向量检索
-agent-admin/          管理端：规则/条款库、Agent Run、文件管理、可观测性
-agent-front/          用户端：合同工作台、案件详情、Agent 对话
+agent-server/                     Java API、鉴权、业务工作流、审批和管理端接口
+tools/chat-assistant/backend/     Python 文档处理、Agent Runtime、图、检索与评测执行器
+agent-front/                      用户合同工作台
+agent-admin/                      管理端：规则、知识库、运行可观测性、评测中心
+tools/chat-assistant/backend/
+  migrations/                     MySQL 增量迁移（当前 V001-V036）
+docs/                             PRD、设计记录、调研与评测报告
 ```
 
----
+## 本地启动
 
-## 项目结构
+### 前置条件
 
-```text
-AtlasMind-Agent-Workbench/
-├── agent-server/                  # Java 业务后端
-├── agent-admin/                   # 管理端 (Vue 3 + Element Plus)
-├── agent-front/                   # 用户端 (Vue 3 + Naive UI)
-├── tools/chat-assistant/backend/  # Python AI 微服务
-│   ├── app/agent_runtime/         # Agent Harness、工具注册、风险评分
-│   ├── app/services/              # LLM 服务、熔断器
-│   └── migrations/                # DB 增量迁移脚本 (V001-V013)
-├── docs/                          # PRD 和技术文档
-├── nginx/                         # 反向代理配置
-└── start.bat                      # 一键启动脚本
-```
+- Java 17+
+- Node.js 与 npm
+- Python 3.11+
+- MySQL 8、Redis、Elasticsearch 8
+- 可用的 LLM 服务；Embedding 与 Reranker 可分别配置
 
----
+启动依赖后，Windows 可运行：
 
-## 本地端口
-
-| 服务 | 地址 |
-|------|------|
-| Java 后端 | http://localhost:18080 |
-| 管理端 | http://localhost:15173 |
-| 用户端 | http://localhost:15174 |
-| Python AI 服务 | http://localhost:18088 |
-| Knife4j API 文档 | http://localhost:18080/doc.html |
-
----
-
-## 数据库
-
-数据库名 `atlasmind_agent`，核心表：
-
-| 表 | 说明 |
-|------|------|
-| `contract_case` | 合同案件主表 |
-| `contract_intake` | 合同正文暂存、模型提取结果、已验证引用与人工确认数据 |
-| `contract_document` | 合同文件（支持纯文字 `content_text`） |
-| `contract_clause` | 提取的合同条款 + 语义要素 |
-| `contract_party` | 合同主体（我方/对方/担保方） |
-| `contract_review_rule` | 审查规则（19 条种子数据） |
-| `contract_review_finding` | 审查发现（双引用） |
-| `contract_standard_clause` | 标准条款库 |
-| `contract_obligation` | 履约义务跟踪 |
-| `agent_run` / `agent_report` / `agent_action` | Agent 运行/报告/动作（`subject_type` 抽象） |
-| `agent_run_trace` / `agent_tool_call` | 执行追踪 |
-
----
-
-## 快速启动
-
-1. 启动 MySQL、Redis、Elasticsearch
-2. 运行根目录 `start.bat` 一键启动全部服务：
-
-```bash
+```bat
 start.bat
 ```
 
 或分别启动：
 
 ```bash
-# Java 后端 (port 18080)
+# Java 后端: 18080
 cd agent-server && mvnw.cmd spring-boot:run
 
-# Python AI 服务 (port 18088)
+# Python AI 服务: 18088（启动时自动执行未应用的 SQL 迁移）
 cd tools/chat-assistant/backend && python run.py
 
-# 管理端 (port 15173)
+# 管理端: 15173
 cd agent-admin && npm install && npm run dev
 
-# 用户端 (port 15174)
+# 用户端: 15174
 cd agent-front && npm install && npm run dev
 ```
 
----
+| 服务 | 地址 |
+| --- | --- |
+| Java 后端 | `http://localhost:18080` |
+| 管理端 | `http://localhost:15173` |
+| 用户端 | `http://localhost:15174` |
+| Python AI 服务 | `http://localhost:18088` |
+| Java 健康检查 | `http://localhost:18080/actuator/health` |
+| Python API 文档 | `http://localhost:18088/docs` |
+| Knife4j | `http://localhost:18080/doc.html` |
 
-## AI 服务配置
+开发服务器为避免本机端口被短生命周期工具复用导致陈旧页面，用户端响应会带 `Cache-Control: no-store`。如本机浏览器仍有旧的 `localhost` 站点数据，可使用 `http://127.0.0.1:15174` 临时访问。
 
-`tools/chat-assistant/backend/.env`：
+## AI、检索与文档配置
+
+Python 服务读取 `tools/chat-assistant/backend/.env`。以下是最小示例，所有密钥均应替换为实际值，不能提交到仓库：
 
 ```env
-LLM_API_KEY=your-deepseek-api-key
+# LLM
+LLM_API_KEY=replace-me
 LLM_BASE_URL=https://api.deepseek.com
 LLM_MODEL=deepseek-chat
 
+# Embedding：独立的 OpenAI-compatible 端点；不配置时语义检索降级
+EMBEDDING_API_KEY=replace-me
+EMBEDDING_BASE_URL=https://api.siliconflow.cn/v1
+EMBEDDING_MODEL=Qwen/Qwen3-Embedding-8B
+EMBEDDING_DIM=2560
+EMBEDDING_TIMEOUT_SECONDS=10
+
+# Reranker：独立配置；不完整或不可用时保留检索结果并记录关键词 fallback
+RERANKER_API_KEY=replace-me
+RERANKER_BASE_URL=https://api.siliconflow.cn/v1
+RERANKER_MODEL=your-reranker-model
+RERANKER_TIMEOUT_SECONDS=15
+
+# Data services
 MYSQL_HOST=localhost
 MYSQL_PORT=3306
 MYSQL_USER=root
-MYSQL_PASSWORD=123456
+MYSQL_PASSWORD=replace-me
 MYSQL_DB=atlasmind_agent
-
 REDIS_URL=redis://localhost:6379/0
+ES_HOST=http://localhost:9200
+CONTRACT_INDEX=contract_chunks
+KB_INDEX=kb_chunks
+
+# Internal Java <-> Python calls
+CHAT_ASSISTANT_TOKEN=replace-with-a-random-token
+JAVA_BACKEND_URL=http://localhost:18080
+
+# Optional scan-PDF remediation
+PDF_AUTO_REPARSE=true
+OCR_ENABLED=false
+OCR_PROVIDER=paddle
+MINERU_ENABLED=false
 ```
 
----
+注意：Embedding 模型与 `EMBEDDING_DIM` 必须匹配。更换模型或维度后必须重建相关 ES 向量索引；没有知识库文档时，风险审查不能被解释为“已覆盖全部制度依据”。
 
-## LLM 不可达处理
+根目录 `.env.example` 是 Docker Compose 的生产部署密钥模板，与 Python 服务的本地 `.env` 用途不同。
 
-当 DeepSeek API 不可达时：
+## 数据与迁移
 
-1. **连接错误**：首次 12s 超时 → 1s 后重试一次 → 再超时则设置 `_connection_dead = True`
-2. **后续 Phase 跳过 LLM**：Planner / Tool Turn / Reflection 直接使用确定性 fallback
-3. **Run 标记 FAILED**：总耗时 ~25-60s，错误信息"LLM 服务不可达"
-4. **熔断器**：连续 2 次连接失败 → 断路器打开 60s
-5. **RunRecovery**：CREATED 超过 120s 未接取 → 自动 FAILED
+核心业务对象包括：
 
----
+- `contract_case` / `contract_document` / `contract_clause` / `contract_clause_chunk`
+- `contract_extraction_snapshot` / `contract_extracted_element` / `contract_timeline_node`
+- `contract_review_finding` / `contract_fulfillment_check` / `contract_timeline_evidence_link`
+- `agent_run` / `agent_node_execution` / `agent_run_trace` / `agent_report`
+- `agent_eval_dataset` / `agent_eval_case` / `agent_eval_run` / `agent_eval_result`
 
-## 最近更新
+Python 服务启动时会按 `schema_migrations` 执行 `tools/chat-assistant/backend/migrations/V*.sql` 中尚未应用的迁移。不要手工修改已应用迁移；新增结构使用新的版本文件，并保留 Java 启动期的兼容补列逻辑以支持滚动升级。
 
-- **2026-08-03**：合同智能录入上线：DeepSeek 结构化提取、确定性字段/引用校验、人工确认后事务化建案、失败降级与重试
-- **2026-08-03**：纯文字合同上传、LLM 不可达快速失败、文件解析停止/删除、后台项目残留清理
-- **2026-08-02**：合同案件管理 pivot 完成、审查规则管理 + 标准条款库管理端、12 个 Agent 工具
-- **2026-08-01**：Redis Stream 调度 (F1)、SSE 流式进度 (F3)、并发工具执行 (F5)、Prompt 版本管理 (F6)、向量记忆 (F7)
-- **2026-07-31**：ContractOps PRD、7 表迁移、5 维风险评分、Agent Harness 适配
+## 测试与验证
+
+```bash
+# Python 后端
+cd tools/chat-assistant/backend && python -m pytest -q
+
+# Java 编译
+cd agent-server && mvnw.cmd -q compile
+
+# 两个 Vue 项目构建
+cd agent-front && npm run build
+cd agent-admin && npm run build
+```
+
+评测中心只将有效 `COMPLETED` 或有证据支撑的 `LIMITED` 产物交给评分器；环境不可用、无效 Artifact、未注册评分任务会显式标记，不以占位分数充当准确率。履约核验评测还必须提供独立证明材料、唯一目标节点选择器与受控人工结论，不能把实际履约情况混入合同正文。
+
+## 当前质量边界
+
+- LLM 不可用、Embedding/Reranker 失败或 Elasticsearch 不可用时，系统会记录 fallback 与范围限制；不应将降级结果与完整证据结果混为同一质量口径。
+- 风险结论需要合同原文和适用制度依据。制度库为空时，双引用覆盖与完整风险覆盖不能视为已通过。
+- OCR 低质量、日期基准缺失、乱码或不完整引用的内容会被标记为待复核，不作为自动履约依据。
+- 评测结果用于衡量特定数据集与版本组合，不代表所有合同类型的通用准确率。
+
+## 相关文档
+
+- [合同作业系统六层架构](docs/contract-operations-six-layer-architecture-2026-08-08.md)
+- [Agent Harness 迁移 PRD](docs/prd-contract-agent-harness-v1-migration-2026-08-14.md)
+- [高召回证据 DAG PRD](docs/prd-evidence-agent-harness-high-recall-dag-2026-08-14.md)
+- [履约核验 Agent 设计](docs/fulfillment-verification-agent-design-2026-08-04.md)
+- [Phase 3 v2 试点评测报告](docs/phase3-v2-pilot-report-2026-08-14.md)
+- [调试与修复记录](Debug修复记录.md)

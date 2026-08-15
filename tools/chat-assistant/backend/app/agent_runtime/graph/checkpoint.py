@@ -326,6 +326,15 @@ class MySqlCheckpointSaver:
                         # blocks graph/version/model persistence.
                         evidence_snapshot = channel_values.get("evidence_snapshot") or {}
                         analysis_workflow = channel_values.get("analysis_workflow") or {}
+                        # Fulfillment's human-gate materializes an evidence
+                        # *list* for display.  Only the shared contract
+                        # snapshot is a mapping with a snapshot hash; do not
+                        # let the UI-facing list break checkpoint persistence
+                        # and make the graph impossible to resume.
+                        if not isinstance(evidence_snapshot, dict):
+                            evidence_snapshot = {}
+                        if not isinstance(analysis_workflow, dict):
+                            analysis_workflow = {}
                         snapshot_hash = str(
                             evidence_snapshot.get("snapshot_hash")
                             or evidence_snapshot.get("snapshotHash")

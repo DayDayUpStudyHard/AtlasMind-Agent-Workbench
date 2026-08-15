@@ -609,6 +609,13 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     ADD COLUMN must_have_policy_citation TINYINT(1) DEFAULT 0
                     """);
         } catch (Exception ignored) { }
+        // Fulfillment evaluation has inputs that are deliberately separate
+        // from the contract: target node selection, uploaded proof, expected
+        // AI judgements, and the controlled human decision.
+        addColumnIfMissing("agent_eval_case", "fulfillment_evidence_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_case", "target_timeline_selector_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_case", "expected_judgements_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_case", "expected_manual_result", "VARCHAR(32) DEFAULT ''");
         jdbcTemplate.update("""
                 INSERT IGNORE INTO system_config (config_key, config_value)
                 VALUES ('AGENT_RUNTIME', 'java')

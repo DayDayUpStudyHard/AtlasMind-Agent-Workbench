@@ -385,3 +385,112 @@ Phase 8 七项任务盘点：①评测集无任务用途区分（task_purpose �
 - Java：`AgentWorkbenchSchemaInitializer`、`EvalAdminController`、`AiObservabilityMapper`；`agent-admin/src/views/EvalCenter.vue`、`AiObservability.vue`
 - `scripts/seed_golden_datasets.py`（task_purpose）；`tests/`（test_evaluation、test_artifact_versioning、test_graph_runtime_adapter、test_harness、test_task_spec_builder、golden fixture 再生）
 - 未动 v2 检索/分析逻辑；未动 legacy 代码；履约最终判定仍 100% 由人工确认写入；scripts/_tmp* 19 个文件按 §14-9 待清理未提交
+
+---
+
+## 2026-08-15：Phase 8 真实评测验收与运行链路修复
+
+### 问题
+
+1. LangGraph 在覆盖门禁触发时会生成可引用的 `LIMITED` Artifact，但评测执行器只接受 `COMPLETED`，将其写成失败并丢弃评分、版本和引用，风险 Golden 首跑错误显示 `0/2`。
+2. 评测执行器把风险报告的 `findings` 结构校验复用于要素、日程任务；这些 Artifact 分别使用 `elements` 与 `nodes`，实际完成却被误标失败或打为 0 分。
+3. 评测结果 JSON 未冻结评分器版本和实际执行快照；风险/要素评分器也漏写 `scored`、`scorerVersion`。
+4. 单次 Embedding 健康探测会因 SiliconFlow 瞬时超时直接将整场评测判为 `ENVIRONMENT_UNAVAILABLE`，但稍后重试即可恢复。
+5. 文本哈希评测夹具绕过合同首次录入，只写入文档、分条、Embedding 和 ES，未写入甲乙方、合同金额等确定性基础事实，导致要素图按设计跳过这些字段，产生假的低召回。
+6. 时间轴评分器没有解开 `evaluationStages.TIMELINE_EXTRACTION` 包装；实际已有节点却按空节点计算。金额评分又把 `100 万元` 与 `1000000.0` 当作不同值。
+
+### 修复
+
+1. **LIMITED 可评分终态**：[routes.py](tools/chat-assistant/backend/app/api/routes.py) 新增 `_is_scoreable_eval_result`。有效 `LIMITED` Artifact 与 `COMPLETED` 一样进入评分、引用与版本归档，但汇总仍通过 `analysisMode=LIMITED` 正确降级为 `DEGRADED`；`agent_run` 的 `limited_diagnostics` 也随评测运行回写。
+2. **任务无关的 Artifact 校验**：仅旧风险兼容路径要求 `findings`；统一评测 worker 对不同任务只校验终态与 `artifactError`，避免要素/日程被风险结构误杀。
+3. **完整版本快照**：评分器统一回填 `scored=true`、`scorerVersion=eval-scorers-v2`；评测结果用实际 `agent_run` 冻结 snapshot hash、图版本、模型、提示词、检索、重排和评分器版本。
+4. **环境门禁重试**：LLM/Embedding 探测最多三次、短退避重试；持续失败仍明确为 `UNAVAILABLE`，不在准确率评测中悄悄回退为纯关键词检索。
+5. **评测夹具复用首次录入规则**：夹具创建时调用 `deterministic_hints` 写入甲方、乙方、金额、币种与日期，并将夹具版本升级为 `eval-split-v3` 使旧缓存失效。此过程不调用 LLM、不使用期望答案。
+6. **评分器口径修复**：时间轴评分器先读取 `evaluationStages.TIMELINE_EXTRACTION`；要素金额比较支持中文万元与规范化元数值等价，并避免千分位拆分为零值造成误匹配。
+
+### 真实评测结果
+
+- 风险 Golden（run #39）：`DEGRADED 2/2`，高风险召回 **100%**、双引用 **77.27%**、误报 **0%**、Schema **100%**、受限报告 **100%**。`kb_chunks` 索引已创建但当前为 0 条制度文档，受限结论仍需结合制度库内容解读。
+- 要素 Golden（run #47）：`COMPLETED 2/2`，要素召回 **83.33%**、引用覆盖 **52.38%**、误报 **0%**、Schema **100%**；仍遗漏“付款义务由甲方且项目业主不付款”的联合事实。
+- 履约日程 Golden（run #45）：`COMPLETED 2/2`，节点召回 **45.83%**、引用覆盖 **100%**、误报 **0%**、Schema **100%**；仍漏掉条件终止、提前终止或周期性节点，属于真实抽取召回缺口。
+- 履约核验数据集未作为正式基线运行：现有 case 只有混写在合同文本中的“实际情况”，没有独立的证明材料、目标履约节点或人工结果夹具。直接运行会在 `timelineNodeId` 依赖处跳过，不能代表生产中的“上传证明后核验”场景。需要新增 `fulfillment_evidence`、`target_timeline_selector`、`expected_judgements` 与 `expected_manual_result` 后再跑。
+
+### 验证结果
+
+- 后端全量测试 **374/374** 通过；Python AI 服务已重启，`http://localhost:18088/docs` 返回 200。
+- 运行 #38、#40、#41、#43 为修复前的失败/环境波动审计记录，不作为指标基线；有效基线为 #39、#45、#47。
+- 未清理 `scripts/_tmp*` 临时脚本，保持 §14-9 待单独确认。
+
+### 影响范围
+
+- `tools/chat-assistant/backend/app/api/routes.py`
+- `tools/chat-assistant/backend/tests/test_evaluation.py`
+- `debug修复记录.md`
+
+---
+
+## 2026-08-15：Phase 8 履约核验评测夹具闭环
+
+### 问题
+
+履约核验评测集把“实际交付/实际付款/实际事件”直接混写在 `contract_text` 中，评测执行器既没有指定要核验的履约日程节点，也没有独立上传证明材料；生产履约图依赖 `timelineNodeId` 与证据文件，因此旧实现只能随意取一个节点或跳过。这样的结果不是对生产能力的评测，且传统流水线没有人工终审语义，不能承担此任务。
+
+### 修复
+
+1. 履约核验评测任务改为固定两阶段：`TIMELINE_EXTRACTION → FULFILLMENT_CHECK`。第二阶段必须以 `target_timeline_selector_json` 唯一选择已提取的正式节点，拒绝“最新节点”这种不可追溯的隐式选择。
+2. 用例新增四个独立输入：`fulfillment_evidence_json`（证明材料）、`target_timeline_selector_json`、`expected_judgements_json`、`expected_manual_result`。证明材料写入独立 `FULFILLMENT_EVIDENCE` 文档并关联目标节点，绝不掺入合同正文；夹具 Hash 纳入这组输入，避免同合同不同事实互相污染。
+3. 图在 `WAITING_HUMAN` 时先保留 AI 建议载荷，再由评测 Harness 使用受控人工决定走真实 `resume`，得到最终报告。评分器解开 `evaluationStages.FULFILLMENT_CHECK` 包装，新增 `judgementAccuracy` 与 `humanResultMatch`，同时保留 AI 自动确认违规和证据不足克制率。
+4. 管理端新增履约核验专属输入区与详情展示；传统流水线不再允许启动履约核验评测，避免生成没有人工关卡的伪基线。
+
+### 验证结果
+
+- 新增 3 条回归：履约任务计划顺序、独立证据/选择器/人工结论的必填约束、阶段包装与人工结论评分。
+- Python 评测专项 **42/42**、全量后端 **374/374** 通过；`agent-server/mvnw.cmd compile` 与 `agent-admin npm.cmd run build` 通过；`git diff --check` 通过。
+- 旧履约核验数据集不自动重写：其缺少上述独立输入，运行时应明确标记为不可作为正式基线。后续需按新结构补齐用例后再运行，不以旧 0 分或跳过结果判断模型质量。
+
+### 影响范围
+
+- `tools/chat-assistant/backend/app/api/routes.py`
+- `tools/chat-assistant/backend/tests/test_evaluation.py`
+- `agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java`
+- `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java`
+- `agent-admin/src/views/EvalCenter.vue`
+
+### 真实 Smoke 补充（run #55）
+
+运行中还修复两个只会在“证明材料 + 人工恢复”真实路径出现的问题：
+
+1. `contract_document.version` 是合同案件范围唯一键，评测证明材料原来固定写 `version=1`，会与主合同、以及多份证明互相冲突；现按案件当前最大版本递增分配，新增回归覆盖主合同已占用 v1 时连续生成 v2/v3。
+2. 人工关卡会把 `evidence_snapshot` 转成前端展示用列表，`MySqlCheckpointSaver.put` 却假定其为字典并读取 `.get`，checkpoint 写入失败使 Resume 再次停在 `WAITING_HUMAN`；现仅在快照为字典时读取 hash，列表照常持久化，新增 checkpoint 回归。
+
+最终 run #55：`COMPLETED 1/1`，日程提取和履约核验两个 Agent Run 都为 `COMPLETED`，评测任务计划为 `TIMELINE_EXTRACTION → FULFILLMENT_CHECK`，独立证据成功绑定到目标节点；AI 先输出 `PARTIAL / NEEDS_REVIEW`，受控人工 `SATISFIED` 后才生成 `BASICALLY_SATISFIED` 正式报告。结果保留完整阶段产物、合同/证明引用以及 Runtime、Graph、Prompt、Model、Retrieval、Rerank、Scorer 版本快照。run #48–#54 是 smoke 建设过程中的编码、选择器和实现缺陷审计记录，不作为指标基线。
+
+### 部署与夹具隔离补充
+
+1. 新增 [V036__evaluation_fulfillment_case_inputs.sql](tools/chat-assistant/backend/migrations/V036__evaluation_fulfillment_case_inputs.sql)，将 `fulfillment_evidence_json`、`target_timeline_selector_json`、`expected_judgements_json`、`expected_manual_result` 纳入正式版本化迁移。Java 启动期 `addColumnIfMissing` 仍保留，作为滚动升级时的兼容保护；新环境和 CI 不再依赖本地手工补列。
+2. 修复履约评测夹具 Hash 的任务类型来源。`agent_eval_case.contract_type` 表达业务场景（新 UI 用例通常为 `OTHER`），履约任务类型属于父 `agent_eval_dataset`。原逻辑据 case 字段判断是否将证明材料写入 Hash，会使“合同文本相同、证明材料不同”的履约用例错误复用夹具，存在证据串用风险。现由运行器注入 `evaluation_dataset_type`，夹具 Hash 以该字段判断；新增回归证明两个不同证明材料必得不同 Hash。
+3. 本地数据审计：旧履约核验检查集 #12 共 20 个活动用例，0 个具备目标节点选择器、独立证明材料和受控人工结论，不能作为正式基线，也不自动改写。保留其历史数据；正式基线应按新结构人工补齐。Smoke 集 #25 的 1 个用例字段齐全，仅作为链路审计样本。
+
+### 验证结果
+
+- 迁移执行器解析 V036：4 个可移植 `ADD COLUMN` 语句全部正确展开。
+- Python：`380 passed`（含履约评测、夹具隔离、迁移执行器与 Graph Resume 回归）。
+- Java：`agent-server/mvnw.cmd -q compile` 通过。
+- 管理端：`agent-admin npm.cmd run build` 通过。
+- 已知非阻塞告警：LangGraph 的 `allowed_objects` 默认值将在未来版本变更；不影响本次行为。
+
+---
+
+## 2026-08-15：前台 localhost 首页命中陈旧二进制缓存
+
+### 问题
+
+`http://localhost:15174/` 在浏览器中偶发显示 PNG 二进制文本，而 `http://127.0.0.1:15174/` 与带查询参数的 `localhost` 地址正常。服务端检查确认两个地址均连接同一 Vite 进程并返回正常 HTML；带查询参数绕过缓存后恢复，说明故障位于浏览器对开发端口旧响应的复用，而非 Vue 页面编码或 API 返回。
+
+### 修复
+
+在 [agent-front/vite.config.js](agent-front/vite.config.js) 的开发服务器响应中加入 `Cache-Control: no-store, max-age=0, must-revalidate`、`Pragma: no-cache`、`Expires: 0`，禁止浏览器为短生命周期的本地 Vite 进程缓存 HTML 或资源。重启前端服务后，`localhost:15174/` 验证返回 `200 text/html` 和新的 `no-store` 响应头。
+
+### 影响范围
+
+- `agent-front/vite.config.js`

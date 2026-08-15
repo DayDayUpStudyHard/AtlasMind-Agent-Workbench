@@ -84,6 +84,10 @@ public class EvalAdminController {
                        noise_level AS noiseLevel,
                        must_have_contract_citation AS mustHaveContractCitation,
                        must_have_policy_citation AS mustHavePolicyCitation,
+                       fulfillment_evidence_json AS fulfillmentEvidenceJson,
+                       target_timeline_selector_json AS targetTimelineSelectorJson,
+                       expected_judgements_json AS expectedJudgementsJson,
+                       expected_manual_result AS expectedManualResult,
                        dataset_id AS datasetId, status
                 FROM agent_eval_case WHERE id=?""", caseId))));
     }
@@ -98,8 +102,10 @@ public class EvalAdminController {
                 (dataset_id, case_key, title, contract_type, contract_text,
                  expected_findings_json, should_not_find_json, expected_citation_count,
                  scenario, industry, difficulty, noise_level,
-                 must_have_contract_citation, must_have_policy_citation, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')
+                 must_have_contract_citation, must_have_policy_citation,
+                 fulfillment_evidence_json, target_timeline_selector_json,
+                 expected_judgements_json, expected_manual_result, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')
                 """,
                 datasetId, str(request, "caseKey"), str(request, "title"),
                 contractType, str(request, "contractText"),
@@ -108,7 +114,11 @@ public class EvalAdminController {
                 str(request, "scenario"), str(request, "industry"),
                 str(request, "difficulty"), str(request, "noiseLevel"),
                 request.getOrDefault("mustHaveContractCitation", 0),
-                request.getOrDefault("mustHavePolicyCitation", 0));
+                request.getOrDefault("mustHavePolicyCitation", 0),
+                str(request, "fulfillmentEvidenceJson"),
+                str(request, "targetTimelineSelectorJson"),
+                str(request, "expectedJudgementsJson"),
+                str(request, "expectedManualResult"));
         jdbc.update("""
                 UPDATE agent_eval_dataset
                 SET case_count=(SELECT COUNT(*) FROM agent_eval_case WHERE dataset_id=?)
@@ -154,7 +164,7 @@ public class EvalAdminController {
                     "SELECT contract_type FROM agent_eval_dataset WHERE id=?",
                     String.class, datasetId);
             String legacyTask = normalizeLegacyTask(datasetType);
-            if (!Set.of("CONTRACT_REVIEW", "COMPREHENSIVE", "FULFILLMENT_CHECK")
+            if (!Set.of("CONTRACT_REVIEW", "COMPREHENSIVE")
                     .contains(legacyTask)) {
                 throw new IllegalArgumentException(
                         "传统流水线引擎不支持该数据集的任务类型（" + legacyTask + "），请改用 LangGraph 引擎");

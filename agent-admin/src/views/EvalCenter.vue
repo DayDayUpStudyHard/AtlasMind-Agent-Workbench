@@ -116,6 +116,32 @@
             <el-form-item label="合同全文">
               <el-input v-model="newCase.contractText" type="textarea" rows="10" placeholder="粘贴完整合同文本" />
             </el-form-item>
+            <template v-if="isFulfillmentDataset">
+              <el-alert
+                title="履约核验用例会先从合同全文提取日程，再把下列独立证明材料绑定到指定节点。实际履约情况不能写入合同全文。"
+                type="info" :closable="false" style="margin:0 0 16px" />
+              <el-form-item label="目标日程节点">
+                <el-input v-model="newCase.targetTimelineSelectorJson" type="textarea" rows="3"
+                  placeholder='{"nodeType":"DELIVERY","labelContains":"交付"}' />
+                <small style="color:#909399;display:block;margin-top:4px">JSON 对象。支持 nodeType、date、labelContains、conditionContains，必须唯一命中一个日程节点。</small>
+              </el-form-item>
+              <el-form-item label="履约证明材料">
+                <el-input v-model="newCase.fulfillmentEvidenceJson" type="textarea" rows="5"
+                  placeholder='[{"fileName":"交付清单.txt","content":"实际已交付..."}]' />
+                <small style="color:#909399;display:block;margin-top:4px">JSON 数组，每项需要 content；评测会作为独立履约证据上传。</small>
+              </el-form-item>
+              <el-form-item label="预期 AI 判断">
+                <el-input v-model="newCase.expectedJudgementsJson" type="textarea" rows="4"
+                  placeholder='[{"requirementContains":"交付","proofStatus":"SUPPORTED"}]' />
+              </el-form-item>
+              <el-form-item label="预期人工结论">
+                <el-select v-model="newCase.expectedManualResult" style="width:100%" placeholder="选择受控终审结论">
+                  <el-option label="履约满足" value="SATISFIED" />
+                  <el-option label="不满足" value="NOT_SATISFIED" />
+                  <el-option label="保持待处理" value="PENDING" />
+                </el-select>
+              </el-form-item>
+            </template>
             <el-form-item label="预期发现">
               <el-input v-model="newCase.expectedFindingsJson" type="textarea" rows="5"
                         placeholder='[{"title":"...","severity":"HIGH","clauseType":"PAYMENT"}]' />
@@ -198,6 +224,14 @@
             <pre class="json-block">{{ formatJson(viewingCase.expectedFindingsJson) }}</pre>
             <h4 style="margin:16px 0 8px;color:#303133">不应发现 (shouldNotFindJson)</h4>
             <pre class="json-block">{{ formatJson(viewingCase.shouldNotFindJson) }}</pre>
+            <template v-if="isFulfillmentCase(viewingCase)">
+              <h4 style="margin:16px 0 8px;color:#303133">目标日程节点</h4>
+              <pre class="json-block">{{ formatJson(viewingCase.targetTimelineSelectorJson) }}</pre>
+              <h4 style="margin:16px 0 8px;color:#303133">独立履约证明</h4>
+              <pre class="json-block">{{ formatJson(viewingCase.fulfillmentEvidenceJson) }}</pre>
+              <h4 style="margin:16px 0 8px;color:#303133">预期 AI 判断 / 人工结论</h4>
+              <pre class="json-block">{{ formatJson(viewingCase.expectedJudgementsJson) }}\n人工：{{ viewingCase.expectedManualResult || '未设置' }}</pre>
+            </template>
           </template>
           <template #footer>
             <el-button @click="showCaseDetail = false">关闭</el-button>
@@ -665,14 +699,16 @@ const compareId2 = ref(null)
 const compareDiffs = ref([])
 
 const newDataset = ref({ name: '', version: 'v1', contractType: 'CONTRACT_REVIEW', description: '' })
-const newCase = ref({ caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0 })
+const newCase = ref({ caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0, fulfillmentEvidenceJson: '[]', targetTimelineSelectorJson: '{}', expectedJudgementsJson: '[]', expectedManualResult: '' })
+const isFulfillmentDataset = computed(() => ['FULFILLMENT_CHECK', 'FULFILLMENT_VERIFICATION'].includes((selectedDataset.value?.contractType || '').toUpperCase()))
+const isFulfillmentCase = (item) => ['FULFILLMENT_CHECK', 'FULFILLMENT_VERIFICATION'].includes((item?.contractType || '').toUpperCase())
 const showStartRun = ref(false)
 const startRunDs = ref(null)
 const startRunRuntime = ref('legacy')
 // Legacy 引擎无提取/日程任务的实现，这些数据集只能跑 LangGraph
 const legacyBlocked = computed(() => {
   const t = (startRunDs.value?.contractType || '').toUpperCase()
-  return ['INTAKE', 'ELEMENT_EXTRACTION', 'FULFILLMENT_TIMELINE', 'TIMELINE_EXTRACTION'].includes(t)
+  return ['INTAKE', 'ELEMENT_EXTRACTION', 'FULFILLMENT_TIMELINE', 'TIMELINE_EXTRACTION', 'FULFILLMENT_CHECK', 'FULFILLMENT_VERIFICATION'].includes(t)
 })
 // v2 试点图只实现了风险审查任务，其余类型仍只有 v1 图可跑
 const v2Blocked = computed(() => {
@@ -753,10 +789,14 @@ async function addCase() {
       noiseLevel: newCase.value.noiseLevel,
       mustHaveContractCitation: newCase.value.mustHaveContractCitation,
       mustHavePolicyCitation: newCase.value.mustHavePolicyCitation,
+      fulfillmentEvidenceJson: newCase.value.fulfillmentEvidenceJson,
+      targetTimelineSelectorJson: newCase.value.targetTimelineSelectorJson,
+      expectedJudgementsJson: newCase.value.expectedJudgementsJson,
+      expectedManualResult: newCase.value.expectedManualResult,
     })
     ElMessage.success('用例已添加')
     showAddCase.value = false
-    newCase.value = { caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0 }
+    newCase.value = { caseKey: '', title: '', contractText: '', expectedFindingsJson: '[]', shouldNotFindJson: '[]', expectedCitationCount: 0, scenario: '', industry: '', difficulty: '', noiseLevel: '', mustHaveContractCitation: 0, mustHavePolicyCitation: 0, fulfillmentEvidenceJson: '[]', targetTimelineSelectorJson: '{}', expectedJudgementsJson: '[]', expectedManualResult: '' }
     viewCases(selectedDataset.value)
   } catch (err) {
     ElMessage.error(err.response?.data?.message || '添加失败')

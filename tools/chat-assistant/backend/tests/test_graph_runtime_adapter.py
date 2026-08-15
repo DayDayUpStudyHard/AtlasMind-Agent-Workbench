@@ -36,6 +36,47 @@ def test_mysql_checkpoint_versions_are_strictly_monotonic():
     assert saver.get_next_version(1.5, None) > 1.5
 
 
+def test_mysql_checkpoint_accepts_fulfillment_evidence_list(monkeypatch):
+    """The human-gate evidence list must not make a checkpoint unresumable."""
+    import app.agent_runtime.persistence as persistence
+
+    executed = []
+
+    class Cursor:
+        rowcount = 1
+
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def execute(self, sql, params=()):
+            executed.append(sql)
+
+    class Connection:
+        def __enter__(self): return self
+        def __exit__(self, *_): return None
+        def cursor(self): return Cursor()
+        def commit(self): pass
+
+    monkeypatch.setattr(persistence, "_conn", lambda: Connection())
+    saver = MySqlCheckpointSaver()
+    saver.put(
+        {"configurable": {"thread_id": "run-42", "run_id": 42}},
+        {
+            "id": "checkpoint-42",
+            "channel_values": {
+                "current_node": "prepare_human_confirmation",
+                "graph_name": "fulfillment_check",
+                "graph_version": "v1",
+                "evidence_snapshot": [{"documentId": 7}],
+                "analysis_workflow": [],
+            },
+        },
+        {"step": 9, "source": "loop"},
+        {},
+    )
+
+    assert any("INSERT INTO agent_graph_checkpoint" in sql for sql in executed)
+
+
 def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):
     import app.agent_runtime.runtime as runtime
 

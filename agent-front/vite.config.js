@@ -7,6 +7,14 @@ export default defineConfig({
   server: {
     port: 15174,
     strictPort: true,
+    // The development server shares localhost with many short-lived local
+    // tools. Never let a browser reuse a stale HTML or asset response from a
+    // prior process on this port.
+    headers: {
+      'Cache-Control': 'no-store, max-age=0, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    },
     proxy: {
       '/api/chat/': {
         target: 'http://127.0.0.1:18088',
