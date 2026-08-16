@@ -113,6 +113,11 @@ jobs:
       BOOTSTRAP_ADMIN_PASSWORD: ci-admin-password
       GRAFANA_PASSWORD: ci-grafana-password
       NGINX_PORT: 8080
+      # The AI service constructs its LLM client during startup. A dummy key
+      # keeps this container smoke test offline while exercising the full stack.
+      LLM_API_KEY: ci-test-key
+      LLM_BASE_URL: http://127.0.0.1:9
+      LLM_MODEL: ci-test-model
 
     steps:
       - name: Checkout
