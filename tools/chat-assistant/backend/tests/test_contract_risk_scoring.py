@@ -22,6 +22,7 @@ class ContractRiskScoringTest(unittest.TestCase):
         payment = next(item for item in result["dimensions"] if item["name"] == "商务与付款")
         self.assertEqual(80, payment["score"])
         self.assertEqual(96, result["riskScore"])
+        self.assertEqual("PAYMENT_01", result["ruleBasis"][0]["ruleKey"])
 
     def test_veto_rule_forces_high_risk(self):
         rules = [{

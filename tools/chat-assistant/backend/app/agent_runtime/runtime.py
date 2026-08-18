@@ -682,18 +682,46 @@ class LegacyHarnessAdapter:
 
     async def run(self, context: Any) -> AgentResult:
         raw = await self._runner.execute(context)
+        artifact = raw.get("rawArtifact") or {}
+        reflection = raw.get("reflection") or {}
+        failed = bool(raw.get("artifactError") or artifact.get("artifactError"))
+        limited = (
+            str(artifact.get("analysisMode") or "").upper() == "LIMITED"
+            or reflection.get("adequate") is False
+        )
+        graph_info = {
+            "runtimeEngine": "legacy",
+            "graphName": "harness-v1",
+            "graphVersion": "legacy",
+        }
+        if limited and not failed:
+            from .harness.budget import coverage_limited_diagnostics
+
+            missing_items: list[str] = []
+            domains = reflection.get("domains") or {}
+            if isinstance(domains, dict):
+                for domain_key, domain_info in domains.items():
+                    if not isinstance(domain_info, dict) or domain_info.get("covered") is not False:
+                        continue
+                    missing_items.append(str(domain_info.get("domainName") or domain_key))
+                    missing_items.extend(str(issue) for issue in (domain_info.get("issues") or []) if issue)
+            missing_sources = [
+                str(item) for item in (reflection.get("missingEvidence") or []) if item
+            ]
+            graph_info["limitedDiagnostics"] = coverage_limited_diagnostics(
+                work_unit_id=str(context.task_type or "LEGACY_HARNESS"),
+                missing_check_items=tuple(missing_items),
+                missing_source_types=tuple(missing_sources),
+                retried=bool(reflection.get("retried")),
+            )
         return AgentResult(
             run_id=context.run_id,
-            status="COMPLETED" if not raw.get("artifactError") else "FAILED",
-            artifact=raw.get("rawArtifact") or {},
+            status="FAILED" if failed else ("LIMITED" if limited else "COMPLETED"),
+            artifact=artifact,
             observations=raw.get("observations") or [],
             citations=raw.get("citations") or [],
             scoring=raw.get("scoring") or {},
-            graph_info={
-                "runtimeEngine": "legacy",
-                "graphName": "harness-v1",
-                "graphVersion": "legacy",
-            },
+            graph_info=graph_info,
         )
 
     async def resume(self, run_id: int, command: ResumeCommand) -> AgentResult:

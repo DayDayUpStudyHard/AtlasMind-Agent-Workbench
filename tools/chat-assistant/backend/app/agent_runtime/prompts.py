@@ -76,7 +76,16 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         "when ALL applicable domains have sufficient evidence. A single weak citation in one\n"
         "domain must not mask missing evidence in another. Suggested tools must come from the\n"
         "plan's available tools. Recommend no more than two calls. Never suggest a completed call.\n"
-        "Set retryable=true when gaps can be closed by another round of retrieval."
+        "Set retryable=true when gaps can be closed by another round of retrieval.\n"
+        "Coverage measures whether the evidence is sufficient to reach a review conclusion, not\n"
+        "whether the contract term is compliant. 已证实的条款缺失或约定模糊属于风险发现，\n"
+        "不等于证据覆盖不足：当完整条款目录或 keyEvidenceClauses 足以证明该风险时，\n"
+        "该风险域应标记 covered=true。只有原文不可访问、内容截断/不可读，或无法取得\n"
+        "作出结论所必需的适用制度依据时，才标记 covered=false。已加载的 active ruleBasis\n"
+        "属于正式审查基线；没有额外知识库文档时，只要规则基线足以作出结论，也应视为\n"
+        "covered。对于 CONTRACT_REVIEW，履约可执行性只检查义务、期限和验收约定是否\n"
+        "清晰完整，合同审查不得要求实际交付、验收或付款凭证；这些材料仅在\n"
+        "FULFILLMENT_CHECK 中属于必需证据。"
     ),
     "project_analysis": (
         "You are the project health and delivery planning agent for AtlasMind.\n"
@@ -232,7 +241,13 @@ _FALLBACK_PROMPTS: dict[str, str] = {
         "   REQUEST_MATERIAL or REQUEST_LEGAL_REVIEW as suggestedAction.\n"
         "6. Generate 1-3 action proposals for material findings.\n"
         "7. AI-inferred consequences must NOT appear in contractCitation.snippet — that field\n"
-        "   is for verbatim contract text or explicit statements of absence only."
+        "   is for verbatim contract text or explicit statements of absence only.\n"
+        "8. Analyze strictly from case.ourSide: A means our side is party A; B means our side is\n"
+        "   party B. Never assume party A is our side.\n"
+        "9. Every material risk mentioned in summary must have a corresponding findings item.\n"
+        "   Do not suppress a deterministic rule finding merely because another domain is more severe.\n"
+        "10. A liquidated-damages percentage is not a total liability cap. If no aggregate cap is\n"
+        "   stated, report the cap as missing or unclear; never reinterpret a 10% penalty as a 10% cap."
     ),
     "contract_risk_domain_planner": (
         "You are the risk-domain Planner for AtlasMind ContractOps. Inspect the contract case "

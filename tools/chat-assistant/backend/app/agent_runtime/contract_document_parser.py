@@ -34,8 +34,8 @@ _TYPE_KEYWORDS = (
     ("PAYMENT", ("付款", "支付", "价款", "费用", "发票", "预付款")),
     ("ACCEPTANCE", ("验收", "验收标准")),
     ("TERMINATION", ("终止", "解除", "到期", "续签", "续约")),
-    ("IP", ("知识产权", "著作权", "专利", "商标")),
-    ("DELIVERY", ("交付", "服务范围", "服务内容", "交付物")),
+    ("IP", ("知识产权", "著作权", "专利", "商标", "技术成果", "成果归属", "成果的归属", "权利归属")),
+    ("DELIVERY", ("交付", "服务范围", "服务内容", "交付物", "服务进度", "项目进度")),
     ("NOTICE", ("通知", "送达")),
 )
 _MAX_CLAUSES = 500
@@ -231,11 +231,25 @@ def _update_analysis_workflow(
     )
 
 
-def classify_clause(content: str) -> str:
-    for clause_type, keywords in _TYPE_KEYWORDS:
-        if any(keyword in content for keyword in keywords):
-            return clause_type
-    return "OTHER"
+def classify_clause(content: str, title: str = "") -> str:
+    """Classify a clause with its heading as the primary business signal."""
+    normalized_title = str(title or "").strip()
+    normalized_content = str(content or "")
+    if normalized_title in {"前言", "合同前言"}:
+        return "OTHER"
+    scored: list[tuple[tuple[int, int, int, int], str]] = []
+    for priority, (clause_type, keywords) in enumerate(_TYPE_KEYWORDS):
+        title_hits = [keyword for keyword in keywords if keyword in normalized_title]
+        body_hits = [keyword for keyword in keywords if keyword in normalized_content]
+        score = (
+            1 if title_hits else 0,
+            sum(len(keyword) for keyword in title_hits),
+            sum(len(keyword) for keyword in body_hits),
+            -priority,
+        )
+        if any(score[:3]):
+            scored.append((score, clause_type))
+    return max(scored, default=((0, 0, 0, 0), "OTHER"))[1]
 
 
 def split_contract_text(text: str) -> list[dict]:
@@ -269,7 +283,7 @@ def split_contract_text(text: str) -> list[dict]:
             "clauseNumber": number,
             "title": title[:256],
             "content": content,
-            "clauseType": classify_clause(content),
+            "clauseType": classify_clause(content, title=title),
             "startOffset": start,
             "endOffset": end,
         })

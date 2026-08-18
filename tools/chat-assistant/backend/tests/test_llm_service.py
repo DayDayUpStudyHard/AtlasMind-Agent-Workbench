@@ -1,10 +1,15 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 from openai import APIError
 
-from app.services.llm_service import LLMService, _compact_timeline_candidate_for_llm
+from app.services.llm_service import (
+    LLMService,
+    _compact_timeline_candidate_for_llm,
+    _merge_rule_findings,
+)
 
 
 def response(content="", reasoning_content="", usage=None):
@@ -22,6 +27,26 @@ def response(content="", reasoning_content="", usage=None):
 
 
 class LlmServiceStructuredResponseTest(unittest.TestCase):
+    def test_rule_finding_merge_recognizes_policy_citation_rule_key(self):
+        artifact = {
+            "findings": [{
+                "title": "责任上限待明确",
+                "policyCitation": {"ruleKey": "PROC-LIAB-001"},
+            }],
+        }
+        rule_findings = [{
+            "ruleKey": "PROC-LIAB-001",
+            "ruleTitle": "责任上限合理性",
+            "title": "责任上限合理性",
+            "clauseType": "LIABILITY",
+            "severity": "HIGH",
+        }]
+
+        merged = _merge_rule_findings(artifact, rule_findings)
+
+        self.assertEqual(1, len(merged["findings"]))
+        self.assertEqual("责任上限待明确", merged["findings"][0]["title"])
+
     def test_recovers_json_when_reasoning_model_leaves_visible_content_empty(self):
         service = LLMService()
         parsed = service._parse_structured_response(
@@ -60,6 +85,85 @@ class LlmServiceStructuredResponseTest(unittest.TestCase):
 
         self.assertEqual(2, call_count)
         self.assertEqual("示例合同", result["fields"]["contractTitle"]["value"])
+
+    def test_contract_review_keeps_perspective_diverse_evidence_and_rule_findings(self):
+        service = LLMService()
+        captured = {}
+
+        def fake_create(**kwargs):
+            captured["kwargs"] = kwargs
+            return response(json.dumps({
+                "title": "审查报告",
+                "summary": "需要复核责任上限。",
+                "riskStatus": "MEDIUM_RISK",
+                "riskScore": 80,
+                "analysisMode": "FULL",
+                "findings": [],
+                "actionProposals": [],
+            }, ensure_ascii=False))
+
+        service.analysis_client = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=fake_create))
+        )
+        citations = [
+            {
+                "id": index,
+                "sourceType": "CONTRACT_CLAUSE",
+                "clauseType": clause_type,
+                "title": f"{clause_type}-{index}",
+                "content": "合同条款原文",
+            }
+            for index, clause_type in enumerate(
+                ["PAYMENT"] * 8 + ["LIABILITY", "ACCEPTANCE", "TERMINATION", "IP"],
+                start=1,
+            )
+        ] + [{
+            "id": 3,
+            "sourceType": "CONTRACT_STANDARD_CLAUSE",
+            "clauseType": "ACCEPTANCE",
+            "title": "标准验收条款",
+            "content": "15个工作日内按量化指标验收。",
+        }]
+        rule_finding = {
+            "ruleId": 10,
+            "ruleKey": "PROC-LIAB-001",
+            "ruleTitle": "责任上限合理性",
+            "title": "责任上限合理性",
+            "clauseType": "LIABILITY",
+            "severity": "HIGH",
+            "detail": "未能确认 liabilityCapPct",
+            "description": "合同应明确责任上限",
+            "contractCitation": {
+                "clause": "违约责任",
+                "snippet": "乙方每逾期一天支付违约金。",
+            },
+            "contractCitationIds": ["CONTRACT_CLAUSE:111"],
+        }
+
+        artifact = service.contract_review(
+            {
+                "caseKey": "CTR-1",
+                "title": "技术服务合同",
+                "ourEntity": "中国矿业大学",
+                "counterparty": "某矿业公司",
+                "ourSide": "B",
+                "contractType": "SERVICE_PROCUREMENT",
+            },
+            [rule_finding],
+            citations,
+            {"riskScore": 80, "riskStatus": "MEDIUM_RISK"},
+        )
+
+        payload = json.loads(captured["kwargs"]["messages"][1]["content"])
+        self.assertEqual("B", payload["case"]["ourSide"])
+        self.assertEqual("中国矿业大学", payload["case"]["ourEntity"])
+        self.assertEqual("某矿业公司", payload["case"]["partyA"])
+        self.assertEqual("中国矿业大学", payload["case"]["partyB"])
+        sent_types = {item.get("clauseType") for item in payload["citations"]}
+        sent_sources = {item.get("sourceType") for item in payload["citations"]}
+        self.assertTrue({"PAYMENT", "LIABILITY", "ACCEPTANCE", "TERMINATION", "IP"} <= sent_types)
+        self.assertIn("CONTRACT_STANDARD_CLAUSE", sent_sources)
+        self.assertEqual("PROC-LIAB-001", artifact["findings"][0]["ruleKey"])
 
 
     def test_structured_completion_recovers_reasoning_only_json(self):

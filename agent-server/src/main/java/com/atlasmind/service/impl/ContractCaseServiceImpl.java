@@ -1448,15 +1448,18 @@ public class ContractCaseServiceImpl implements ContractCaseService {
 
     @Override
     public List<Map<String, Object>> listRuns(Long caseId) {
-        return jdbcTemplate.queryForList("""
+        List<Map<String, Object>> runs = jdbcTemplate.queryForList("""
                 SELECT id, run_type AS runType, status, progress, current_step AS currentStep,
                        workflow_id AS workflowId, workflow_stage AS workflowStage,
                        evidence_snapshot_hash AS evidenceSnapshotHash,
                        runtime_engine AS runtimeEngine, graph_name AS graphName,
                        graph_version AS graphVersion, model, prompt_version AS promptVersion,
-                       error_message AS errorMessage, create_time AS createTime, update_time AS updateTime
+                       error_message AS errorMessage, limited_diagnostics AS limitedDiagnostics,
+                       create_time AS createTime, update_time AS updateTime
                 FROM agent_run WHERE subject_type=? AND subject_id=? ORDER BY id DESC LIMIT 20
                 """, SUBJECT_TYPE, caseId);
+        parseJsonFields(runs, "limitedDiagnostics");
+        return runs;
     }
 
     @Override
@@ -1464,6 +1467,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         Map<String, Object> run = first(jdbcTemplate.queryForList("""
                 SELECT r.id, r.subject_type AS subjectType, r.subject_id AS subjectId, r.run_type AS runType,
                        r.status, r.progress, r.current_step AS currentStep, r.error_message AS errorMessage,
+                       r.limited_diagnostics AS limitedDiagnostics,
                        r.workflow_id AS workflowId, r.workflow_stage AS workflowStage,
                        COALESCE(r.evidence_snapshot_hash, w.evidence_snapshot_hash) AS evidenceSnapshotHash,
                        w.document_version AS documentVersion,
@@ -1475,6 +1479,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 WHERE r.id=? AND r.subject_type=?
                 """, runId, SUBJECT_TYPE));
         if (run == null) throw new IllegalArgumentException("Run not found");
+        parseJsonFields(List.of(run), "limitedDiagnostics");
         return run;
     }
 

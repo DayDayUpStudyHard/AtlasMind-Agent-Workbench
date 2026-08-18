@@ -167,6 +167,13 @@ def _finding_clause_type(finding: dict) -> str:
     ).strip().upper()
 
 
+def _report_risk_items(task_type: str, artifact: dict):
+    findings = artifact.get("findings")
+    if task_type == "CONTRACT_REVIEW" and isinstance(findings, list):
+        return findings
+    return artifact.get("risks")
+
+
 async def _run_sync(fn, *args):
     """Run a synchronous DB call in the default thread-pool executor."""
     loop = asyncio.get_running_loop()
@@ -1132,7 +1139,7 @@ class MySqlReportStore(ReportStore):
                         report_status,
                         report_score,
                         _json_dumps(report_dimensions) if report_dimensions else None,
-                        _json_dumps(artifact.get("risks")),
+                        _json_dumps(_report_risk_items(task_type, artifact)),
                         _json_dumps(artifact.get("plan")),
                         _json_dumps(artifact.get("citations")),
                         artifact.get("scoringVersion"),

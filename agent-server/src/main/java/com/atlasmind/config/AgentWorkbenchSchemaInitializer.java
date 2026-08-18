@@ -318,19 +318,16 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_case_fact_key (case_id, fact_key)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
-        addColumnIfMissing("agent_run", "workflow_id", "BIGINT");
-        addColumnIfMissing("agent_run", "workflow_stage", "VARCHAR(64)");
-        addColumnIfMissing("agent_run", "evidence_snapshot_hash", "VARCHAR(128)");
-        addColumnIfMissing("agent_run", "runtime_engine", "VARCHAR(32)");
-        addColumnIfMissing("agent_run", "graph_name", "VARCHAR(128)");
-        addColumnIfMissing("agent_run", "graph_version", "VARCHAR(64)");
-        addColumnIfMissing("agent_run", "model", "VARCHAR(128)");
-        addColumnIfMissing("agent_run", "prompt_version", "VARCHAR(64)");
-        // PRD §10 / Phase 8 task 3: frozen retrieval/rerank/scorer stack
-        // versions — run rows stay traceable to the exact implementation.
-        addColumnIfMissing("agent_run", "retrieval_version", "VARCHAR(64)");
-        addColumnIfMissing("agent_run", "rerank_version", "VARCHAR(64)");
-        addColumnIfMissing("agent_run", "scorer_version", "VARCHAR(64)");
+        addAgentRunRuntimeColumnsIfMissing();
+        addColumnIfMissing("agent_report", "report_type",
+                "VARCHAR(40) NOT NULL DEFAULT 'HEALTH_REPORT'");
+        addColumnIfMissing("agent_report", "scoring_version", "VARCHAR(30)");
+        addColumnIfMissing("agent_report", "evidence_hash", "VARCHAR(64)");
+        addColumnIfMissing("agent_report", "analysis_mode", "VARCHAR(80)");
+        addColumnIfMissing("agent_report", "scoring_rationale_json", "LONGTEXT");
+        addColumnIfMissing("agent_report", "content_json", "LONGTEXT");
+        addColumnIfMissing("agent_report", "subject_type", "VARCHAR(32) DEFAULT 'PROJECT'");
+        addColumnIfMissing("agent_report", "subject_id", "BIGINT");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS contract_fulfillment_check (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -820,11 +817,6 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     INDEX idx_case_role (case_id, role)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
-        // agent_run extension
-        addColumnIfMissing("agent_run", "initiated_by",
-                "BIGINT DEFAULT NULL COMMENT '发起人 user_id（额度归属依据）'");
-        addColumnIfMissing("agent_run", "document_snapshot_json",
-                "LONGTEXT COMMENT '启动时的文件快照 [{documentId, version, contentHash, storageKey}]'");
         addColumnIfMissing("kb_qa_session", "case_id",
                 "BIGINT DEFAULT NULL COMMENT '鍏宠仈鐨勫悎鍚屾浠?case_id'");
         // t_operation_log extension
@@ -845,6 +837,29 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         if (count != null && count > 0) return;
         jdbcTemplate.execute("ALTER TABLE `" + tableName + "` ADD COLUMN `"
                 + columnName + "` " + definition);
+    }
+
+    void addAgentRunRuntimeColumnsIfMissing() {
+        addColumnIfMissing("agent_run", "subject_type", "VARCHAR(32) DEFAULT 'PROJECT'");
+        addColumnIfMissing("agent_run", "subject_id", "BIGINT");
+        addColumnIfMissing("agent_run", "input_json", "LONGTEXT");
+        addColumnIfMissing("agent_run", "limited_diagnostics", "JSON");
+        addColumnIfMissing("agent_run", "workflow_id", "BIGINT");
+        addColumnIfMissing("agent_run", "workflow_stage", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "evidence_snapshot_hash", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "runtime_engine", "VARCHAR(32)");
+        addColumnIfMissing("agent_run", "graph_name", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "graph_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "model", "VARCHAR(128)");
+        addColumnIfMissing("agent_run", "prompt_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "retrieval_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "rerank_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "scorer_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_run", "initiated_by",
+                "BIGINT DEFAULT NULL COMMENT '发起人 user_id（额度归属依据）'");
+        addColumnIfMissing("agent_run", "document_snapshot_json",
+                "LONGTEXT COMMENT '启动时的文件快照 [{documentId, version, contentHash, storageKey}]'");
+        addColumnIfMissing("agent_run", "last_heartbeat_at", "DATETIME");
     }
 
     private void addContractExtractionProfileColumnsIfPresent() {

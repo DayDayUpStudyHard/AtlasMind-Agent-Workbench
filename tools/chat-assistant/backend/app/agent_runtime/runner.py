@@ -289,8 +289,9 @@ class AgentRunner:
                 {"citationCount": len(citations)},
             )
             reflection2 = await self._reflect(ctx, plan, observations, citations, planner_finished)
+            reflection2 = {**reflection2, "retried": True}
+            reflection = reflection2
             if reflection2.get("adequate"):
-                reflection = reflection2
                 await self.trace_store.append_trace(
                     ctx.run_id, "REFLECTION_PASSED",
                     "补充检索后质量门禁通过",
@@ -852,10 +853,17 @@ class AgentRunner:
                 if meta:
                     contract_case.update(meta)
                 try:
-                    return self.llm.contract_review(
+                    artifact = self.llm.contract_review(
                         contract_case, findings, citations, scoring or {},
                         run_id=ctx.run_id,
                     )
+                    artifact["analysisMode"] = "FULL"
+                    title = str(artifact.get("title") or "")
+                    if title.startswith("[范围受限]"):
+                        artifact["title"] = title.removeprefix("[范围受限]").strip()
+                    artifact.pop("coverageLimitation", None)
+                    artifact.pop("missingDomains", None)
+                    return artifact
                 except Exception as full_exc:
                     self._check_connection_error(full_exc)
                     logger.warning(

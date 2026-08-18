@@ -5,10 +5,11 @@ FROM maven:3.9-eclipse-temurin-17-alpine AS builder
 
 WORKDIR /build
 COPY pom.xml .
+COPY .mvn/settings.xml .mvn/settings.xml
 # 先下载依赖（利用 Docker 缓存层）
-RUN mvn dependency:go-offline -B -q || true
+RUN mvn -s .mvn/settings.xml dependency:go-offline -B -q || true
 COPY src/ ./src/
-RUN mvn package -DskipTests -B -q
+RUN mvn -s .mvn/settings.xml package -DskipTests -B -q
 
 # ============================================
 # 阶段二：JRE 运行镜像

@@ -1,13 +1,20 @@
 # Build knowledge portal
-FROM node:20-alpine AS front-build
+# Docker Hub is not reliably reachable from every local or mainland deployment.
+# Deployments with direct Docker Hub access can override these at build time.
+ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:20-alpine
+ARG NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine
+
+FROM ${NODE_BASE_IMAGE} AS front-build
 WORKDIR /app
+ARG VITE_ADMIN_URL=/admin/
+ENV VITE_ADMIN_URL=$VITE_ADMIN_URL
 COPY agent-front/package*.json ./
 RUN npm ci --registry=https://registry.npmmirror.com
 COPY agent-front/ ./
 RUN npm run build
 
 # Build admin console
-FROM node:20-alpine AS admin-build
+FROM ${NODE_BASE_IMAGE} AS admin-build
 WORKDIR /app
 COPY agent-admin/package*.json ./
 RUN npm ci --registry=https://registry.npmmirror.com
@@ -15,7 +22,7 @@ COPY agent-admin/ ./
 RUN npm run build
 
 # Runtime nginx
-FROM nginx:alpine
+FROM ${NGINX_BASE_IMAGE}
 COPY --from=front-build /app/dist /usr/share/nginx/html/portal
 COPY --from=admin-build /app/dist /usr/share/nginx/html/admin
 COPY nginx/nginx.conf /etc/nginx/conf.d/default.conf

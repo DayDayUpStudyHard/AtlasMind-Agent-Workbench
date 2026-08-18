@@ -47,6 +47,19 @@ _TITLE_LABEL_PATTERN = re.compile(
     r"^(?:合同)?(?:编号|编码|号|签订地点|签订日期|签订时间|填写说明|目录|附件)\s*[:：]?",
     re.IGNORECASE,
 )
+_FILE_NAME_EXTENSION_PATTERN = re.compile(r"\.(?:txt|pdf|docx?|md|markdown)$", re.IGNORECASE)
+_FILE_NAME_SUFFIX_NOISE_PATTERN = re.compile(
+    r"(?:20\d{2}[-_.年]\d{1,2}(?:[-_.月]\d{1,2}日?)?|\d{8}|\d{1,2}[._-]\d{1,2}|"
+    r"v(?:ersion)?\s*\d+(?:\.\d+)*|版本\s*\d+(?:\.\d+)*|"
+    r"最终版|终版|定稿版|修改版|修订版|扫描件|扫描版|复印件|副本|盖章版|签字版|草案)",
+    re.IGNORECASE,
+)
+_GENERIC_CONTRACT_TITLES = {
+    "合同", "合同书", "协议", "协议书", "确认书",
+    "技术服务合同", "技术服务协议", "服务合同", "服务协议",
+    "咨询合同", "咨询协议", "采购合同", "采购协议", "合作协议",
+    "保密协议", "保密合同", "勘察设计合同", "建设工程合同",
+}
 
 
 
@@ -142,6 +155,34 @@ def _is_plausible_title(value: Any) -> bool:
     if _TITLE_LABEL_PATTERN.match(title):
         return False
     return any(word in title for word in ("合同", "协议", "确认书"))
+
+
+def _is_generic_contract_title(value: Any) -> bool:
+    normalized = re.sub(r"[\s_\-—]", "", str(value or "")).strip(" ：:;；")
+    return normalized in _GENERIC_CONTRACT_TITLES
+
+
+def _clean_file_name_title(file_name: str) -> str | None:
+    """Return a usable contract title from a file name without versioning noise."""
+    title = str(file_name or "").replace("\\", "/").rsplit("/", 1)[-1].strip()
+    title = _FILE_NAME_EXTENSION_PATTERN.sub("", title).strip()
+
+    while title:
+        match = re.search(
+            rf"(?:[（(]\s*)?(?P<noise>{_FILE_NAME_SUFFIX_NOISE_PATTERN.pattern})(?:\s*[）)])?\s*$",
+            title,
+            re.IGNORECASE,
+        )
+        if not match:
+            break
+        title = title[:match.start()].rstrip(" ._-—")
+
+    title = re.sub(r"[\s_\-—]+", "", title).strip(". ：:;；")
+    if len(title) < 4 or len(title) > 256 or _TITLE_LABEL_PATTERN.match(title):
+        return None
+    if _is_generic_contract_title(title):
+        return None
+    return title or None
 
 
 def _amount_values_in_quote(quote: str) -> set[float]:
@@ -334,6 +375,8 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
 
     title = None
     title_quote = None
+    title_source = "RULE"
+    file_name_title = _clean_file_name_title(file_name)
     # Read first 30 lines, merge short consecutive lines (PDF often splits titles)
     raw_lines = [line.strip() for line in text.splitlines()[:30]]
     merged_lines: list[str] = []
@@ -395,12 +438,15 @@ def deterministic_hints(text: str, file_name: str = "") -> dict[str, dict]:
         candidates.sort(key=lambda x: x[1], reverse=True)
         title = candidates[0][0]
         title_quote = title
-    if not title and file_name:
-        title = re.sub(r"\.(txt|pdf|docx?|md)$", "", file_name, flags=re.IGNORECASE).strip()
+    if file_name_title and (not title or _is_generic_contract_title(title)):
+        title = file_name_title
+        title_quote = None
+        title_source = "FILE_NAME"
     if title:
         hints["contractTitle"] = _field(
             title, 0.82 if title_quote else 0.62,
             _citation(text, title_quote or ""),
+            title_source,
         )
 
     # ── Party identification: expanded terminology for construction/procurement ──
@@ -589,6 +635,13 @@ def _normalize_field(key: str, raw: Any, text: str, fallback: dict) -> dict:
 
     fallback_value = fallback.get("value")
     fallback_citations = fallback.get("citations") or []
+    is_file_name_title = key == "contractTitle" and fallback.get("source") == "FILE_NAME"
+    if is_file_name_title and _is_generic_contract_title(value):
+        preferred = dict(fallback)
+        preferred["validationErrors"] = []
+        preferred["decisionStatus"] = "PROPOSED"
+        return preferred
+
     model_usable = value is not None and bool(citations) and not validation_errors
     if model_usable:
         return {
@@ -601,11 +654,13 @@ def _normalize_field(key: str, raw: Any, text: str, fallback: dict) -> dict:
         }
 
     fallback_usable = fallback_value is not None and bool(fallback_citations)
+    if is_file_name_title:
+        fallback_usable = _clean_file_name_title(str(fallback_value)) is not None
     if key == "contractTitle" and fallback_usable:
         fallback_usable = _is_plausible_title(fallback_value)
     if fallback_usable:
         preferred = dict(fallback)
-        preferred["source"] = "RULE_FALLBACK"
+        preferred["source"] = "FILE_NAME" if is_file_name_title else "RULE_FALLBACK"
         preferred["validationErrors"] = validation_errors
         preferred["decisionStatus"] = "PROPOSED"
         return preferred

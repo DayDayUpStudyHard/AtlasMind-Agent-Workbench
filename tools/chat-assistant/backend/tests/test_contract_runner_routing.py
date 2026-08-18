@@ -268,6 +268,7 @@ class ContractRunnerRoutingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("乙方公司", artifact["case"]["counterparty"])
         self.assertEqual("PAYMENT_01", artifact["findings"][0]["ruleKey"])
         self.assertEqual(42, artifact["runId"])
+        self.assertEqual("FULL", artifact["analysisMode"])
 
 
 if __name__ == "__main__":

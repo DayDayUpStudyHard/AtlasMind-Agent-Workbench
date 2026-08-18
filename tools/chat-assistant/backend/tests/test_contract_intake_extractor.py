@@ -37,6 +37,35 @@ class ContractIntakeExtractorTest(unittest.TestCase):
         self.assertEqual("2026-08-01", hints["effectiveDate"]["value"])
         self.assertEqual("2027-07-31", hints["expiryDate"]["value"])
 
+    def test_generic_document_title_uses_cleaned_specific_file_name(self):
+        text = """技术服务合同
+甲方：星河科技有限公司
+乙方：云桥信息技术有限公司
+"""
+        file_name = "复杂地形煤层开采灾害防控技术研究项目-合同-10.24-最终版（扫描件）V2.doc"
+
+        hints = deterministic_hints(text, file_name)
+        result = validate_extraction({
+            "fields": {
+                "contractTitle": {
+                    "value": "技术服务合同",
+                    "confidence": 0.98,
+                    "citations": [{"quote": "技术服务合同"}],
+                }
+            }
+        }, text, hints)
+
+        field = result["fields"]["contractTitle"]
+        self.assertEqual("复杂地形煤层开采灾害防控技术研究项目合同", field["value"])
+        self.assertEqual("FILE_NAME", field["source"])
+        self.assertEqual([], field["citations"])
+        self.assertIn("contractTitle", result["needsConfirmation"])
+
+    def test_invalid_file_name_does_not_replace_generic_document_title(self):
+        hints = deterministic_hints(CONTRACT, "扫描件-最终版-V2.pdf")
+
+        self.assertEqual("技术服务合同", hints["contractTitle"]["value"])
+
     def test_unverifiable_llm_citation_is_removed_and_confidence_capped(self):
         result = validate_extraction({
             "fields": {

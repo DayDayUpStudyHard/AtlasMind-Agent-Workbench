@@ -169,6 +169,18 @@ class ContractRiskScoringEngine:
             "findings": normalized_findings,
             "vetoTriggered": veto_triggered,
             "vetoDetails": veto_details,
+            "ruleBasis": [
+                {
+                    "ruleId": rule.get("id"),
+                    "ruleKey": self._rule_key(rule),
+                    "clauseType": str(
+                        rule.get("clauseType") or rule.get("clause_type") or "OTHER"
+                    ).upper(),
+                    "title": str(rule.get("title") or ""),
+                    "severity": str(rule.get("severity") or "MEDIUM").upper(),
+                }
+                for rule in rules
+            ],
             "scoringVersion": SCORING_VERSION,
             "evidenceHash": evidence_hash,
             "analysisMode": ANALYSIS_MODE,

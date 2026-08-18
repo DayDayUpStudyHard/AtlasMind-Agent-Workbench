@@ -1,5 +1,88 @@
 # Debug 修复记录
 
+## 2026-08-18：合同审查“范围受限”误判与证据引用修复
+
+### 问题
+
+技术服务合同已完成风险审查，但报告标题显示“[范围受限]”，原运行记录却错误标记为 `COMPLETED`。报告中的付款、间接损失和知识产权风险还引用了合同前言、资料提供或服务进度等无关条款；运行详情无法展示已经写入数据库的 LIMITED 诊断。
+
+### 根因与修复
+
+条款分类器只按固定关键词顺序扫描整段正文，没有提高条款标题权重，导致付款条款末尾出现“保密”时被归为保密、技术服务进度中出现“专利”时被归为知识产权，真正的技术成果归属条款反而落入 OTHER。分类逻辑现改为标题优先的加权判定，并补充服务进度、技术成果归属及合同前言边界；案件 #4 在保留原 clause ID 的前提下完成存量类型纠正。
+
+确定性规则原来只检查同类型的第一条合同条款，命中判断和引用都可能落到无关条款。规则评估现遍历全部同类型条款：`CONTAINS` 检查任一条款是否满足，`SEMANTIC` 引用实际包含禁止措辞的条款，阈值规则定位实际违规条款，未命中时再按规则标题、描述与配置关键词选择最相关证据。
+
+条款目录 SQL 缺少 `clauseType` 别名，使 70 条合同条款被错误汇总成 4 条 OTHER；目录又只返回标题，Reflection 无法读取完整风险域原文。现修正类型统计，为付款、责任、验收、保密、终止、知识产权和数据保护域提供去重后的关键原文证据束，并把这些条款提升为正式合同引用。风险评分同时公开 19 条活动规则基线。Reflection 明确区分“合同条款本身存在风险”和“系统证据不足”，合同风险审查不再错误要求只有履约核验才需要的实际交付、验收或付款凭证。
+
+Legacy Runtime 现保留 `LIMITED` 状态并生成覆盖诊断；二次 Reflection 无论通过或失败都会作为最终核验结果。完整审查产物显式写入 `analysisMode=FULL`，LIMITED 诊断也已加入 Java 的运行列表和详情接口。
+
+### 验证结果
+
+- 修复前案件 #4 的 run #3 为 `COMPLETED`，报告却为 `[范围受限]`；付款条款 #88 被归为保密，服务进度 #79 被归为 IP，成果归属 #106/#107 被归为 OTHER。
+- 第一轮状态修复后 run #4 正确落为 `LIMITED` 并写入 9 项诊断；增加关键原文证据束后 run #5 降为 4 项，证明错误覆盖缺口已逐步收敛。
+- 最终真实回归 run #7 为 `COMPLETED 100%`，Reflection 七个风险域全部 `covered=true`；报告标题为“技术服务合同审查报告”，`analysis_mode=FULL`，风险分 98、状态 `MEDIUM_RISK`。
+- 最终高风险“背景知识产权保护缺失”准确引用合同条款 #107 和审查规则 `PROC-IP-002`；旧 LIMITED run 的 `limitedDiagnostics` 已能通过 Java API 返回。
+- Python 全量测试 396 项通过；新增与相关专项 45 项、Runtime/Harness 82 项通过；Java 全量测试 44 项通过，Java 生产镜像构建通过，`git diff --check` 通过。
+
+### 影响范围
+
+- `tools/chat-assistant/backend/app/agent_runtime/contract_document_parser.py`
+- `tools/chat-assistant/backend/app/agent_runtime/contract_store.py`
+- `tools/chat-assistant/backend/app/agent_runtime/contract_tools.py`
+- `tools/chat-assistant/backend/app/agent_runtime/contract_risk_scoring.py`
+- `tools/chat-assistant/backend/app/agent_runtime/prompts.py`
+- `tools/chat-assistant/backend/app/agent_runtime/runner.py`
+- `tools/chat-assistant/backend/app/agent_runtime/runtime.py`
+- `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java`
+
+---
+
+## 2026-08-18：合同分析自动启动无响应与手动启动 500 修复
+
+### 问题
+
+合同案件完成首步信息确认后，没有自动开始提取合同要素、履约节点和审查风险；用户手动点击启动任务时，接口返回“服务器内部错误，请稍后重试”。Python AI 服务还持续输出任务超时与僵尸恢复扫描异常。
+
+### 根因与修复
+
+现有 Docker MySQL 数据卷中的 `agent_run` 仍是旧表结构，缺少 Java 创建任务必需的 `input_json`，导致 `POST /api/workspace/contracts/{caseId}/runs` 在插入运行记录时返回 HTTP 500。自动分析使用同一个接口，但前端按设计静默启动，因此表现为确认后没有反应。与此同时，Python Runtime 依赖的 `last_heartbeat_at` 也缺失，使心跳和恢复扫描持续失败。
+
+补齐 `agent_run` 的新库初始化定义，并把运行时所需字段集中到 Java 启动迁移器中。已有数据库会在 `agent-server` 启动时自动补齐 `input_json`、`limited_diagnostics`、`last_heartbeat_at` 及完整的运行元数据字段，不再要求本地或服务器手工执行 `ALTER TABLE`。新增迁移回归测试，固定任务创建和运行监控所需的三个关键字段。
+
+### 验证结果
+
+- 修复前用真实接口启动案件 #4 的 `CONTRACT_ELEMENT_EXTRACTION`，稳定返回 HTTP 500，Java 日志为 `Unknown column 'input_json' in 'field list'`。
+- 重建 `agent-server` 后，启动迁移自动补齐缺列；同一请求返回 HTTP 200 并创建 run #1。
+- run #1 实际经过 `ANALYZING 46%`、`VERIFYING 88%`，最终达到 `COMPLETED 100%`；合同要素快照成功写入并进入 `READY_FOR_CONFIRMATION`。
+- `AgentWorkbenchSchemaInitializerTest` 通过，`docker compose config --quiet` 与 `git diff --check` 通过；修复后 90 秒内 Python AI 日志没有新的数据库字段异常。
+
+### 影响范围
+
+- `agent-server/sql/init.sql`
+- `agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java`
+- `agent-server/src/test/java/com/atlasmind/config/AgentWorkbenchSchemaInitializerTest.java`
+
+---
+
+## 2026-08-16：GitHub Actions Docker Compose 冒烟验证失败修复
+
+### 问题
+
+GitHub Actions 的后端 Java、Python AI 与两个前端任务均已通过，但 `Docker 镜像验证` 在 `docker compose build` 成功后、执行 `docker compose up --no-build -d --wait` 时失败。日志显示 AI 服务启动即退出：`ValueError: LLM_API_KEY 未设置，请在 .env 中配置`。
+
+### 根因与修复
+
+Docker Compose 冒烟任务只注入了数据库密码和内部服务令牌，未向 AI 服务提供启动阶段必填的 LLM 配置。生产环境会由 `.env` 提供这些变量，但 CI 是干净环境，因此服务无法完成健康检查。
+
+在 `.github/workflows/ci.yml` 的 Docker 验证任务中补充仅用于离线测试的 `LLM_API_KEY`、`LLM_BASE_URL` 与 `LLM_MODEL`。其中 Base URL 指向不可达的本地地址；冒烟验证只确认服务能够正常启动，不会访问真实模型服务，也不会使用真实 API Key。
+
+### 验证结果
+
+- 未注入 `LLM_API_KEY` 时，AI 服务启动按预期报错；注入 CI 占位配置后，LLM 客户端初始化成功。
+- GitHub Actions Run `31940735756` 已完成：Java、Python AI、`agent-front`、`agent-admin` 与 `Docker 镜像验证` 全部通过。
+
+---
+
 ## 2026-08-15：GitHub Actions Docker 依赖构建修复
 
 ### 问题

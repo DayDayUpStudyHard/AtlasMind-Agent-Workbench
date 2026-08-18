@@ -56,6 +56,42 @@ class ContractDocumentParserTest(unittest.TestCase):
     def test_data_protection_precedes_generic_confidentiality(self):
         self.assertEqual("DATA_PROTECTION", classify_clause("个人信息和数据删除义务"))
 
+    def test_contract_preamble_is_not_classified_from_incidental_payment_words(self):
+        self.assertEqual(
+            "OTHER",
+            classify_clause(
+                "甲方委托乙方提供技术服务，并支付相应服务报酬。",
+                title="合同前言",
+            ),
+        )
+
+    def test_clause_heading_outweighs_incidental_body_keywords(self):
+        clauses = split_contract_text(
+            "第八条 报酬及其支付方式\n"
+            "甲方在收到合规发票后十个工作日内支付服务费，乙方应对付款资料保密。\n"
+            "第九条 技术服务进度\n"
+            "乙方分三个阶段推进工作，阶段成果涉及的知识产权另按本合同约定处理。"
+        )
+
+        self.assertEqual("PAYMENT", clauses[0]["clauseType"])
+        self.assertEqual("DELIVERY", clauses[1]["clauseType"])
+
+    def test_result_ownership_heading_is_classified_as_ip(self):
+        self.assertEqual(
+            "IP",
+            classify_clause(
+                "本项目形成的技术成果由双方按约定使用。",
+                title="技术成果的归属",
+            ),
+        )
+        self.assertEqual(
+            "IP",
+            classify_clause(
+                "在合同有效期内形成的新的技术成果归甲方所有。",
+                title="甲方利用乙方成果形成的新技术成果",
+            ),
+        )
+
     def test_timeline_v2_splits_service_range_and_skips_signing_date(self):
         text = (
             "\u6280\u672f\u670d\u52a1\u6709\u6548\u671f\uff1a"

@@ -68,6 +68,134 @@ class CircuitBreaker:
 
 _llm_circuit_breaker = CircuitBreaker()
 
+_CONTRACT_REVIEW_DOMAIN_ORDER = (
+    "PAYMENT", "LIABILITY", "ACCEPTANCE", "CONFIDENTIALITY",
+    "TERMINATION", "IP", "DATA_PROTECTION", "DELIVERY", "OTHER",
+)
+
+
+def _review_citation_key(item: dict) -> str:
+    source_type = str(item.get("sourceType") or item.get("retrievalType") or "UNKNOWN")
+    source_id = item.get("id") or item.get("sourceId") or item.get("title") or str(item)
+    return f"{source_type}:{source_id}"
+
+
+def _select_contract_review_citations(citations: list[dict], limit: int = 18) -> list[dict]:
+    """Keep contract domains and policy sources represented in the LLM payload."""
+    unique: list[dict] = []
+    seen: set[str] = set()
+    for item in citations:
+        if not isinstance(item, dict):
+            continue
+        key = _review_citation_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(item)
+
+    selected: list[dict] = []
+    selected_keys: set[str] = set()
+
+    def add(item: dict) -> None:
+        key = _review_citation_key(item)
+        if key not in selected_keys and len(selected) < limit:
+            selected_keys.add(key)
+            selected.append(item)
+
+    contract_clauses = [
+        item for item in unique
+        if str(item.get("sourceType") or "").upper() == "CONTRACT_CLAUSE"
+    ]
+    for domain in _CONTRACT_REVIEW_DOMAIN_ORDER:
+        candidate = next(
+            (item for item in contract_clauses if str(item.get("clauseType") or "").upper() == domain),
+            None,
+        )
+        if candidate:
+            add(candidate)
+
+    policy_sources = [
+        item for item in unique
+        if str(item.get("sourceType") or "").upper() not in {"", "CONTRACT_CLAUSE", "CONTRACT_DOCUMENT"}
+    ]
+    for item in policy_sources[:6]:
+        add(item)
+    for item in unique:
+        add(item)
+    return selected
+
+
+def _rule_key_from_finding(item: dict) -> str:
+    return str(item.get("ruleKey") or item.get("ruleId") or item.get("title") or "").strip()
+
+
+def _normalized_rule_finding(item: dict) -> dict:
+    rule_key = str(item.get("ruleKey") or "").strip()
+    clause_type = str(item.get("clauseType") or item.get("riskDimension") or "OTHER").upper()
+    detail = str(item.get("detail") or "").strip()
+    rule_title = str(item.get("ruleTitle") or item.get("title") or "合同审查规则").strip()
+    contract_citation = item.get("contractCitation") if isinstance(item.get("contractCitation"), dict) else None
+    policy_citation = item.get("policyCitation") if isinstance(item.get("policyCitation"), dict) else {
+        "ruleKey": rule_key,
+        "ruleTitle": rule_title,
+        "snippet": str(item.get("description") or ""),
+    }
+    return {
+        **item,
+        "findingKey": str(item.get("findingKey") or f"{clause_type}:{rule_key or rule_title}"),
+        "ruleKey": rule_key or None,
+        "clauseType": clause_type,
+        "severity": str(item.get("severity") or "MEDIUM").upper(),
+        "title": str(item.get("title") or rule_title),
+        "claim": str(item.get("claim") or detail or item.get("description") or rule_title),
+        "description": str(item.get("description") or detail or rule_title),
+        "impact": str(item.get("impact") or "该规则要求尚未被合同证据充分满足，需要在签署或审批前复核其业务与法律影响。"),
+        "remediationAdvice": str(item.get("remediationAdvice") or f"补充或修改相关条款，明确满足“{rule_title}”的可核验约定。"),
+        "negotiationAdvice": str(item.get("negotiationAdvice") or "将该项列入合同谈判清单；无法补充时应记录例外原因并升级人工审批。"),
+        "suggestedAction": str(item.get("suggestedAction") or "REQUEST_LEGAL_REVIEW"),
+        "contractCitation": contract_citation or {
+            "clause": "合同条款目录",
+            "snippet": detail or f"未找到满足“{rule_title}”要求的明确约定。",
+        },
+        "policyCitation": policy_citation,
+        "evidenceStatus": str(item.get("evidenceStatus") or ("DUAL_CITED" if contract_citation else "POLICY_ONLY")),
+        "confidenceLevel": str(item.get("confidenceLevel") or "MEDIUM"),
+        "verificationPoints": item.get("verificationPoints") or [
+            f"确认合同是否明确满足“{rule_title}”",
+            "核对相关条款原文、附件和适用标准",
+        ],
+    }
+
+
+def _merge_rule_findings(artifact: dict, rule_findings: list[dict]) -> dict:
+    output = dict(artifact)
+    findings = [item for item in (output.get("findings") or []) if isinstance(item, dict)]
+    represented = " ".join(
+        str(value)
+        for item in findings
+        for value in (
+            item.get("findingKey"),
+            item.get("ruleKey"),
+            (item.get("policyCitation") or {}).get("ruleKey")
+            if isinstance(item.get("policyCitation"), dict) else None,
+            item.get("title"),
+        )
+        if value
+    )
+    for item in rule_findings:
+        key = _rule_key_from_finding(item)
+        if key and key in represented:
+            continue
+        normalized = _normalized_rule_finding(item)
+        findings.append(normalized)
+        represented += " " + " ".join(
+            str(value)
+            for value in (normalized.get("findingKey"), normalized.get("ruleKey"), normalized.get("title"))
+            if value
+        )
+    output["findings"] = findings
+    return output
+
 
 def _complete_timeline_candidate_for_llm(item: dict) -> dict:
     """Build the LLM payload for one timeline candidate (PRD Phase 6, task 6).
@@ -716,24 +844,38 @@ class LLMService:
             key=lambda item: severity_order.get(str(item.get("severity") or "").upper(), 3),
         )
         llm_findings = [item for item in findings if not _is_rule_finding(item)]
+        selected_rule_findings = rule_findings[:8]
         if rule_findings:
             template = (
                 "审查顺序要求：1) 优先识别并报告合同中实际存在的显性异常或"
                 "不公平条款；2) 规则引擎缺失条款清单（ruleEngineFindings）"
-                "仅作补充参考，最多选取其中最严重的若干条，且不得挤压显性"
-                "风险发现；不得将\"未找到X类型条款\"的清单项逐一平铺为主要发现。\n\n"
+                "属于已验证的确定性候选，不得仅在摘要中提及而从 findings 中遗漏；"
+                "3) 摘要中提到的每一项实质风险都必须有对应 finding；"
+                "4) 必须严格按照 case.ourSide 判断我方立场，B 表示我方为乙方，"
+                "不得默认把甲方当作我方；5) 违约金比例是特定违约后果，不等于"
+                "总责任上限。合同未明确责任上限时必须写成‘责任上限缺失/待明确’，"
+                "不得把10%违约金描述为10%责任上限。\n\n"
             ) + template
+        our_side = str(case.get("ourSide") or "").upper()
+        our_entity = case.get("ourEntity", "")
+        counterparty = case.get("counterparty", "")
+        party_a = case.get("partyA") or (our_entity if our_side == "A" else counterparty)
+        party_b = case.get("partyB") or (counterparty if our_side == "A" else our_entity)
         payload = {
             "case": {
                 "caseKey": case.get("caseKey", ""),
                 "title": case.get("title", ""),
-                "counterparty": case.get("counterparty", ""),
+                "ourEntity": our_entity,
+                "counterparty": counterparty,
+                "ourSide": our_side,
+                "partyA": party_a,
+                "partyB": party_b,
                 "amount": case.get("amount"),
                 "contractType": case.get("contractType", ""),
             },
-            "findings": llm_findings + rule_findings[:8],
-            "ruleEngineFindings": rule_findings[:8],
-            "citations": citations[:8],
+            "findings": llm_findings + selected_rule_findings,
+            "ruleEngineFindings": selected_rule_findings,
+            "citations": _select_contract_review_citations(citations),
             "deterministicScoring": scoring,
             "analysisMode": case.get("analysisMode") or scoring.get("analysisMode") or "FULL",
             "coverageLimitation": case.get("coverageLimitation") or "",
@@ -757,7 +899,8 @@ class LLMService:
             max_retries=3, backoff_base=2.0,
         )
         # Reasoning models may leave visible content empty; recover from reasoning_content.
-        return self._parse_structured_response(response)
+        artifact = self._parse_structured_response(response)
+        return _merge_rule_findings(artifact, selected_rule_findings)
 
     def plan_contract_risk_domains(self, case: dict, inventory: dict,
                                    baseline_domains: list[dict],

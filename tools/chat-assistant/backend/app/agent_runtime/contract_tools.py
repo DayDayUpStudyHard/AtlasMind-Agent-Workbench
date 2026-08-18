@@ -413,12 +413,20 @@ class ContractToolRegistry:
             output = obs.get("output")
             if not isinstance(output, dict):
                 continue
-            for key in ("items", "clauses", "matches", "documents", "sources"):
-                items = output.get(key)
+            candidate_lists = [
+                output.get(key)
+                for key in ("items", "clauses", "matches", "documents", "sources")
+            ]
+            inventory = output.get("inventory")
+            if isinstance(inventory, dict):
+                candidate_lists.append(inventory.get("keyEvidenceClauses"))
+            for items in candidate_lists:
                 if isinstance(items, list):
                     for item in items:
                         if isinstance(item, dict):
-                            sid = item.get("id") or item.get("title", "")
+                            source_type = str(item.get("sourceType") or item.get("retrievalType") or "UNKNOWN")
+                            source_id = item.get("id") or item.get("sourceId") or item.get("title", "")
+                            sid = f"{source_type}:{source_id}"
                             if sid and sid not in seen:
                                 seen[sid] = dict(item)
         return list(seen.values())

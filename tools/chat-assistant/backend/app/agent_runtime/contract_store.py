@@ -30,6 +30,328 @@ _CONTRACT_FACT_QUERY_TERMS = (
     "主体", "相对方", "甲方", "乙方",
 )
 
+_REVIEW_EVIDENCE_TYPES = {
+    "SERVICE_PROCUREMENT": (
+        "PAYMENT", "LIABILITY", "ACCEPTANCE", "CONFIDENTIALITY",
+        "TERMINATION", "IP", "DATA_PROTECTION",
+    ),
+    "GOODS_PURCHASE": (
+        "PAYMENT", "LIABILITY", "ACCEPTANCE", "DELIVERY",
+        "TERMINATION", "IP", "DATA_PROTECTION",
+    ),
+    "NDA": ("CONFIDENTIALITY", "LIABILITY", "TERMINATION", "DATA_PROTECTION"),
+}
+
+_FIELD_TEXT_ALTERNATIVES: dict[str, tuple[tuple[str, ...], ...]] = {
+    "signatoryAuthority": (("法定代表人",), ("授权代表",), ("委托代理人",), ("签字", "盖章")),
+    "invoiceType": (("发票",),),
+    "latePaymentPenalty": (("逾期", "违约金"), ("迟延", "违约金"), ("违反本合同第三条", "违约金")),
+    "acceptancePeriod": (("验收期限",), ("验收", "工作日内"), ("验收", "自然日内")),
+    "slaMetrics": (("SLA",), ("服务水平",), ("响应时间",), ("服务可用性",), ("问题解决率",)),
+    "slaPenalty": (("SLA", "违约"), ("服务水平", "扣"), ("未达标", "整改"), ("未达标", "扣减")),
+    "thirdPartyClaims": (("第三方", "索赔"), ("第三方", "侵权"), ("第三方", "权利")),
+    "transitionService": (("过渡服务",), ("合同交接",), ("终止", "移交")),
+    "dataMigration": (("数据迁移",), ("数据移交",)),
+    "dataProcessingPurpose": (("数据处理目的",), ("个人信息", "处理目的"), ("数据", "用途")),
+    "dataStorageLocation": (("数据存储",), ("存储地点",)),
+    "dataDeletionObligation": (("数据删除",), ("数据销毁",), ("个人信息", "删除")),
+    "ipOwnership": (("知识产权", "归"), ("技术成果", "归"), ("成果归属",)),
+}
+
+_CASE_FIELD_KEYS = {
+    "ourEntity": "ourEntity",
+    "counterparty": "counterparty",
+}
+
+
+def _semantic_elements(clause: dict) -> dict:
+    value = clause.get("semanticElements")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _field_text_match(field: str, clauses: list[dict]) -> dict:
+    for clause in clauses:
+        text = f"{clause.get('title') or ''} {clause.get('content') or ''}".lower()
+        if field == "taxRate" and re.search(r"(?:\d+(?:\.\d+)?\s*%\s*的?增值税|增值税[^\d]{0,8}\d+(?:\.\d+)?\s*%)", text):
+            return clause
+        alternatives = _FIELD_TEXT_ALTERNATIVES.get(field, ())
+        if any(all(term.lower() in text for term in terms) for terms in alternatives):
+            return clause
+    return {}
+
+
+def _field_is_present(field: str, clauses: list[dict], case: dict) -> tuple[bool, dict]:
+    case_key = _CASE_FIELD_KEYS.get(field)
+    if case_key and str(case.get(case_key) or "").strip():
+        return True, {}
+    for clause in clauses:
+        value = _semantic_elements(clause).get(field)
+        if value not in (None, "", [], {}):
+            return True, clause
+    text_clause = _field_text_match(field, clauses)
+    return bool(text_clause), text_clause
+
+
+def _threshold_value(field: str, clauses: list[dict]) -> tuple[float | None, dict]:
+    for clause in clauses:
+        value = _semantic_elements(clause).get(field)
+        if value not in (None, ""):
+            try:
+                return float(value), clause
+            except (TypeError, ValueError):
+                continue
+
+    for clause in clauses:
+        text = f"{clause.get('title') or ''} {clause.get('content') or ''}"
+        if field == "advancePaymentPct":
+            if "预付款" not in text and "预付" not in text:
+                continue
+            match = re.search(r"(?:预付款|预付)[^\d%]{0,30}(\d+(?:\.\d+)?)\s*%", text)
+        elif field == "liabilityCapPct":
+            match = re.search(
+                r"(?:责任上限|累计赔偿|赔偿总额|最高赔偿)[^\d%]{0,40}(\d+(?:\.\d+)?)\s*%",
+                text,
+            )
+        elif field == "terminationNoticeDays":
+            match = re.search(r"(?:解除|终止)[^。；]{0,60}?(?:提前|通知)[^\d]{0,12}(\d+)\s*(?:个)?(?:工作日|自然日|日|天)", text)
+        elif field == "confidentialitySurvivalYears":
+            match = re.search(r"保密期限[^\d]{0,12}(\d+(?:\.\d+)?)\s*年", text)
+        else:
+            match = None
+        if match:
+            return float(match.group(1)), clause
+
+    # No advance-payment wording means the advance ratio is deterministically zero.
+    if field == "advancePaymentPct":
+        return 0.0, clauses[0] if clauses else {}
+    return None, {}
+
+
+def _contains_requirement_satisfied(rule: dict, keywords: list[str], content: str) -> bool:
+    lowered = content.lower()
+    if str(rule.get("ruleKey") or "") == "PROC-LIAB-002":
+        loss_terms = [term for term in keywords if "损失" in term]
+        exclusion_terms = [term for term in keywords if term in {"排除", "不承担"}]
+        return (
+            any(term.lower() in lowered for term in loss_terms)
+            and any(term.lower() in lowered for term in exclusion_terms)
+        )
+    return any(keyword.lower() in lowered for keyword in keywords)
+
+
+def _build_key_evidence_bundle(
+    clauses: list[dict], contract_type: str, per_type_limit: int = 6,
+) -> list[dict]:
+    evidence_types = _REVIEW_EVIDENCE_TYPES.get(
+        str(contract_type or "").upper(),
+        _REVIEW_EVIDENCE_TYPES["SERVICE_PROCUREMENT"],
+    )
+    grouped: dict[str, list[dict]] = {clause_type: [] for clause_type in evidence_types}
+    seen_content: set[str] = set()
+    for clause in clauses:
+        clause_type = str(clause.get("clauseType") or "")
+        if clause_type not in grouped:
+            continue
+        normalized_content = re.sub(r"\s+", "", str(clause.get("content") or ""))
+        if not normalized_content or normalized_content in seen_content:
+            continue
+        seen_content.add(normalized_content)
+        grouped[clause_type].append(clause)
+
+    evidence = []
+    for clause_type in evidence_types:
+        candidates = sorted(
+            grouped[clause_type],
+            key=lambda item: (-len(str(item.get("content") or "")), int(item.get("id") or 0)),
+        )[:per_type_limit]
+        for clause in candidates:
+            content = str(clause.get("content") or "")[:2000]
+            evidence.append({
+                **clause,
+                "content": content,
+                "snippet": content,
+                "sourceType": "CONTRACT_CLAUSE",
+            })
+    return evidence
+
+
+def _text_bigrams(value: Any) -> set[str]:
+    compact = re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]+", "", str(value or "").lower())
+    return {compact[index:index + 2] for index in range(max(0, len(compact) - 1))}
+
+
+def _clause_relevance(rule: dict, clause: dict, config: dict) -> tuple[int, int, int]:
+    rule_title = str(rule.get("title") or "")
+    rule_text = f"{rule_title} {rule.get('description') or ''}"
+    clause_title = str(clause.get("title") or "")
+    clause_content = str(clause.get("content") or "")
+    configured_terms = [
+        str(term).lower()
+        for key in ("keywords", "forbidden")
+        for term in (config.get(key) or [])
+        if str(term).strip()
+    ]
+    configured_hits = sum(
+        1 for term in configured_terms
+        if term in f"{clause_title} {clause_content}".lower()
+    )
+    title_overlap = len(_text_bigrams(rule_title) & _text_bigrams(clause_title))
+    full_overlap = len(_text_bigrams(rule_text) & _text_bigrams(f"{clause_title} {clause_content}"))
+    return configured_hits, title_overlap, full_overlap
+
+
+def _best_clause(rule: dict, clauses: list[dict], config: dict) -> dict:
+    return max(
+        clauses,
+        key=lambda clause: (_clause_relevance(rule, clause, config), -int(clause.get("id") or 0)),
+        default={},
+    )
+
+
+def _evaluate_review_rules(
+    rules: list[dict], clauses: list[dict], case: dict | None = None,
+) -> list[dict]:
+    """Evaluate deterministic review rules across every matching clause."""
+    case = case or {}
+    findings = []
+    for rule in rules:
+        check_type = str(rule.get("checkType", "MISSING")).upper()
+        check_config = rule.get("checkConfig")
+        if isinstance(check_config, str):
+            try:
+                check_config = json.loads(check_config)
+            except (TypeError, ValueError):
+                check_config = {}
+        config = check_config if isinstance(check_config, dict) else {}
+        matching = [
+            clause for clause in clauses
+            if str(clause.get("clauseType", "")) == str(rule.get("clauseType", ""))
+        ]
+
+        violated = False
+        detail = ""
+        matched_clause: dict = {}
+
+        if check_type == "MISSING":
+            fields = [str(field) for field in (config.get("fields") or []) if str(field)]
+            missing_fields = [
+                field for field in fields
+                if not _field_is_present(field, clauses, case)[0]
+            ]
+            if fields and missing_fields:
+                violated = True
+                detail = f"未能确认规则要求字段: {missing_fields}"
+                matched_clause = _best_clause(rule, matching, config)
+            elif not fields and not matching:
+                violated = True
+                detail = f"未找到{rule.get('clauseType', '')}类型条款"
+
+        elif check_type == "CONTAINS" and matching:
+            keywords = [str(keyword) for keyword in (config.get("keywords") or []) if str(keyword)]
+            satisfying = [
+                clause for clause in matching
+                if _contains_requirement_satisfied(
+                    rule, keywords, str(clause.get("content", ""))
+                )
+            ]
+            if keywords and not satisfying:
+                violated = True
+                detail = f"条款中未包含必要关键词: {keywords}"
+                citation_candidates = matching
+                citation_config = config
+                if str(rule.get("ruleKey") or "") == "PROC-LIAB-002":
+                    citation_candidates = [
+                        clause for clause in matching
+                        if "不可抗力" not in f"{clause.get('title') or ''} {clause.get('content') or ''}"
+                    ] or matching
+                    penalty_candidates = [
+                        clause for clause in citation_candidates
+                        if "违约金" in str(clause.get("content") or "")
+                    ]
+                    general_damages = [
+                        clause for clause in citation_candidates
+                        if "赔偿" in str(clause.get("content") or "")
+                        and "泄密" not in f"{clause.get('title') or ''} {clause.get('content') or ''}"
+                    ]
+                    citation_candidates = penalty_candidates or general_damages or citation_candidates
+                    citation_config = {
+                        **config,
+                        "keywords": [term for term in keywords if "损失" in term],
+                    }
+                matched_clause = _best_clause(rule, citation_candidates, citation_config)
+
+        elif check_type == "THRESHOLD" and matching:
+            field = str(config.get("field") or "")
+            operator = str(config.get("operator") or "gte")
+            target = config.get("value", 0)
+            field_value, value_clause = _threshold_value(field, matching)
+            if field_value is None:
+                violated = True
+                matched_clause = _best_clause(rule, matching, config)
+                detail = f"未能从合同条款确认阈值字段 {field}，需要人工复核"
+            elif (
+                operator == "gte" and field_value < float(target)
+            ) or (
+                operator == "lte" and field_value > float(target)
+            ):
+                violated = True
+                matched_clause = value_clause or _best_clause(rule, matching, config)
+                comparison = "低于要求" if operator == "gte" else "超出上限"
+                detail = f"{field}={field_value} {comparison} {target}"
+
+        elif check_type == "SEMANTIC" and matching:
+            forbidden = [str(term) for term in (config.get("forbidden") or []) if str(term)]
+            triggered = [
+                (clause, term)
+                for clause in matching
+                for term in forbidden
+                if term in str(clause.get("content", ""))
+            ]
+            if triggered:
+                violated = True
+                matched_clause, forbidden_term = max(
+                    triggered,
+                    key=lambda item: _clause_relevance(rule, item[0], config),
+                )
+                detail = f"发现禁止措辞: '{forbidden_term}'"
+
+        if not violated:
+            continue
+        if not matched_clause and matching:
+            matched_clause = _best_clause(rule, matching, config)
+        findings.append({
+            "ruleId": rule.get("id"),
+            "ruleKey": rule.get("ruleKey"),
+            "ruleTitle": rule.get("title"),
+            "title": rule.get("title"),
+            "riskDimension": rule.get("clauseType"),
+            "severity": rule.get("severity"),
+            "isVeto": rule.get("isVeto"),
+            "clauseType": rule.get("clauseType"),
+            "detail": detail,
+            "description": rule.get("description"),
+            "contractCitationIds": (
+                [f"CONTRACT_CLAUSE:{matched_clause.get('id')}"]
+                if matched_clause.get("id") else []
+            ),
+            "contractCitation": {
+                "clause": matched_clause.get("title") or matched_clause.get("clauseType") or "",
+                "snippet": str(matched_clause.get("content") or "")[:1200],
+            } if matched_clause else None,
+            "evidenceBasis": "MATCHED_CLAUSE" if matched_clause else "CLAUSE_INVENTORY",
+            "policyCitation": {
+                "ruleKey": rule.get("ruleKey"),
+                "ruleTitle": rule.get("title"),
+                "snippet": str(rule.get("description") or ""),
+            },
+        })
+    return findings
+
 
 def _format_contract_value(value: Any, value_type: str = "") -> str:
     if value is None:
@@ -1010,9 +1332,14 @@ class ContractStore:
             with _conn() as conn:
                 with conn.cursor() as cur:
                     # Get case info
-                    cur.execute("SELECT contract_type FROM contract_case WHERE id=%s", (case_id,))
+                    cur.execute(
+                        """SELECT contract_type AS contractType, our_entity AS ourEntity,
+                                  counterparty, our_side AS ourSide
+                           FROM contract_case WHERE id=%s""",
+                        (case_id,),
+                    )
                     case_row = cur.fetchone()
-                    ct = case_row["contract_type"] if case_row else "SERVICE_PROCUREMENT"
+                    case_data = _normalize_value(case_row or {})
 
                     # Determine rule set
                     if not rule_set or rule_set == "SERVICE_PROCUREMENT_V1":
@@ -1039,91 +1366,7 @@ class ContractStore:
                                    FROM contract_clause WHERE case_id=%s""", (case_id,))
                     clauses = [_normalize_value(r) for r in cur.fetchall()]
 
-            # Evaluate each rule against clauses (simple keyword/field checks)
-            findings = []
-            for rule in rules:
-                check_type = str(rule.get("checkType", "MISSING"))
-                check_config = rule.get("checkConfig")
-                matching: list[dict] = []
-                if isinstance(check_config, str):
-                    try: check_config = json.loads(check_config)
-                    except: check_config = {}
-
-                violated = False
-                detail = ""
-
-                if check_type == "MISSING":
-                    # Check if any clause of this type exists
-                    matching = [c for c in clauses if str(c.get("clauseType","")) == str(rule.get("clauseType",""))]
-                    if not matching:
-                        violated = True
-                        detail = f"未找到{rule.get('clauseType','')}类型条款"
-
-                elif check_type == "CONTAINS" and isinstance(check_config, dict):
-                    keywords = check_config.get("keywords", [])
-                    matching = [c for c in clauses if str(c.get("clauseType","")) == str(rule.get("clauseType",""))]
-                    if matching:
-                        content = str(matching[0].get("content", "")).lower()
-                        if not any(kw.lower() in content for kw in keywords):
-                            violated = True
-                            detail = f"条款中未包含必要关键词: {keywords}"
-
-                elif check_type == "THRESHOLD" and isinstance(check_config, dict):
-                    matching = [c for c in clauses if str(c.get("clauseType","")) == str(rule.get("clauseType",""))]
-                    if matching:
-                        sem = matching[0].get("semanticElements")
-                        if isinstance(sem, str):
-                            try: sem = json.loads(sem)
-                            except: sem = {}
-                        field_val = sem.get(check_config.get("field", "")) if sem else None
-                        if field_val is not None:
-                            op = check_config.get("operator", "gte")
-                            target = check_config.get("value", 0)
-                            if op == "gte" and float(field_val) < target:
-                                violated = True
-                                detail = f"{check_config.get('field')}={field_val} 低于要求 {target}"
-                            elif op == "lte" and float(field_val) > target:
-                                violated = True
-                                detail = f"{check_config.get('field')}={field_val} 超出上限 {target}"
-
-                elif check_type == "SEMANTIC" and isinstance(check_config, dict):
-                    forbidden = check_config.get("forbidden", [])
-                    matching = [c for c in clauses if str(c.get("clauseType","")) == str(rule.get("clauseType",""))]
-                    if matching:
-                        content = str(matching[0].get("content", ""))
-                        for fw in forbidden:
-                            if fw in content:
-                                violated = True
-                                detail = f"发现禁止措辞: '{fw}'"
-                                break
-
-                if violated:
-                    matched_clause = matching[0] if matching else {}
-                    findings.append({
-                        "ruleId": rule.get("id"),
-                        "ruleKey": rule.get("ruleKey"),
-                        "ruleTitle": rule.get("title"),
-                        # Uniform structure with LLM findings so the eval scorer,
-                        # dedup, and downstream consumers see the same keys.
-                        "title": rule.get("title"),
-                        "riskDimension": rule.get("clauseType"),
-                        "severity": rule.get("severity"),
-                        "isVeto": rule.get("isVeto"),
-                        "clauseType": rule.get("clauseType"),
-                        "detail": detail,
-                        "description": rule.get("description"),
-                        "contractCitationIds": (
-                            [f"CONTRACT_CLAUSE:{matched_clause.get('id')}" ]
-                            if matched_clause.get("id") else []
-                        ),
-                        "contractCitation": {
-                            "clause": matched_clause.get("title") or matched_clause.get("clauseType") or "",
-                            "snippet": str(matched_clause.get("content") or "")[:1200],
-                        } if matched_clause else None,
-                        "evidenceBasis": "MATCHED_CLAUSE" if matched_clause else "CLAUSE_INVENTORY",
-                    })
-
-            return findings
+            return _evaluate_review_rules(rules, clauses, case_data)
         return await _run_sync(_get)
 
     # ── Clause inventory (full listing, not limited to 20) ─────────────
@@ -1147,7 +1390,7 @@ class ContractStore:
                     total = int((cur.fetchone() or {}).get("total", 0))
 
                     cur.execute(
-                        """SELECT clause_type, COUNT(*) AS count
+                        """SELECT clause_type AS clauseType, COUNT(*) AS count
                            FROM contract_clause WHERE case_id=%s
                            GROUP BY clause_type""",
                         (case_id,),
@@ -1166,6 +1409,24 @@ class ContractStore:
                         (case_id,),
                     )
                     clauses = [_normalize_value(r) for r in cur.fetchall()]
+
+                    evidence_types = _REVIEW_EVIDENCE_TYPES.get(
+                        contract_type, _REVIEW_EVIDENCE_TYPES["SERVICE_PROCUREMENT"]
+                    )
+                    placeholders = ",".join(["%s"] * len(evidence_types))
+                    cur.execute(
+                        f"""SELECT id, clause_type AS clauseType,
+                                   clause_number AS clauseNumber, title, content,
+                                   page_number AS pageNumber
+                            FROM contract_clause
+                            WHERE case_id=%s AND clause_type IN ({placeholders})
+                            ORDER BY id
+                            LIMIT 100""",
+                        [case_id, *evidence_types],
+                    )
+                    key_evidence = _build_key_evidence_bundle(
+                        [_normalize_value(row) for row in cur.fetchall()], contract_type
+                    )
 
             unclassified = clause_types.get("OTHER", 0)
 
@@ -1189,6 +1450,7 @@ class ContractStore:
                 "unclassifiedCount": unclassified,
                 "missingKeyTypes": missing_key_types,
                 "clauses": clauses,
+                "keyEvidenceClauses": key_evidence,
                 "contractType": contract_type,
             }
 
