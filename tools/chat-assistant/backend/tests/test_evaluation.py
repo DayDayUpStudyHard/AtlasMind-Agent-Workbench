@@ -91,6 +91,53 @@ def test_meets_thresholds():
     assert not passed, "Should fail thresholds"
 
 
+def test_release_gate_separates_quality_failures_from_invalid_runs():
+    from app.agent_runtime.evaluation.metrics import build_release_gate
+
+    quality_failure = build_release_gate({
+        "highRiskRecall": 0.667,
+        "dualCitationRate": 0.4714,
+        "falsePositiveRate": 0.0,
+        "limitedReportRate": 0.0,
+        "metricCaseCount": 3,
+        "resultValid": True,
+    }, status="COMPLETED")
+    assert quality_failure["status"] == "FAILED"
+    assert quality_failure["blockingReasons"] == []
+    assert {item["metric"] for item in quality_failure["failures"]} == {
+        "highRiskRecall", "dualCitationRate",
+    }
+
+    blocked = build_release_gate({
+        "highRiskRecall": 1.0,
+        "dualCitationRate": 1.0,
+        "falsePositiveRate": 0.0,
+        "limitedReportRate": 0.0,
+        "metricCaseCount": 0,
+        "resultValid": False,
+    }, status="ENVIRONMENT_UNAVAILABLE")
+    assert blocked["status"] == "BLOCKED"
+    assert "ENVIRONMENT_UNAVAILABLE" in blocked["blockingReasons"]
+    assert "RESULT_INVALID" in blocked["blockingReasons"]
+    assert "NO_SCORED_CASES" in blocked["blockingReasons"]
+
+
+def test_release_gate_passes_only_for_full_quality_run():
+    from app.agent_runtime.evaluation.metrics import build_release_gate
+
+    gate = build_release_gate({
+        "highRiskRecall": 0.95,
+        "dualCitationRate": 0.98,
+        "falsePositiveRate": 0.01,
+        "limitedReportRate": 0.0,
+        "metricCaseCount": 10,
+        "resultValid": True,
+    }, status="COMPLETED")
+    assert gate["passed"] is True
+    assert gate["status"] == "PASSED"
+    assert gate["thresholdVersion"] == "release-gate-v1"
+
+
 def test_risk_title_matching_accepts_semantically_equivalent_wording():
     from app.api.routes import _risk_finding_matches
 
@@ -102,6 +149,23 @@ def test_risk_title_matching_accepts_semantically_equivalent_wording():
         "title": "180个工作日付款期限导致服务方承担重大现金流压力",
         "riskDimension": "PAYMENT",
         "riskExplanation": "付款周期接近九个月，回款时间明显过长。",
+    }
+
+    assert _risk_finding_matches(expected, actual)
+
+
+def test_risk_title_matching_uses_expected_key_terms_within_dimension():
+    from app.api.routes import _risk_finding_matches
+
+    expected = {
+        "title": "预付款缺少保障条件",
+        "riskDimension": "PAYMENT",
+        "keyTerms": ["预付款", "履约担保", "保障"],
+    }
+    actual = {
+        "title": "预付款比例过高",
+        "clauseType": "PAYMENT",
+        "riskExplanation": "合同约定50%预付款，且未约定履约担保或其他保障措施。",
     }
 
     assert _risk_finding_matches(expected, actual)

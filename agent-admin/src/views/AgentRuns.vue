@@ -25,6 +25,14 @@
         </template>
       </el-table-column>
       <el-table-column prop="currentStep" label="当前步骤" min-width="180" />
+      <el-table-column label="执行链路" min-width="190">
+        <template #default="{ row }">
+          <div class="run-stack">
+            <span>{{ row.graphName || row.runtimeEngine || '未记录运行时' }}</span>
+            <small>{{ row.model || '默认模型' }} · {{ row.promptVersion || '默认提示词' }}</small>
+          </div>
+        </template>
+      </el-table-column>
       <el-table-column prop="createTime" label="创建时间" width="170">
         <template #default="{ row }">{{ formatDate(row.createTime) }}</template>
       </el-table-column>
@@ -120,5 +128,7 @@ async function removeRun(row) {
 .page-head h2 { margin: 6px 0 8px; color: #1f2d3d; font-size: 24px; }
 .page-head p { margin: 0; color: #607184; line-height: 1.7; }
 .data-table { border: 1px solid #dce4ee; border-radius: 4px; }
+.run-stack { display: flex; flex-direction: column; gap: 3px; color: #31465b; }
+.run-stack small { color: #7d8d9e; font-size: 12px; }
 @media (max-width: 720px) { .page-head { align-items: flex-start; flex-direction: column; } }
 </style>

@@ -1,0 +1,31 @@
+caseId: CR-003
+contractType: SERVICE_PROCUREMENT
+scenario: SERVICE_PROCUREMENT
+difficulty: MISSING_CLAUSE
+noiseLevel: NONE
+title: Missing liability cap
+contractText: |
+  技术咨询服务合同
+  甲方：XX制造有限公司
+  乙方：AA咨询有限公司
+
+  第一条 服务内容
+  乙方为甲方提供智能制造转型咨询服务。
+
+  第二条 合同金额
+  本合同总金额为人民币200万元。
+
+  第三条 责任条款
+  乙方因履行本合同给甲方造成损失的，应承担赔偿责任。
+
+  第四条 保密
+  双方对商业秘密承担保密义务，保密期限为合同终止后3年。
+expectedFindings:
+  - title: 缺少责任上限条款
+    severity: HIGH
+    riskDimension: LIABILITY
+    mustHaveContractCitation: true
+    mustHavePolicyCitation: true
+    keyTerms: [责任上限, 赔偿, 违约金, 间接损失]
+shouldNotFind: []
+expectedCitationCount: 2

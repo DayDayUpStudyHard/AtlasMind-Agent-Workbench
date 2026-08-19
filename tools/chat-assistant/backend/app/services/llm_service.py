@@ -933,19 +933,77 @@ class LLMService:
         graph nodes feed it into the §7.2 per-WorkUnit spend ledger."""
         template, temperature = self._prompt("contract_risk_domain_analysis", run_id)
         payload = {
-            "case": case,
-            "domain": domain,
-            "availableEvidence": evidence[:18],
-            "deterministicRuleFindings": rule_findings[:10],
-            "extractedFacts": (extracted_facts or [])[:40],
+            "case": {
+                key: case.get(key)
+                for key in (
+                    "id", "title", "contractType", "ourSide", "ourEntity",
+                    "counterparty", "amount", "currency", "description",
+                )
+                if case.get(key) is not None
+            },
+            "domain": {
+                key: domain.get(key)
+                for key in (
+                    "domainKey", "domainName", "objective", "requiredClauseTypes",
+                    "queries", "priority",
+                )
+                if domain.get(key) is not None
+            },
+            # Keep citations and the clause text needed for an auditable finding,
+            # but avoid sending retrieval metadata and long duplicate snippets.
+            "availableEvidence": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "sourceType", "sourceId", "clauseType", "clauseNumber",
+                        "title", "page", "snippet", "clauseText", "crossValidated",
+                    )
+                    if item.get(key) is not None
+                }
+                for item in evidence[:18]
+            ],
+            "deterministicRuleFindings": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "ruleKey", "ruleTitle", "title", "clauseType", "severity",
+                        "description", "evidence", "citations",
+                    )
+                    if item.get(key) is not None
+                }
+                for item in rule_findings[:10]
+            ],
+            "extractedFacts": [
+                {
+                    key: item.get(key)
+                    for key in (
+                        "elementKey", "field", "value", "rawValue", "confidence",
+                        "citations",
+                    )
+                    if item.get(key) is not None
+                }
+                for item in (extracted_facts or [])[:40]
+            ],
         }
+        for item in payload["availableEvidence"]:
+            for key in ("snippet", "clauseText"):
+                if item.get(key) is not None:
+                    item[key] = str(item[key])[:1200]
+        for item in payload["deterministicRuleFindings"]:
+            if item.get("description") is not None:
+                item["description"] = str(item["description"])[:600]
         return self._structured_completion(
             template,
             payload,
             temperature=0.0 if temperature is None else min(float(temperature), 0.1),
             timeout_seconds=max(15.0, float(getattr(settings, "project_analysis_timeout_seconds", 45))),
             required_key="findings",
-            max_tokens=max(8192, settings.chat_max_tokens),
+            # A WorkUnit may be analyzed once more after targeted retrieval.
+            # Keep each bounded domain call small enough for the 16384-token
+            # WorkUnit budget, and use one retry for transient provider errors.
+            max_tokens=4096,
+            max_retries=1,
+            allow_unstructured_fallback=False,
             usage_out=usage_out,
         )
 
@@ -1556,13 +1614,16 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                                timeout_seconds: float | None = None,
                                required_key: str | None = None,
                                max_tokens: int = 2400,
+                               max_retries: int = 3,
+                               allow_unstructured_fallback: bool = True,
                                usage_out: dict[str, int] | None = None) -> dict:
         client = self.analysis_client
         if timeout_seconds is not None:
             client = client.with_options(timeout=max(1.0, float(timeout_seconds)))
 
         errors: list[str] = []
-        for structured in (True, False):
+        phases = (True, False) if allow_unstructured_fallback else (True,)
+        for structured in phases:
             kwargs = {
                 "model": self.model,
                 "messages": [
@@ -1586,7 +1647,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                 # wants real API calls, not logical invocations.
                 response = self._call_llm_with_retry(
                     lambda kwargs=kwargs: client.chat.completions.create(**kwargs),
-                    max_retries=3,
+                    max_retries=max(0, int(max_retries)),
                     backoff_base=2.0,
                     usage_out=usage_out,
                 )
@@ -1597,15 +1658,17 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                 raise
             except APIError as exc:
                 errors.append(str(exc)[:240])
-                if not structured:
+                if not structured or not allow_unstructured_fallback:
                     raise
             except ValueError as exc:
                 errors.append(str(exc)[:240])
-                if structured:
+                if structured and allow_unstructured_fallback:
                     logger.warning(
                         "Structured LLM response was not usable; retrying without response_format: %s",
                         exc,
                     )
+                else:
+                    raise
 
         raise ValueError(
             "Structured LLM response was not valid JSON: " + "; ".join(errors[-2:])

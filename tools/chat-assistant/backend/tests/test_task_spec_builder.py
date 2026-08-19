@@ -1288,7 +1288,13 @@ def test_golden_fixture_samples_come_from_real_v1_nodes():
     assert artifact["reportType"] == "CONTRACT_REVIEW_REPORT"
     assert artifact["analysisMode"] == "FULL"
     assert artifact["humanReviewRequired"] is True
-    assert len(artifact["findings"]) == len(_GOLDEN_FINDINGS)
+    # The frozen fixture intentionally keeps contract-only findings in the
+    # candidate area; report composition must not silently discard them.
+    assert len(artifact["findings"]) + len(artifact.get("candidateFindings") or []) == len(_GOLDEN_FINDINGS)
+    assert all(
+        finding.get("publicationStatus") == "CANDIDATE"
+        for finding in artifact.get("candidateFindings") or []
+    )
 
 
 def test_over_budget_domain_via_real_chain_limits_the_run():
@@ -1339,3 +1345,31 @@ def test_within_budget_golden_chain_stays_completed():
         result = asyncio.run(adapter.run(_context(_GOLDEN_RUN_ID)))
     assert result.status == "COMPLETED", result
     assert "limitedDiagnostics" not in result.graph_info
+
+
+def test_standard_clause_missing_source_is_scoped_to_applicable_domain():
+    """A standard clause found for one domain must not become a run-wide
+    missing-source requirement for unrelated domains."""
+    from app.agent_runtime.graph.nodes.artifact import _coverage_missing_details
+
+    state = {
+        "coverage": {
+            "missingDomains": ["insurance", "liability_remedies"],
+            "domains": {
+                "insurance": {
+                    "domainName": "保险",
+                    "requiredClauseTypes": ["INSURANCE"],
+                    "sourceCounts": {"CONTRACT_CLAUSE": 2},
+                },
+                "liability_remedies": {
+                    "domainName": "责任",
+                    "requiredClauseTypes": ["LIABILITY"],
+                    "sourceCounts": {"CONTRACT_CLAUSE": 2},
+                },
+            },
+        }
+    }
+
+    names, sources = _coverage_missing_details(state)
+    assert names == ("保险", "责任")
+    assert sources == ("STANDARD_CLAUSE",)

@@ -200,6 +200,44 @@ class LlmServiceStructuredResponseTest(unittest.TestCase):
         if service._uses_deepseek_reasoning_model():
             self.assertEqual({"thinking": {"type": "disabled"}}, calls[0]["extra_body"])
 
+    def test_contract_risk_domain_uses_bounded_tokens_and_one_retry(self):
+        service = LLMService()
+        captured = {}
+        service._prompt = lambda *args, **kwargs: ("Return findings.", 0.0)
+
+        def fake_completion(*args, **kwargs):
+            captured.update(kwargs)
+            return {"findings": []}
+
+        service._structured_completion = fake_completion
+        result = service.analyze_contract_risk_domain(
+            {"title": "case"},
+            {"domainKey": "payment"},
+            [],
+            [],
+        )
+
+        self.assertEqual([], result["findings"])
+        self.assertEqual(4096, captured["max_tokens"])
+        self.assertEqual(1, captured["max_retries"])
+        self.assertFalse(captured["allow_unstructured_fallback"])
+
+    def test_structured_completion_can_skip_duplicate_unstructured_fallback(self):
+        service = LLMService()
+        calls = {"count": 0}
+
+        def fake_call(fn, *args, **kwargs):
+            calls["count"] += 1
+            return response('{"wrong": []}')
+
+        service._call_llm_with_retry = fake_call
+        with self.assertRaises(ValueError):
+            service._structured_completion(
+                "Return JSON.", {"x": 1}, required_key="findings",
+                allow_unstructured_fallback=False,
+            )
+        self.assertEqual(1, calls["count"])
+
     def test_call_llm_with_retry_meters_attempts_and_cumulative_tokens(self):
         """§7.2: retried API attempts are real calls — the ledger must count
         them and sum tokens across responses, not keep the last one."""

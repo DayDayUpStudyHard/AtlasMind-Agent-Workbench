@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+
 from ...harness.budget import (
     audit_work_unit_budgets,
     coverage_limited_diagnostics,
@@ -13,6 +14,26 @@ from ...harness.budget import (
 from ..versioning import stamp_artifact_versions
 
 logger = logging.getLogger(__name__)
+
+
+# Standard clauses are only an applicable evidence channel for domains whose
+# required clause types have an active standard-clause counterpart.  The
+# coverage diagnostics must stay domain-scoped; using a run-wide union makes
+# every unrelated domain appear to be missing STANDARD_CLAUSE.
+_STANDARD_CLAUSE_TYPES = {
+    "LIABILITY",
+    "PAYMENT",
+    "ACCEPTANCE",
+    "CONFIDENTIALITY",
+}
+
+
+def _expected_source_types(task_or_info: dict[str, Any]) -> set[str]:
+    clause_types = {
+        str(value).upper()
+        for value in task_or_info.get("requiredClauseTypes") or []
+    }
+    return {"STANDARD_CLAUSE"} if clause_types & _STANDARD_CLAUSE_TYPES else set()
 
 
 def _risk_groups(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -58,15 +79,45 @@ def _risk_summary(findings: list[dict[str, Any]], coverage: dict[str, Any]) -> d
     }
 
 
+def _has_dual_citation(finding: dict[str, Any]) -> bool:
+    return bool(
+        (finding.get("contractCitation") or finding.get("contractCitationIds"))
+        and (finding.get("policyCitation") or finding.get("policyCitationIds"))
+    )
+
+
+def _split_publishable_findings(
+    findings: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Separate final-report findings from evidence-incomplete candidates."""
+    publishable: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    for finding in findings:
+        if _has_dual_citation(finding):
+            publishable.append(finding)
+            continue
+        candidate = dict(finding)
+        candidate["publicationStatus"] = "CANDIDATE"
+        reasons: list[str] = []
+        if not (finding.get("contractCitation") or finding.get("contractCitationIds")):
+            reasons.append("MISSING_CONTRACT_CITATION")
+        if not (finding.get("policyCitation") or finding.get("policyCitationIds")):
+            reasons.append("MISSING_POLICY_CITATION")
+        candidate["candidateReason"] = reasons
+        candidates.append(candidate)
+    return publishable, candidates
+
+
 def compose_report(state: dict[str, Any]) -> dict[str, Any]:
     """Compose the final contract review report from validated findings."""
     validated = state.get("validated_findings") or []
+    publishable, candidates = _split_publishable_findings(validated)
     case_snapshot = state.get("case_snapshot") or {}
     coverage = state.get("coverage") or {}
     scoring = state.get("scoring") or {}
     analysis_workflow = state.get("analysis_workflow") or {}
-    risk_summary = _risk_summary(validated, coverage)
-    risk_groups = _risk_groups(validated)
+    risk_summary = _risk_summary(publishable, coverage)
+    risk_groups = _risk_groups(publishable)
     inferred_status = (
         "HIGH_RISK" if risk_summary["high"] else
         "MEDIUM_RISK" if risk_summary["medium"] else "LOW_RISK"
@@ -78,14 +129,15 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
         "title": f"合同审查报告 — {case_snapshot.get('title') or case_snapshot.get('caseKey', '')}",
         "summary": (
             f"完成 {risk_summary['reviewedDomainCount']} 个风险领域审查，"
-            f"识别 {len(validated)} 项需关注事项，其中高风险 {risk_summary['high']} 项、"
+            f"识别 {len(publishable)} 项可发布风险，其中高风险 {risk_summary['high']} 项、"
             f"中风险 {risk_summary['medium']} 项。"
+            + (f"另有 {len(candidates)} 项待补证据候选。" if candidates else "")
         ),
         "riskStatus": scoring.get("riskStatus") or inferred_status,
         "riskScore": scoring.get("riskScore") or 0,
         "analysisMode": "FULL",
-        "findings": validated,
-        "risks": validated,
+        "findings": publishable,
+        "risks": publishable,
         "riskSummary": risk_summary,
         "riskGroups": risk_groups,
         "analysisWorkflow": analysis_workflow,
@@ -97,7 +149,7 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
             {
                 "type": "REQUEST_LEGAL_REVIEW",
                 "title": "法务复核审查发现",
-                "description": f"共 {len(validated)} 条审查发现需要法务逐项复核确认",
+                "description": f"共 {len(publishable)} 条可发布审查发现需要法务逐项复核确认",
                 "priority": "HIGH",
             }
         ],
@@ -108,13 +160,16 @@ def compose_report(state: dict[str, Any]) -> dict[str, Any]:
             "scoring": scoring,
             "riskSummary": risk_summary,
             "riskGroups": risk_groups,
-            "findings": validated,
+            "findings": publishable,
             "analysisWorkflow": analysis_workflow,
             "documentQuality": state.get("document_quality") or {},
             "evidenceValidation": state.get("evidence_validation") or {},
             "retrievalValidation": state.get("retrieval_validation") or {},
         },
     }
+    if candidates:
+        artifact["candidateFindings"] = candidates
+        artifact["content"]["candidateFindings"] = candidates
 
     stamp_artifact_versions(state, artifact)
 
@@ -134,17 +189,14 @@ def _coverage_missing_details(
     coverage = state.get("coverage") or {}
     missing_domains = coverage.get("missingDomains") or []
     domains = coverage.get("domains") or {}
-    expected_types = {
-        str(source_type)
-        for info in domains.values()
-        for source_type in (info.get("sourceCounts") or {})
-    }
     missing_names: list[str] = []
     missing_sources: set[str] = set()
     for key in missing_domains:
         info = domains.get(key) or {}
         missing_names.append(str(info.get("domainName") or key))
-        missing_sources.update(expected_types - set(info.get("sourceCounts") or {}))
+        missing_sources.update(
+            _expected_source_types(info) - set(info.get("sourceCounts") or {})
+        )
     schema_errors = (state.get("schema_validation") or {}).get("errors") or []
     if schema_errors:
         # The repair path also lands here with a failed schema — surface
@@ -159,6 +211,7 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
     """Compose a scope-limited report when coverage is incomplete (or the
     §7.2 budget audit flagged the run mid-compose)."""
     validated = state.get("validated_findings") or []
+    publishable, candidates = _split_publishable_findings(validated)
     case_snapshot = state.get("case_snapshot") or {}
     analysis_workflow = state.get("analysis_workflow") or {}
     # A prior limited_diagnostics carrying BUDGET reasons means the schema
@@ -175,7 +228,8 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
             if budget_limited else
             "本次审查因证据不足未能覆盖全部风险维度。"
         )
-        + f"已验证发现 {len(validated)} 条。"
+        + f"已验证发现 {len(publishable)} 条。"
+        + (f"另有 {len(candidates)} 条待补证据候选。" if candidates else "")
         + ("建议补充预算或精简审查范围后重新发起审查。"
            if budget_limited else "建议补充缺失材料后重新发起完整审查。"),
         "riskStatus": "HIGH_RISK",
@@ -186,10 +240,10 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
             if budget_limited else
             "质量门禁未通过：部分风险维度缺少充分证据"
         ),
-        "findings": validated,
-        "risks": validated,
-        "riskSummary": _risk_summary(validated, state.get("coverage") or {}),
-        "riskGroups": _risk_groups(validated),
+        "findings": publishable,
+        "risks": publishable,
+        "riskSummary": _risk_summary(publishable, state.get("coverage") or {}),
+        "riskGroups": _risk_groups(publishable),
         "analysisWorkflow": analysis_workflow,
         "documentQuality": state.get("document_quality") or {},
         "evidenceValidation": state.get("evidence_validation") or {},
@@ -212,8 +266,12 @@ def compose_limited_report(state: dict[str, Any]) -> dict[str, Any]:
             "documentQuality": state.get("document_quality") or {},
             "evidenceValidation": state.get("evidence_validation") or {},
             "retrievalValidation": state.get("retrieval_validation") or {},
+            "findings": publishable,
         },
     }
+    if candidates:
+        artifact["candidateFindings"] = candidates
+        artifact["content"]["candidateFindings"] = candidates
 
     stamp_artifact_versions(state, artifact)
 
@@ -268,18 +326,13 @@ def validate_schema(state: dict[str, Any]) -> dict[str, Any]:
     usage = state.get("work_unit_usage") or {}
     domain_tasks = state.get("domain_tasks") or []
     coverage_domains = (state.get("coverage") or {}).get("domains") or {}
-    expected_types = {
-        str(source_type)
-        for info in coverage_domains.values()
-        for source_type in (info.get("sourceCounts") or {})
-    }
     check_items: dict[str, tuple[str, ...]] = {}
     missing_sources: dict[str, tuple[str, ...]] = {}
     for task in domain_tasks:
         key = str(task.get("domainKey") or task.get("domain") or "")
         check_items[key] = tuple(str(value) for value in task.get("requiredClauseTypes") or [])
         present = set((coverage_domains.get(key) or {}).get("sourceCounts") or {})
-        missing_sources[key] = tuple(sorted(expected_types - present))
+        missing_sources[key] = tuple(sorted(_expected_source_types(task) - present))
     over_units = audit_work_unit_budgets(
         usage, missing_check_items=check_items, missing_source_types=missing_sources,
     )

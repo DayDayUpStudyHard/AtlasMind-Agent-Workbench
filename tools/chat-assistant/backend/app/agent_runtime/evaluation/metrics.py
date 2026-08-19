@@ -3,7 +3,88 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Mapping
+
+
+RELEASE_GATE_VERSION = "release-gate-v1"
+DEFAULT_RELEASE_THRESHOLDS = {
+    "highRiskRecallMin": 0.90,
+    "dualCitationRateMin": 0.95,
+    "falsePositiveRateMax": 0.03,
+    "limitedReportRateMax": 0.0,
+}
+
+
+def build_release_gate(
+    summary: Mapping[str, Any],
+    *,
+    status: str | None = None,
+    thresholds: Mapping[str, float] | None = None,
+) -> dict[str, Any]:
+    """Return a stable, versioned release decision for a completed run.
+
+    Quality failures and operational blockers are kept separate so callers can
+    distinguish a model-quality regression from an invalid/incomplete run.
+    """
+    limits = dict(DEFAULT_RELEASE_THRESHOLDS)
+    if thresholds:
+        limits.update({key: float(value) for key, value in thresholds.items()})
+
+    env = summary.get("environment")
+    env_status = str(env.get("environmentStatus") or "").upper() if isinstance(env, Mapping) else ""
+    normalized_status = str(status or summary.get("status") or "").upper()
+    result_valid = bool(summary.get("resultValid"))
+    blocking_reasons: list[str] = []
+    if normalized_status == "ENVIRONMENT_UNAVAILABLE" or env_status == "UNAVAILABLE":
+        blocking_reasons.append("ENVIRONMENT_UNAVAILABLE")
+    if not result_valid:
+        blocking_reasons.append("RESULT_INVALID")
+    if not summary.get("metricCaseCount", summary.get("caseCount", 0)):
+        blocking_reasons.append("NO_SCORED_CASES")
+
+    values = {
+        "highRiskRecall": float(summary.get("highRiskRecall") or 0),
+        "dualCitationRate": float(summary.get("dualCitationRate") or 0),
+        "falsePositiveRate": float(summary.get("falsePositiveRate") or 0),
+        "limitedReportRate": float(summary.get("limitedReportRate") or 0),
+    }
+    failures: list[dict[str, Any]] = []
+
+    def lower_bound(metric: str, threshold_key: str) -> None:
+        if values[metric] < limits[threshold_key]:
+            failures.append({
+                "metric": metric,
+                "actual": values[metric],
+                "operator": ">=",
+                "threshold": limits[threshold_key],
+                "message": f"{metric} {values[metric]:.4f} < {limits[threshold_key]:.4f}",
+            })
+
+    def upper_bound(metric: str, threshold_key: str) -> None:
+        if values[metric] > limits[threshold_key]:
+            failures.append({
+                "metric": metric,
+                "actual": values[metric],
+                "operator": "<=",
+                "threshold": limits[threshold_key],
+                "message": f"{metric} {values[metric]:.4f} > {limits[threshold_key]:.4f}",
+            })
+
+    lower_bound("highRiskRecall", "highRiskRecallMin")
+    lower_bound("dualCitationRate", "dualCitationRateMin")
+    upper_bound("falsePositiveRate", "falsePositiveRateMax")
+    upper_bound("limitedReportRate", "limitedReportRateMax")
+
+    passed = not blocking_reasons and not failures
+    return {
+        "passed": passed,
+        "status": "PASSED" if passed else ("BLOCKED" if blocking_reasons else "FAILED"),
+        "thresholdVersion": RELEASE_GATE_VERSION,
+        "thresholds": limits,
+        "failures": failures,
+        "blockingReasons": blocking_reasons,
+        "evaluated": not blocking_reasons,
+    }
 
 
 @dataclass
@@ -80,6 +161,13 @@ class EvaluationMetrics:
         metrics.limited_report_rate = round(
             limited_count / max(len(successful), 1), 3
         )
+        schema_values = [
+            m.get("schemaValidRate", 1.0 if m.get("schemaValid", True) else 0.0)
+            for r in successful
+            for m in [r.metrics or {}]
+        ]
+        if schema_values:
+            metrics.schema_valid_rate = round(sum(schema_values) / len(schema_values), 3)
 
         return metrics
 
@@ -92,7 +180,16 @@ class EvaluationMetrics:
             "dualCitationRate": self.dual_citation_rate,
             "falsePositiveRate": self.false_positive_rate,
             "limitedReportRate": self.limited_report_rate,
+            "schemaValidRate": self.schema_valid_rate,
             "perCase": self.per_case,
+            "releaseGate": build_release_gate({
+                "highRiskRecall": self.high_risk_recall,
+                "dualCitationRate": self.dual_citation_rate,
+                "falsePositiveRate": self.false_positive_rate,
+                "limitedReportRate": self.limited_report_rate,
+                "metricCaseCount": self.successful_cases,
+                "resultValid": self.failed_cases == 0 and self.successful_cases > 0,
+            }),
         }
 
     def meets_thresholds(

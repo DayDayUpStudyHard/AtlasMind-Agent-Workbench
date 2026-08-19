@@ -6,6 +6,7 @@ DeepSeek 不提供 embedding API，因此语义搜索需要单独配置 Embeddin
 未配置时自动降级为 ES multi_match 文本搜索。
 """
 import logging
+import time
 from openai import OpenAI, APIError
 from app.config import settings
 
@@ -34,10 +35,12 @@ class EmbeddingService:
             )
             self.model = settings.embedding_model
             self.dim = settings.embedding_dim
+            self.max_attempts = 2
         else:
             self.client = None
             self.model = ""
             self.dim = 0
+            self.max_attempts = 0
 
     @property
     def configured(self) -> bool:
@@ -60,22 +63,24 @@ class EmbeddingService:
         """
         if not self._configured:
             return None
-        try:
-            response = self.client.embeddings.create(
-                model=self.model,
-                input=text[:8192],  # ada-002 max token limit ~8191 tokens ≈ 32K chars
-            )
-            vector = response.data[0].embedding
-            self._validate_dimension(vector)
-            return vector
-        except EmbeddingDimensionError:
-            raise
-        except APIError as e:
-            logger.warning("Embedding API error: %s", e)
-            return None
-        except Exception as e:
-            logger.warning("Embedding request failed: %s", e)
-            return None
+        for attempt in range(self.max_attempts):
+            try:
+                response = self.client.embeddings.create(
+                    model=self.model,
+                    input=text[:8192],  # ada-002 max token limit ~8191 tokens ≈ 32K chars
+                )
+                vector = response.data[0].embedding
+                self._validate_dimension(vector)
+                return vector
+            except EmbeddingDimensionError:
+                raise
+            except Exception as exc:
+                if attempt + 1 < self.max_attempts:
+                    logger.info("Embedding request retry %d/%d after %s", attempt + 1, self.max_attempts - 1, type(exc).__name__)
+                    time.sleep(0.25 * (attempt + 1))
+                else:
+                    logger.warning("Embedding request failed after %d attempts: %s", self.max_attempts, exc)
+        return None
 
     def embed_batch(self, texts: list[str]) -> list[list[float]]:
         """批量生成 embedding 向量。

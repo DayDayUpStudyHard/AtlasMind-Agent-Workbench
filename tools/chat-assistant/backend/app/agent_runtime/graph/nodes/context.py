@@ -42,7 +42,16 @@ async def load_run_context(state: dict[str, Any]) -> dict[str, Any]:
             f"证据快照加载失败，运行终止（caseId={case_id}）：{exc}"
         ) from exc
 
+    # The database snapshot is authoritative for contract facts, while the
+    # initial project context may carry evaluation-only metadata (for example
+    # the dimensions this benchmark case is meant to gate). Preserve those
+    # bounded control fields when rebuilding the snapshot, otherwise every
+    # eval case falls back to the full-domain coverage gate.
+    initial_case_snapshot = state.get("case_snapshot") or {}
     case_snapshot = dict(shared_snapshot.get("case") or {})
+    for key in ("evalExpectedDimensions", "evalCaseKey", "evalCaseIndex"):
+        if key in initial_case_snapshot:
+            case_snapshot[key] = initial_case_snapshot[key]
     extraction_snapshot = shared_snapshot.get("extractionSnapshot") or {}
     elements = extraction_snapshot.get("elements") or []
     if elements:

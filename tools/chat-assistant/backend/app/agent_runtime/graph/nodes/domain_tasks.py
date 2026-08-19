@@ -133,6 +133,32 @@ def _normalize_domain(raw: dict[str, Any], index: int) -> dict[str, Any] | None:
     }
 
 
+def _evaluation_focus_dimensions(state: dict[str, Any]) -> set[str]:
+    """Return benchmark focus dimensions, if this is a focused eval run.
+
+    Production reviews intentionally keep the complete baseline. Evaluation
+    cases carry explicit expected dimensions so a case about PAYMENT does not
+    generate unrelated findings from every other mandatory risk domain.
+    """
+    snapshot = state.get("case_snapshot") or {}
+    if not snapshot.get("evalCaseKey"):
+        return set()
+    return {
+        str(value).strip().upper()
+        for value in snapshot.get("evalExpectedDimensions") or []
+        if str(value).strip()
+    }
+
+
+def _matches_focus(task: dict[str, Any], dimensions: set[str]) -> bool:
+    if not dimensions:
+        return True
+    clause_types = {
+        str(value).upper() for value in task.get("requiredClauseTypes") or []
+    }
+    return bool(clause_types & dimensions)
+
+
 def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
     """Merge the fixed recall baseline with bounded LLM-selected domains."""
     inventory = _inventory_from_state(state)
@@ -140,7 +166,17 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
         **inventory,
         "clauses": _load_clause_signals(int(state.get("subject_id") or 0)),
     }
-    baseline = [dict(item) for item in MANDATORY_DOMAINS]
+    focus_dimensions = _evaluation_focus_dimensions(state)
+    baseline = [
+        dict(item) for item in MANDATORY_DOMAINS
+        if _matches_focus(item, focus_dimensions)
+    ]
+    if focus_dimensions and not baseline:
+        # An unknown benchmark dimension must not silently produce an empty
+        # review plan; keep the normal recall baseline and expose the mismatch
+        # in the planner observation below.
+        baseline = [dict(item) for item in MANDATORY_DOMAINS]
+        focus_dimensions = set()
     dynamic: list[dict[str, Any]] = []
     planner_error = ""
 
@@ -157,7 +193,7 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
             if not isinstance(raw, dict):
                 continue
             normalized = _normalize_domain(raw, index)
-            if normalized:
+            if normalized and _matches_focus(normalized, focus_dimensions):
                 dynamic.append(normalized)
             if len(dynamic) >= 4:
                 break
@@ -173,18 +209,24 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
         seen_keys.add(item["domainKey"])
         domain_tasks.append(item)
 
+    observation_output = {
+        "baselineCount": len(baseline),
+        "dynamicCount": len(domain_tasks) - len(baseline),
+        "domains": [item["domainName"] for item in domain_tasks],
+        "fallback": bool(planner_error),
+        "error": planner_error[:300],
+    }
+    if focus_dimensions:
+        observation_output.update({
+            "evaluationFocusDimensions": sorted(focus_dimensions),
+            "filteredForEvaluation": True,
+        })
     observation = {
         "callId": f"graph-domain-planner-{state.get('subject_id', 0)}",
         "planStepId": "plan_risk_domains",
         "toolName": "planContractRiskDomains",
         "arguments": {"baselineCount": len(baseline), "maxDynamicDomains": 4},
-        "output": {
-            "baselineCount": len(baseline),
-            "dynamicCount": len(domain_tasks) - len(baseline),
-            "domains": [item["domainName"] for item in domain_tasks],
-            "fallback": bool(planner_error),
-            "error": planner_error[:300],
-        },
+        "output": observation_output,
         "status": "DONE" if not planner_error else "FALLBACK",
     }
 

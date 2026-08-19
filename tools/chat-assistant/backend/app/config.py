@@ -8,7 +8,10 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=True)
+# Deployment and one-off benchmark commands must be able to override local
+# defaults (for example, a Docker-mapped Elasticsearch port). The local .env
+# only supplies values that are otherwise absent from the process environment.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env", override=False)
 
 
 def _bool_env(name: str, default: str = "false") -> bool:

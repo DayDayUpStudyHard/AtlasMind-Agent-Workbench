@@ -86,7 +86,7 @@ tools/chat-assistant/backend/     Python 文档处理、Agent Runtime、图、�
 agent-front/                      用户合同工作台
 agent-admin/                      管理端：规则、知识库、运行可观测性、评测中心
 tools/chat-assistant/backend/
-  migrations/                     MySQL 增量迁移（当前 V001-V036）
+  migrations/                     MySQL 增量迁移（当前 V001-V039）
 docs/                             PRD、设计记录、调研与评测报告
 ```
 
@@ -218,6 +218,14 @@ cd agent-admin && npm run build
 - OCR 低质量、日期基准缺失、乱码或不完整引用的内容会被标记为待复核，不作为自动履约依据。
 - 评测结果用于衡量特定数据集与版本组合，不代表所有合同类型的通用准确率。
 
+## 当前评测基线
+
+`contract-review-v1` 数据集已使用 LangGraph v1 和 Elasticsearch 强制检索完成真实重复评测。Run #71、#72、#73 连续三次均通过发布门禁：风险召回 `100%`、双引用率 `100%`、误报率 `0%`、Schema 有效率 `100%`、`LIMITED=0/3`，且没有基础设施失败。
+
+当前生产基线为 **Run #73**。只有状态为 `COMPLETED` 且 `releaseGate.status=PASSED` 的评测运行才能被设置为生产基线；切换基线不会删除历史运行，便于回溯和版本对比。
+
+风险发现分为两层：正式 `findings` 必须同时具备合同引用和政策/标准引用；证据不完整的发现会保留在 `candidateFindings` 候选区，等待补证后再发布，不会被静默删除。
+
 ## 相关文档
 
 - [合同作业系统六层架构](docs/contract-operations-six-layer-architecture-2026-08-08.md)
@@ -225,4 +233,8 @@ cd agent-admin && npm run build
 - [高召回证据 DAG PRD](docs/prd-evidence-agent-harness-high-recall-dag-2026-08-14.md)
 - [履约核验 Agent 设计](docs/fulfillment-verification-agent-design-2026-08-04.md)
 - [Phase 3 v2 试点评测报告](docs/phase3-v2-pilot-report-2026-08-14.md)
+- [可复现 Benchmark P0](docs/benchmark-p0.md)
+- [可复现 Benchmark P1](docs/benchmark-p1.md)
+- [可复现 Benchmark P2](docs/benchmark-p2.md)
+- [真实 Benchmark 基线（2026-08-19）](docs/benchmark-real-baseline-2026-08-19.md)
 - [调试与修复记录](Debug修复记录.md)

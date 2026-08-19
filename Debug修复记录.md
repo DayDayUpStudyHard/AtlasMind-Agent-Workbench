@@ -35,6 +35,44 @@ Legacy Runtime 现保留 `LIMITED` 状态并生成覆盖诊断；二次 Reflecti
 - `tools/chat-assistant/backend/app/agent_runtime/runtime.py`
 - `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java`
 
+## 2026-08-19：LangGraph 合同审查预算超限与评测诊断修复
+
+### 问题
+
+真实 Benchmark 的 LangGraph 合同审查三条用例均被标记为 `LIMITED`。诊断同时出现 `COVERAGE`、`BUDGET` 和 `maxTokens`，评测中心无法区分真实证据缺口与预算超限；部分领域还被错误报告缺少 `STANDARD_CLAUSE`。此外，单次领域分析的响应耗时较高，定向补检索后会重复消耗模型预算。
+
+### 根因与修复
+
+标准条款确实已经检索成功，但覆盖诊断把所有领域实际出现过的来源类型做成运行级并集，再要求每个领域都具备这些来源，因此不适用标准条款的领域也被错误标记为缺少 `STANDARD_CLAUSE`。现改为按领域的 `requiredClauseTypes` 判断标准条款是否适用，仅对 LIABILITY、PAYMENT、ACCEPTANCE、CONFIDENTIALITY 等有标准条款基线的领域生成缺失来源诊断。
+
+预算超限不是 Token 统计错误。合同风险域分析原来强制 `max_tokens >= 8192`，而一个 WorkUnit 的总预算为 `16384`；覆盖不足时还会执行 targeted retrieval 并重新分析，同一 WorkUnit 可能叠加初次分析、结构化响应失败后的 fallback、API 重试和补检索后的再次分析，真实累计消耗很容易超过总预算。
+
+现将合同风险域分析单次上限收敛为 `4096` tokens，并将该链路的 API 重试上限设为 1 次；底层 `_structured_completion` 增加可选 `max_retries` 参数，其他任务保持原有默认行为。WorkUnit 总预算和质量门禁暂不放宽，预算消耗继续按真实 LLM usage 累计，避免通过隐藏 `LIMITED` 或无限提高预算掩盖成本和延迟问题。
+
+### 验证结果
+
+- 新增标准条款按领域作用域的回归测试；风险域分析参数回归确认 `max_tokens=4096`、`max_retries=1`。
+- LLM、合同风险图、Runtime 生命周期和真实 Golden 链路专项测试：`76 passed`。
+- Python 全量测试：`415 passed`；目标模块 `py_compile` 通过；`git diff --check` 无代码空白错误。
+- 修复前真实 LangGraph Run `#61` 已完成：环境 READY，Recall `66.67%`，双引用率 `39.68%`，P95 `348s`，三条用例均 `LIMITED`。修复前的全局 `STANDARD_CLAUSE` 误报已消失，剩余限制主要是原预算策略下的真实 `maxTokens` 超限。
+- 后续需使用相同数据集、相同配置重新执行 LangGraph Benchmark，确认 4096 token 上限和单次重试能否降低 `LIMITED` 比例与 P95；不得将 Run `#61` 当作新的完整质量基线。
+
+### 预算修复后的真实回归补充（run #63）
+
+- 风险域 Prompt 已压缩为必要案件字段、引用字段和截断后的证据文本；4096 token 下结构化 JSON 失败不再重复发起完整 unstructured fallback，直接回退确定性规则。
+- Python 全量测试增至 `417 passed`。
+- Run `#63` 环境探针为 READY，三条用例均未再出现 `BUDGET` / `maxTokens`，P95 从 run #61 的 `348s` 降至 `347s`，双引用率提升至 `48.53%`。
+- 本轮 DeepSeek API 中途返回 `402 Insufficient Balance` 并触发 Circuit Breaker，部分领域因此使用规则 fallback；Recall 为 `66.67%`，所以 run #63 只能证明预算与耗时修复生效，不能作为完整语义质量基线。
+- 重新做干净质量评测前，需要恢复 LLM 余额或切换到已授权、配置一致的模型服务；不在评测数据或质量门禁上做降级处理。
+
+### 影响范围
+
+- `tools/chat-assistant/backend/app/services/llm_service.py`
+- `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/artifact.py`
+- `tools/chat-assistant/backend/tests/test_llm_service.py`
+- `tools/chat-assistant/backend/tests/test_task_spec_builder.py`
+- `docs/benchmark-real-baseline-2026-08-19.md`
+
 ---
 
 ## 2026-08-18：合同分析自动启动无响应与手动启动 500 修复
@@ -4427,3 +4465,181 @@ LLM 处理数据量和输出量与天数正相关，长计划 prompt 巨大、�
 - **uvicorn reload 端口冲突**：`reload=True` 产生 4 个子进程争抢 8001 端口。改为 `reload=False`。
 
 ---
+
+## 2026-08-20：P3 评测发布门禁与评测中心可用化
+
+### 问题
+
+真实评测已经能够在冻结数据集和可用环境下完成，但汇总结果只有 Recall、双引用率、误报率等原始指标，没有稳定记录“是否满足发布质量要求”、阈值版本和具体阻断原因。管理端评测中心也只能展开 `summaryJson`，无法在评测记录列表快速区分质量未达标、环境阻断和可发布结果。
+
+### 根因与修复
+
+1. **新增版本化发布门禁函数**
+   - 在 `app/agent_runtime/evaluation/metrics.py` 新增 `build_release_gate()`。
+   - 当前门禁版本：`release-gate-v1`。
+   - 默认阈值保持严格：风险召回 `>= 0.90`、双引用率 `>= 0.95`、误报率 `<= 0.03`、`LIMITED` 报告率 `= 0`。
+   - 结果拆分为 `PASSED`、`FAILED`、`BLOCKED`；质量指标失败写入 `failures`，环境不可用、结果无效、无可评分用例写入 `blockingReasons`。
+
+2. **接入两条评测执行路径**
+   - Legacy 和 LangGraph 评测汇总统一写入 `summaryJson.releaseGate`。
+   - CLI 读取历史 Run 时，如果旧记录没有门禁对象，会按当前门禁版本补算，保证历史数据输出结构稳定。
+
+3. **管理端评测中心优化**
+   - `EvalCenter.vue` 的评测记录增加“发布门禁”列，展示“可发布 / 质量未达标 / 运行阻断”。
+   - 详情页直接展示门禁状态和失败原因，保留原始 `summaryJson` 供审计。
+   - 兼容 `summaryJson` 已解析对象和 JSON 字符串两种返回形式。
+
+4. **测试覆盖**
+   - 增加质量失败、运行阻断、完整通过三类门禁单测。
+   - `EvaluationMetrics.to_dict()` 输出 `schemaValidRate` 和 `releaseGate`。
+
+### 验证结果
+
+- Python 专项测试：`55 passed`。
+- Python 全量测试：`420 passed, 1 warning`。
+- `python -m py_compile app/agent_runtime/evaluation/metrics.py app/agent_runtime/evaluation/cli.py app/api/routes.py` 通过。
+- 管理端 `npm run build` 通过，Vite 仅保留既有 chunk size warning。
+- `git diff --check` 通过；仅有既有 LF/CRLF 换行提示。
+- Run #65 仍作为当前真实运行完整性基线：`COMPLETED`、`LIMITED=0/3`，但 Recall `66.67%`、双引用率 `47.14%`，门禁应判定为 `FAILED`，不能发布。
+- P3 真实复测 Run #66 使用相同冻结数据集和配置：`COMPLETED`、`LIMITED=0/3`、环境 `READY`、Recall `100%`、双引用率 `56.67%`、误报率 `0%`、Schema `100%`、P95 `187s`。
+- Run #66 的 `summary.releaseGate` 已稳定写入：`status=FAILED`、`thresholdVersion=release-gate-v1`，唯一失败项为 `dualCitationRate 0.5667 < 0.9500`，没有环境阻断原因；因此仍不可发布。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/metrics.py` | 修改 | 新增版本化发布门禁及指标汇总字段 |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/cli.py` | 修改 | 历史 Run 读取时补算门禁 |
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | Legacy/LangGraph 汇总写入 `releaseGate` |
+| `tools/chat-assistant/backend/tests/test_evaluation.py` | 修改 | 新增门禁行为测试 |
+| `agent-admin/src/views/EvalCenter.vue` | 修改 | 列表和详情展示发布门禁及原因 |
+
+---
+
+## 2026-08-20：P4 评测领域收窄、语义召回与引用诊断
+
+### 问题
+
+P3 真实 Run #66 已达到 Recall `100%`，但双引用率只有 `56.67%`。原因不是环境或余额，而是每个评测用例默认跑完整 6 个风险域，并生成大量与该用例目标无关的 findings；其中部分 findings 只有合同引用或只有政策引用，导致双引用率门禁失败。首轮 P4 还发现评测身份字段未完整传入图状态，领域收窄没有实际生效。
+
+### 根因与修复
+
+1. **评测运行按目标风险维度收窄领域**
+   - `create_domain_tasks()` 读取 `evalExpectedDimensions`，只保留与当前用例目标维度相交的风险域。
+   - 只对带 `evalCaseKey` 的评测运行生效，生产合同审查仍保留完整强制风险域基线。
+   - 未知评测维度回退完整基线，避免静默生成空审查计划。
+   - 评测 dispatch 补齐 `evalCaseKey`、`evalCaseIndex` 到图初始 `case_snapshot`，确保收窄路径真正命中。
+
+2. **修复评测语义召回误判**
+   - `_risk_finding_matches()` 在同风险维度下使用数据集声明的 `keyTerms` 做语义匹配。
+   - “预付款缺少保障条件”可以匹配运行时更具体的“预付款比例过高”，前提是实际解释中出现预付款/保障等关键术语。
+   - 不放宽维度边界，仍保留跨维度误匹配防护。
+
+3. **增加引用完整性诊断**
+   - 评测汇总新增 `findingCount`、`dualCitationCount`、`contractCitationMissingCount`、`policyCitationMissingCount`、`uncitedFindingCount`。
+   - 这些诊断与原始双引用率并列，不改变门禁阈值，也不把缺证据 findings 伪装成通过。
+
+### 验证结果
+
+- 受影响专项测试：`121 passed`；随后加入语义匹配测试后专项：`91 passed`。
+- Python 全量测试：`422 passed, 1 warning`。
+- 管理端 `npm run build` 通过；`git diff --check` 通过，仅有既有 LF/CRLF 提示。
+- Run #67：因评测身份字段尚未补齐，过滤未生效；Recall `66.67%`，不作为 P4 基线。
+- Run #68：过滤生效，findings 降至 `4/5/7`，P95 降至 `62s`，双引用率 `60.71%`，但 CR-001 旧评分匹配器漏掉“预付款比例过高”语义，故不作为最终质量结论。
+- Run #69：使用修复后的身份传递和 keyTerms 语义匹配，状态 `COMPLETED`、`LIMITED=0/3`、环境 `READY`、Recall `100%`、双引用率 `60.71%`、误报率 `0%`、Schema `100%`、P95 `72s`。
+- Run #69 执行期间出现 1 次 Embedding timeout，重试后继续完成；未产生 `INFRA_FAILED`，但后续干净质量复测仍应关注 Embedding 服务稳定性。
+- Run #69 的引用诊断：总 findings `16`，双引用 `10`，缺合同引用 `3`，缺政策引用 `3`，完全无引用 `0`；发布门禁仍为 `FAILED`，唯一门禁失败为双引用率 `0.6071 < 0.95`。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/domain_tasks.py` | 修改 | 评测专属风险域收窄及审计 observation |
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | 传递评测身份、keyTerms 召回匹配、引用诊断汇总 |
+| `tools/chat-assistant/backend/tests/test_contract_risk_graph.py` | 修改 | 评测领域收窄和生产路径隔离测试 |
+| `tools/chat-assistant/backend/tests/test_evaluation.py` | 修改 | keyTerms 语义匹配测试 |
+| `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-focused-v3.json` | 新增 | Run #69 真实评测结果 |
+
+---
+
+## 2026-08-20：P4 候选发现隔离与 Golden 回归修复
+
+### 问题
+
+Run #69 仍有 6 条证据不完整的 findings 混入最终风险报告，双引用率只有 `60.71%`。直接在验证节点删除这些 findings 会让覆盖率矩阵误判为“没有发现”，触发不必要的 `targeted_retrieval`，并破坏 Golden 固定行为。
+
+### 根因与修复
+
+1. **候选隔离下沉到报告组合层**
+   - `validate_claims()` 继续保留所有通过业务校验的 findings，保证覆盖率、重试路由和预算审计使用完整事实集。
+   - `compose_report()`、`compose_limited_report()` 使用双引用判断：同时具备合同引用和政策/标准引用的 findings 进入 `findings`；缺任一引用的 findings 进入 `candidateFindings`。
+   - 候选条目保留原始内容，并追加 `publicationStatus=CANDIDATE`、`candidateReason`，不会静默丢失证据不完整风险。
+
+2. **修复 Golden 固定样本回归**
+   - 移除验证节点提前过滤后，Golden coverage 恢复 `CONFIRMED`，不再误进入 `targeted_retrieval`。
+   - 重新生成 `contract_review_v1_golden_artifact.json`，并更新样本断言为“可发布 findings + 候选 findings 总数保持完整”。
+
+### 验证结果
+
+- 候选隔离专项及 Golden 回归：`98 passed`。
+- Python 全量测试：`424 passed, 1 warning`。
+- `python -m py_compile app/agent_runtime/graph/nodes/artifact.py app/agent_runtime/graph/nodes/validation.py app/agent_runtime/graph/state.py` 通过。
+- 管理端 `npm run build` 通过，Vite 仅保留既有 chunk size warning。
+- `git diff --check` 通过；仅有既有 LF/CRLF 换行提示。
+- Run #70 使用同一冻结数据集和强制 Elasticsearch 配置完成真实复测：`COMPLETED`、`LIMITED=0/3`、环境 `READY`、Recall `100%`、双引用率 `100%`、误报率 `0%`、Schema `100%`、P95 `60s`。
+- Run #70 共生成 `10` 条 findings，`10` 条具备双引用，合同/政策引用缺失均为 `0`；3/3 用例通过，`releaseGate.status=PASSED`，满足当前发布门禁。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/artifact.py` | 修改 | 最终报告与范围受限报告增加候选发现隔离 |
+| `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/validation.py` | 修改 | 保留完整 validated findings，避免改变覆盖率和路由 |
+| `tools/chat-assistant/backend/tests/test_task_spec_builder.py` | 修改 | 更新 Golden 候选区断言 |
+| `tools/chat-assistant/backend/tests/golden/contract_review_v1_golden_artifact.json` | 更新 | 按新报告组合行为重新生成固定样本 |
+| `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-candidate.json` | 新增 | Run #70 真实评测结果及发布门禁 |
+
+---
+
+## 2026-08-20：P5 重复评测稳定性与生产基线保护
+
+### 问题
+
+Run #70 首次通过发布门禁后，需要确认结果不是单次偶然成功，并防止未通过质量门禁的评测运行被误设为生产默认基线。重复运行期间还观察到 Embedding 服务存在偶发超时，需要区分可恢复重试和真正的基础设施失败。
+
+### 根因与修复
+
+1. **连续重复评测确认稳定性**
+   - 使用与 Run #70 相同的数据集、配置、Runtime、模型和 Elasticsearch 强制要求连续执行 Run #71、#72、#73。
+   - 三次均为 `COMPLETED`，质量门禁全部通过；Embedding 超时均在重试后恢复，没有产生 `infraFailed` 或 `LIMITED` 结果。
+
+2. **增加生产基线发布保护**
+   - 新增 `V039__eval_production_baseline.sql`，记录 `is_production_baseline` 和 `promoted_at`。
+   - Java 管理端新增事务化 `POST /api/admin/eval/runs/{runId}/promote`：只有 `status=COMPLETED` 且 `summaryJson.releaseGate.status=PASSED` 的 Run 才能成为生产基线。
+   - 同一数据集切换基线时只取消旧基线标记，不删除历史评测记录，保留完整审计链路。
+   - 评测中心增加“设为基线”和“生产基线”状态展示，阻断不合格 Run 的操作入口。
+
+### 验证结果
+
+- Run #71：`COMPLETED`，Recall `100%`，双引用率 `100%`，误报率 `0%`，Schema `100%`，`LIMITED=0/3`，P95 `85s`。
+- Run #72：`COMPLETED`，Recall `100%`，双引用率 `100%`，误报率 `0%`，Schema `100%`，`LIMITED=0/3`，P95 `61s`。
+- Run #73：`COMPLETED`，Recall `100%`，双引用率 `100%`，误报率 `0%`，Schema `100%`，`LIMITED=0/3`，P95 `43s`。
+- 三次均为 `releaseGate.status=PASSED`、`infraFailedCount=0`、3/3 用例通过。
+- Python 全量测试：`424 passed, 1 warning`。
+- Java `mvnw -q -DskipTests compile`：通过。
+- 管理端 `npm run build`：通过，保留既有 Vite chunk size warning。
+- `git diff --check`：通过；仅有既有 LF/CRLF 换行提示。
+- Java 管理端临时启动后完成真实接口冒烟：Run 列表读取 `isProductionBaseline/promotedAt` 正常；Run #73 提升返回 HTTP `200`，Run #69（门禁失败）提升返回 HTTP `400`。
+- 已将 Run #73 设置为数据集 #26 的生产基线；Run #70/#71/#72 保留为历史评测记录且不再生效。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tools/chat-assistant/backend/migrations/V039__eval_production_baseline.sql` | 新增 | 评测生产基线字段迁移 |
+| `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java` | 修改 | 发布门禁校验、事务化基线切换接口 |
+| `agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java` | 修改 | 滚动升级期间兼容补列 |
+| `agent-admin/src/views/EvalCenter.vue` | 修改 | 基线设置按钮和当前基线状态 |
+| `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-1.json` | 新增 | Run #71 重复评测结果 |
+| `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-2.json` | 新增 | Run #72 重复评测结果 |
+| `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-3.json` | 新增 | Run #73 重复评测结果 |

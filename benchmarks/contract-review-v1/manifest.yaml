@@ -1,0 +1,7 @@
+schemaVersion: 1
+id: contract-review-v1
+name: Contract review golden set
+version: v1
+taskType: CONTRACT_REVIEW
+description: Small, reviewed regression set for reproducible contract risk evaluation.
+caseDirectory: cases

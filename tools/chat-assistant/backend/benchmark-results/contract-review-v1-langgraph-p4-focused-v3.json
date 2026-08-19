@@ -1,0 +1,196 @@
+{
+  "runId": 69,
+  "datasetHash": "4ba874b79081ed7ba6cb70a0d126a1deabb1862dcb1521f7fa721f07d475dafa",
+  "configHash": "7b15c8d9150a7ba5b8c7921b12f0774e37fcac16a9c6b111b71089ebaa7b8f7c",
+  "profile": "live",
+  "gitCommit": "5ad0f2c76aec6dc922c1b0a0f80a1fbe8ab06c62",
+  "scorerVersion": "eval-scorers-v2",
+  "status": "COMPLETED",
+  "startedAt": "2026-08-19 23:44:59",
+  "finishedAt": "2026-08-19 23:47:56",
+  "summary": {
+    "highRiskRecall": 1.0,
+    "dualCitationRate": 0.6071,
+    "falsePositiveRate": 0.0,
+    "schemaValidRate": 1.0,
+    "limitedReportRate": 0.0,
+    "caseCount": 3,
+    "metricCaseCount": 3,
+    "fixtureReuseCount": 3,
+    "fixtureBuildCount": 0,
+    "unscoredCount": 0,
+    "skipReasons": null,
+    "scorerVersions": [
+      "eval-scorers-v2"
+    ],
+    "passedCount": 3,
+    "failedCount": 0,
+    "infraFailedCount": 0,
+    "limitedCount": 0,
+    "findingCount": 16,
+    "dualCitationCount": 10,
+    "contractCitationMissingCount": 3,
+    "policyCitationMissingCount": 3,
+    "uncitedFindingCount": 0,
+    "resultValid": true,
+    "environment": {
+      "environmentStatus": "READY",
+      "checkedAt": "2026-08-19T23:44:59+0800",
+      "reasons": [],
+      "components": {
+        "llm": {
+          "status": "ok",
+          "model": "deepseek-v4-flash",
+          "base_url": "https://api.deepseek.com"
+        },
+        "embedding": {
+          "status": "ok",
+          "model": "Qwen/Qwen3-Embedding-8B",
+          "base_url": "https://api.siliconflow.cn/v1",
+          "dim": 4096
+        },
+        "elasticsearch": {
+          "status": "ok",
+          "host": "http://localhost:19200",
+          "ping": true
+        }
+      },
+      "probeAttempts": 1
+    },
+    "evaluationTaskPlan": [
+      "CONTRACT_REVIEW"
+    ],
+    "rerankRequested": true,
+    "rerankActualMethods": [
+      "MODEL_RERANK"
+    ],
+    "rerankFallbackCount": 0,
+    "actualRuntimeEngine": "langgraph/contract_review/v1",
+    "runtimeEngineMismatch": false,
+    "operations": {
+      "latencyStatus": "AVAILABLE",
+      "latencyTotalMs": 160000,
+      "latencyP50Ms": 50000,
+      "latencyP95Ms": 72000,
+      "latencyObservedCaseCount": 3,
+      "nodeLatencyTotalMs": 0,
+      "tokenStatus": "UNAVAILABLE",
+      "tokenInputTotal": 0,
+      "tokenOutputTotal": 0,
+      "tokenObservedCaseCount": 0,
+      "stageRunCount": 3,
+      "executionStack": {
+        "runtimeEngine": [
+          "langgraph"
+        ],
+        "graphName": [
+          "contract_review"
+        ],
+        "graphVersion": [
+          "v1"
+        ],
+        "model": [
+          "deepseek-v4-flash"
+        ],
+        "promptVersion": [
+          "contract-review-graph-v1"
+        ],
+        "retrievalVersion": [
+          "contract-hybrid-retrieval-v2"
+        ],
+        "rerankVersion": [
+          "reranker-v1"
+        ],
+        "scorerVersion": [
+          "eval-scorers-v2"
+        ]
+      },
+      "estimatedCost": null,
+      "costCurrency": null,
+      "costStatus": "UNAVAILABLE",
+      "costReason": "PRICING_NOT_CONFIGURED"
+    },
+    "percent": 100,
+    "releaseGate": {
+      "passed": false,
+      "status": "FAILED",
+      "thresholdVersion": "release-gate-v1",
+      "thresholds": {
+        "highRiskRecallMin": 0.9,
+        "dualCitationRateMin": 0.95,
+        "falsePositiveRateMax": 0.03,
+        "limitedReportRateMax": 0.0
+      },
+      "failures": [
+        {
+          "metric": "dualCitationRate",
+          "actual": 0.6071,
+          "operator": ">=",
+          "threshold": 0.95,
+          "message": "dualCitationRate 0.6071 < 0.9500"
+        }
+      ],
+      "blockingReasons": [],
+      "evaluated": true
+    }
+  },
+  "operations": {
+    "latencyStatus": "AVAILABLE",
+    "latencyTotalMs": 160000,
+    "latencyP50Ms": 50000,
+    "latencyP95Ms": 72000,
+    "latencyObservedCaseCount": 3,
+    "nodeLatencyTotalMs": 0,
+    "tokenStatus": "UNAVAILABLE",
+    "tokenInputTotal": 0,
+    "tokenOutputTotal": 0,
+    "tokenObservedCaseCount": 0,
+    "stageRunCount": 3,
+    "executionStack": {
+      "runtimeEngine": [
+        "langgraph"
+      ],
+      "graphName": [
+        "contract_review"
+      ],
+      "graphVersion": [
+        "v1"
+      ],
+      "model": [
+        "deepseek-v4-flash"
+      ],
+      "promptVersion": [
+        "contract-review-graph-v1"
+      ],
+      "retrievalVersion": [
+        "contract-hybrid-retrieval-v2"
+      ],
+      "rerankVersion": [
+        "reranker-v1"
+      ],
+      "scorerVersion": [
+        "eval-scorers-v2"
+      ]
+    },
+    "estimatedCost": null,
+    "costCurrency": null,
+    "costStatus": "UNAVAILABLE",
+    "costReason": "PRICING_NOT_CONFIGURED"
+  },
+  "experiment": {
+    "datasetId": "contract-review-v1",
+    "datasetHash": "4ba874b79081ed7ba6cb70a0d126a1deabb1862dcb1521f7fa721f07d475dafa",
+    "engine": "langgraph",
+    "profile": "live",
+    "features": {
+      "requireElasticsearch": true,
+      "allowMysqlRetrievalFallback": false,
+      "temperature": 0,
+      "rerank": true
+    },
+    "baselineRunId": null,
+    "gitCommit": "5ad0f2c76aec6dc922c1b0a0f80a1fbe8ab06c62",
+    "scorerVersion": "eval-scorers-v2",
+    "configHash": "7b15c8d9150a7ba5b8c7921b12f0774e37fcac16a9c6b111b71089ebaa7b8f7c"
+  }
+}

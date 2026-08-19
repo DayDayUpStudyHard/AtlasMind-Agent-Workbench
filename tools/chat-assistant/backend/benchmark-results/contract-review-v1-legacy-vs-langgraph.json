@@ -1,0 +1,80 @@
+{
+  "leftRunId": 56,
+  "rightRunId": 57,
+  "compatible": true,
+  "compatibility": {
+    "datasetHash": true,
+    "scorerVersion": true
+  },
+  "metrics": {
+    "highRiskRecall": {
+      "left": 0.6667,
+      "right": 0.6667,
+      "delta": 0.0
+    },
+    "dualCitationRate": {
+      "left": 1.0,
+      "right": 0.4071,
+      "delta": -0.5929
+    },
+    "falsePositiveRate": {
+      "left": 0.0,
+      "right": 0.0,
+      "delta": 0.0
+    },
+    "schemaValidRate": {
+      "left": 1.0,
+      "right": 1.0,
+      "delta": 0.0
+    }
+  },
+  "operations": {
+    "latencyP50Ms": {
+      "left": 55000,
+      "right": null,
+      "delta": null
+    },
+    "latencyP95Ms": {
+      "left": 66000,
+      "right": null,
+      "delta": null
+    },
+    "latencyTotalMs": {
+      "left": 162000,
+      "right": null,
+      "delta": null
+    },
+    "nodeLatencyTotalMs": {
+      "left": 0,
+      "right": 0,
+      "delta": 0.0
+    },
+    "tokenInputTotal": {
+      "left": 0,
+      "right": 0,
+      "delta": 0.0
+    },
+    "tokenOutputTotal": {
+      "left": 0,
+      "right": 0,
+      "delta": 0.0
+    },
+    "estimatedCost": {
+      "left": null,
+      "right": null,
+      "delta": null
+    },
+    "costStatus": {
+      "left": "UNAVAILABLE",
+      "right": "UNAVAILABLE"
+    },
+    "latencyStatus": {
+      "left": "AVAILABLE",
+      "right": "UNAVAILABLE"
+    },
+    "tokenStatus": {
+      "left": "UNAVAILABLE",
+      "right": "UNAVAILABLE"
+    }
+  }
+}

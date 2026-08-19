@@ -409,6 +409,14 @@
               <template v-else>{{ row.statusLabel || formatStatus(row.status) }}</template>
             </template>
           </el-table-column>
+          <el-table-column label="发布门禁" width="120" align="center">
+            <template #default="{ row }">
+              <el-tooltip v-if="gateIssueText(row)" :content="gateIssueText(row)" placement="top">
+                <el-tag :type="gateTagType(row)" effect="plain" size="small">{{ gateLabel(row) }}</el-tag>
+              </el-tooltip>
+              <el-tag v-else :type="gateTagType(row)" effect="plain" size="small">{{ gateLabel(row) }}</el-tag>
+            </template>
+          </el-table-column>
           <el-table-column label="进度" width="180" align="center">
             <template #default="{ row }">
               <div class="run-progress">
@@ -439,12 +447,38 @@
           <el-table-column label="误报率" width="90" align="center">
             <template #default="{ row }">{{ formatMetric(row, 'falsePositiveRate') }}</template>
           </el-table-column>
+          <el-table-column label="P95" width="90" align="center">
+            <template #default="{ row }">
+              <span v-if="operationValue(row, 'latencyP95Ms') !== null">{{ operationValue(row, 'latencyP95Ms') }} ms</span>
+              <span v-else class="muted">未观测</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="Token" width="110" align="center">
+            <template #default="{ row }">
+              <span v-if="operationValue(row, 'tokenInputTotal') !== null || operationValue(row, 'tokenOutputTotal') !== null">
+                {{ formatTokens(operationValue(row, 'tokenInputTotal'), operationValue(row, 'tokenOutputTotal')) }}
+              </span>
+              <span v-else class="muted">未观测</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="成本" width="100" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="operationValue(row, 'costStatus') === 'AVAILABLE'" type="success" effect="plain" size="small">
+                {{ formatCost(operationValue(row, 'estimatedCost'), operationValue(row, 'costCurrency')) }}
+              </el-tag>
+              <el-tooltip v-else content="未配置价格或 Token 遥测不可用">
+                <el-tag type="info" effect="plain" size="small">不可用</el-tag>
+              </el-tooltip>
+            </template>
+          </el-table-column>
           <el-table-column label="时间" width="140">
             <template #default="{ row }">{{ formatDate(row.startedAt) }}</template>
           </el-table-column>
-          <el-table-column label="操作" width="140" align="center">
+          <el-table-column label="操作" width="210" align="center">
             <template #default="{ row }">
               <el-button size="small" type="primary" @click="viewRunDetail(row.id)">详情</el-button>
+              <el-button v-if="canPromote(row)" size="small" type="success" @click="promoteRun(row)">设为基线</el-button>
+              <el-tag v-else-if="row.isProductionBaseline" type="success" effect="plain" size="small">生产基线</el-tag>
               <el-button size="small" type="danger" @click="deleteRun(row.id)">删除</el-button>
             </template>
           </el-table-column>
@@ -479,6 +513,31 @@
             <el-descriptions-item label="双引用率">{{ formatMetric(viewingRun, 'dualCitationRate') }}</el-descriptions-item>
             <el-descriptions-item label="误报率">{{ formatMetric(viewingRun, 'falsePositiveRate') }}</el-descriptions-item>
             <el-descriptions-item label="Schema 有效率">{{ formatMetric(viewingRun, 'schemaValidRate') }}</el-descriptions-item>
+            <el-descriptions-item label="发布门禁" :span="2">
+              <div class="gate-detail">
+                <el-tag :type="gateTagType(viewingRun)" effect="plain" size="small">{{ gateLabel(viewingRun) }}</el-tag>
+                <span v-if="gateIssueText(viewingRun)" class="gate-issues">{{ gateIssueText(viewingRun) }}</span>
+              </div>
+            </el-descriptions-item>
+            <el-descriptions-item label="生产基线" :span="2">
+              <el-tag v-if="viewingRun.isProductionBaseline" type="success" effect="plain" size="small">当前数据集基线</el-tag>
+              <span v-else class="muted">未设为基线</span>
+              <small v-if="viewingRun.promotedAt" class="baseline-time">{{ formatDate(viewingRun.promotedAt) }}</small>
+            </el-descriptions-item>
+            <el-descriptions-item label="P50 / P95">
+              {{ formatLatency(operationValue(viewingRun, 'latencyP50Ms')) }} / {{ formatLatency(operationValue(viewingRun, 'latencyP95Ms')) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="Token 总量">
+              {{ formatTokens(operationValue(viewingRun, 'tokenInputTotal'), operationValue(viewingRun, 'tokenOutputTotal')) }}
+            </el-descriptions-item>
+            <el-descriptions-item label="估算成本">
+              {{ operationValue(viewingRun, 'costStatus') === 'AVAILABLE'
+                ? formatCost(operationValue(viewingRun, 'estimatedCost'), operationValue(viewingRun, 'costCurrency'))
+                : '不可用（缺少价格或 Token 遥测）' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="执行栈" :span="2">
+              <span class="mono-tiny">{{ formatExecutionStack(viewingRun) }}</span>
+            </el-descriptions-item>
             <el-descriptions-item label="用例数">{{ viewingRun.caseCount }}</el-descriptions-item>
             <el-descriptions-item label="成功执行">{{ viewingRun.passedCount }}</el-descriptions-item>
             <el-descriptions-item label="当前步">{{ viewingRun.currentStep || '-' }}</el-descriptions-item>
@@ -769,6 +828,33 @@ async function deleteRun(id) {
   }
 }
 
+function canPromote(row) {
+  return !row?.isProductionBaseline
+    && row?.status === 'COMPLETED'
+    && releaseGate(row)?.status === 'PASSED'
+}
+
+async function promoteRun(row) {
+  try {
+    await ElMessageBox.confirm(
+      `Run #${row.id} 将成为数据集 ${row.datasetName} v${row.datasetVersion} 的生产基线，原基线会保留但取消生效。继续？`,
+      '确认设置生产基线',
+      { type: 'warning' },
+    )
+  } catch { return }
+  try {
+    await api.post(`/api/admin/eval/runs/${row.id}/promote`)
+    ElMessage.success('已设置为生产基线')
+    await loadAll()
+    if (viewingRun.value?.id === row.id) {
+      const refreshed = await api.get(`/api/admin/eval/runs/${row.id}`)
+      viewingRun.value = refreshed.data.data || viewingRun.value
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.message || '设置基线失败')
+  }
+}
+
 async function addCase() {
   if (!newCase.value.caseKey || !newCase.value.title || !newCase.value.contractText) {
     ElMessage.warning('用例Key、标题和合同全文为必填')
@@ -962,7 +1048,31 @@ const caseEvidence = computed(() => {
 
 function formatDate(v) { return v ? String(v).replace('T', ' ').slice(0, 16) : '' }
 function parseFeatures(v) { try { return JSON.parse(v) || {} } catch { return {} } }
-function parseSummary(v) { try { return JSON.parse(v) || {} } catch { return {} } }
+function parseSummary(v) {
+  if (v && typeof v === 'object') return v
+  try { return JSON.parse(v) || {} } catch { return {} }
+}
+function releaseGate(row) {
+  const gate = parseSummary(row?.summaryJson).releaseGate
+  return gate && typeof gate === 'object' ? gate : null
+}
+function gateLabel(row) {
+  const gate = releaseGate(row)
+  if (!gate) return ['QUEUED', 'PRECHECKING', 'RUNNING'].includes(row?.status) ? '待评测' : '未计算'
+  return { PASSED: '可发布', FAILED: '质量未达标', BLOCKED: '运行阻断' }[gate.status] || '未计算'
+}
+function gateTagType(row) {
+  const gate = releaseGate(row)
+  if (!gate) return 'info'
+  return { PASSED: 'success', FAILED: 'danger', BLOCKED: 'warning' }[gate.status] || 'info'
+}
+function gateIssueText(row) {
+  const gate = releaseGate(row)
+  if (!gate) return ''
+  const failures = Array.isArray(gate.failures) ? gate.failures.map(item => item.message || item.metric).filter(Boolean) : []
+  const blockers = Array.isArray(gate.blockingReasons) ? gate.blockingReasons : []
+  return [...blockers.map(reason => `阻断：${reason}`), ...failures].join('；')
+}
 function formatDatasetType(v) {
   return {
     CONTRACT_REVIEW: '风险审查',
@@ -994,6 +1104,30 @@ function formatMetric(row, key) {
   }
   const value = Number(row?.[key])
   return Number.isFinite(value) ? `${(value * 100).toFixed(0)}%` : '-'
+}
+function operations(row) {
+  const summary = parseSummary(row?.summaryJson)
+  return summary.operations || row?.operations || {}
+}
+function operationValue(row, key) {
+  const value = operations(row)[key]
+  return value === undefined || value === null || value === '' ? null : value
+}
+function formatLatency(value) { return value === null ? '未观测' : `${value} ms` }
+function formatTokens(input, output) {
+  if (input === null && output === null) return '未观测'
+  return `入 ${Number(input || 0).toLocaleString()} / 出 ${Number(output || 0).toLocaleString()}`
+}
+function formatCost(value, currency) {
+  if (value === null || value === undefined) return '不可用'
+  return `${currency || 'USD'} ${Number(value).toFixed(6)}`
+}
+function formatExecutionStack(row) {
+  const stack = operationValue(row, 'executionStack') || {}
+  const model = (stack.model || []).join(', ')
+  const graph = (stack.graphName || []).join(', ')
+  const prompt = (stack.promptVersion || []).join(', ')
+  return [graph, model, prompt].filter(Boolean).join(' · ') || '未观测'
 }
 function stopReason(row) {
   return parseSummary(row?.summaryJson).stopReason || ''
@@ -1148,7 +1282,10 @@ function severityTagType(v) {
   font-size: 12px; line-height: 1.6; color: #303133; margin: 0; white-space: pre-wrap; word-break: break-all;
 }
 .mono-tiny { font-family: 'Cascadia Mono', Consolas, 'Courier New', monospace; font-size: 12px; color: #4a5b6e; }
+.muted { color: #a8abb2; }
 .artifact-block { max-height: 420px; }
+.gate-detail { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.gate-issues { color: #8a5b00; font-size: 12px; line-height: 1.5; }
 
 /* Compare */
 .version-board { margin-bottom: 24px; }

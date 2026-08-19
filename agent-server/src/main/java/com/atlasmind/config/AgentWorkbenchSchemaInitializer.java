@@ -457,6 +457,10 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         // PRD Phase 8 task 1: evaluation sets are distinguished by task
         // purpose (要素提取 / 履约日程 / 风险审查 / 履约核验 / 综合).
         addColumnIfMissing("agent_eval_dataset", "task_purpose", "VARCHAR(64) DEFAULT ''");
+        addColumnIfMissing("agent_eval_dataset", "dataset_hash", "CHAR(64)");
+        addColumnIfMissing("agent_eval_dataset", "schema_version", "INT");
+        addColumnIfMissing("agent_eval_dataset", "source_uri", "VARCHAR(1024)");
+        addColumnIfMissing("agent_eval_dataset", "published_at", "DATETIME");
         jdbcTemplate.execute("""
                 CREATE TABLE IF NOT EXISTS agent_eval_case (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -551,6 +555,22 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         addColumnIfMissing("agent_eval_run", "queue_position", "INT DEFAULT 0");
         addColumnIfMissing("agent_eval_run", "environment_status", "VARCHAR(32) DEFAULT ''");
         addColumnIfMissing("agent_eval_run", "environment_snapshot_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_run", "dataset_hash", "CHAR(64)");
+        addColumnIfMissing("agent_eval_run", "config_hash", "CHAR(64)");
+        addColumnIfMissing("agent_eval_run", "profile", "VARCHAR(32)");
+        addColumnIfMissing("agent_eval_run", "git_commit", "CHAR(40)");
+        addColumnIfMissing("agent_eval_run", "baseline_run_id", "BIGINT");
+        addColumnIfMissing("agent_eval_run", "scorer_version", "VARCHAR(64)");
+        addColumnIfMissing("agent_eval_run", "latency_p50_ms", "BIGINT");
+        addColumnIfMissing("agent_eval_run", "latency_p95_ms", "BIGINT");
+        addColumnIfMissing("agent_eval_run", "token_input_total", "BIGINT");
+        addColumnIfMissing("agent_eval_run", "token_output_total", "BIGINT");
+        addColumnIfMissing("agent_eval_run", "estimated_cost", "DECIMAL(18,8)");
+        addColumnIfMissing("agent_eval_run", "cost_currency", "VARCHAR(8)");
+        addColumnIfMissing("agent_eval_run", "cost_status", "VARCHAR(32)");
+        addColumnIfMissing("agent_eval_run", "execution_stack_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_run", "is_production_baseline", "TINYINT NOT NULL DEFAULT 0");
+        addColumnIfMissing("agent_eval_run", "promoted_at", "DATETIME NULL");
         try {
             jdbcTemplate.execute("""
                     ALTER TABLE agent_eval_result

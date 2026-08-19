@@ -7,6 +7,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.*;
@@ -221,6 +222,8 @@ public class EvalAdminController {
                        r.queue_position AS queuePosition,
                        r.environment_status AS environmentStatus,
                        r.environment_snapshot_json AS environmentSnapshotJson,
+                       r.is_production_baseline AS isProductionBaseline,
+                       r.promoted_at AS promotedAt,
                        r.summary_json AS summaryJson,
                        r.started_at AS startedAt, r.finished_at AS finishedAt
                 FROM agent_eval_run r
@@ -298,6 +301,8 @@ public class EvalAdminController {
                        r.queue_position AS queuePosition,
                        r.environment_status AS environmentStatus,
                        r.environment_snapshot_json AS environmentSnapshotJson,
+                       r.is_production_baseline AS isProductionBaseline,
+                       r.promoted_at AS promotedAt,
                        r.started_at AS startedAt, r.finished_at AS finishedAt,
                        r.create_time AS createTime
                 FROM agent_eval_run r
@@ -331,6 +336,33 @@ public class EvalAdminController {
         run.put("results", results.stream().map(this::decorateResult).toList());
         decorateRun(run);
         return Result.ok(run);
+    }
+
+    @PostMapping("/runs/{runId}/promote")
+    @Transactional
+    @OperationLog(value = "设置评测运行生产基线", type = "UPDATE")
+    public Result<Map<String, Object>> promoteRun(@PathVariable Long runId) {
+        Map<String, Object> run = first(jdbc.queryForList(
+                "SELECT id, dataset_id AS datasetId, status, summary_json AS summaryJson "
+                        + "FROM agent_eval_run WHERE id=? FOR UPDATE", runId));
+        if (run == null) throw new IllegalArgumentException("评测运行不存在");
+        if (!"COMPLETED".equalsIgnoreCase(str(run, "status"))) {
+            throw new IllegalStateException("只有 COMPLETED 评测运行可以设为生产基线");
+        }
+        if (!"PASSED".equalsIgnoreCase(releaseGateStatus(run.get("summaryJson")))) {
+            throw new IllegalStateException("评测发布门禁未通过，不能设为生产基线");
+        }
+
+        Long datasetId = numberAsLong(run.get("datasetId"));
+        jdbc.update("UPDATE agent_eval_run SET is_production_baseline=0 "
+                + "WHERE dataset_id=? AND is_production_baseline=1", datasetId);
+        jdbc.update("UPDATE agent_eval_run SET is_production_baseline=1, promoted_at=NOW() "
+                + "WHERE id=?", runId);
+        return Result.ok(Map.of(
+                "promoted", true,
+                "runId", runId,
+                "datasetId", datasetId,
+                "message", "评测运行已设为该数据集的生产基线"));
     }
 
     @GetMapping("/runs/compare")
@@ -393,6 +425,16 @@ public class EvalAdminController {
         return 0L;
     }
 
+    private String releaseGateStatus(Object rawSummary) {
+        if (rawSummary == null) return "";
+        try {
+            return objectMapper.readTree(rawSummary.toString())
+                    .path("releaseGate").path("status").asText("");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private static Map<String, Object> first(List<Map<String, Object>> list) {
         return list.isEmpty() ? null : list.get(0);
     }
@@ -427,6 +469,18 @@ public class EvalAdminController {
                 Object mismatchFlag = summary.get("runtimeEngineMismatch");
                 actualEngine = actual == null ? "" : actual.toString().trim();
                 mismatch = Boolean.TRUE.equals(mismatchFlag);
+                Object operations = summary.get("operations");
+                if (operations instanceof Map<?, ?> operationMap) {
+                    row.put("operations", operationMap);
+                    row.put("latencyP50Ms", operationMap.get("latencyP50Ms"));
+                    row.put("latencyP95Ms", operationMap.get("latencyP95Ms"));
+                    row.put("tokenInputTotal", operationMap.get("tokenInputTotal"));
+                    row.put("tokenOutputTotal", operationMap.get("tokenOutputTotal"));
+                    row.put("estimatedCost", operationMap.get("estimatedCost"));
+                    row.put("costCurrency", operationMap.get("costCurrency"));
+                    row.put("costStatus", operationMap.get("costStatus"));
+                    row.put("executionStack", operationMap.get("executionStack"));
+                }
             } catch (Exception ignored) {
                 // summary_json 无法解析时按无信息处理
             }

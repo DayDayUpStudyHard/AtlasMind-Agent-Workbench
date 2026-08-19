@@ -1,7 +1,7 @@
 """Focused tests for rich contract-risk graph normalization and report grouping."""
 
-from app.agent_runtime.graph.nodes.artifact import _risk_groups, _risk_summary
-from app.agent_runtime.graph.nodes.domain_tasks import _normalize_domain
+from app.agent_runtime.graph.nodes.artifact import _risk_groups, _risk_summary, _split_publishable_findings, compose_report
+from app.agent_runtime.graph.nodes.domain_tasks import _normalize_domain, create_domain_tasks
 from app.agent_runtime.graph.nodes.retrieval import _fallback_rule_findings, _normalize_finding
 from app.agent_runtime.graph.nodes.validation import _validate_one
 from app.agent_runtime.graph.contract_review import _route_after_reflection
@@ -48,6 +48,54 @@ def test_dynamic_domain_is_bounded_and_normalized():
     assert domain["source"] == "LLM_DYNAMIC"
 
 
+def test_eval_focus_dimensions_reduce_baseline_without_affecting_production(monkeypatch):
+    import app.agent_runtime.graph.nodes.domain_tasks as domain_tasks
+
+    monkeypatch.setattr(domain_tasks, "_load_clause_signals", lambda _case_id: [])
+
+    class FakeService:
+        def plan_contract_risk_domains(self, *args, **kwargs):
+            return {"domains": [
+                {
+                    "domainKey": "payment_extra",
+                    "domainName": "付款补充",
+                    "objective": "检查付款条件",
+                    "requiredClauseTypes": ["PAYMENT"],
+                },
+                {
+                    "domainKey": "ip_extra",
+                    "domainName": "知识产权补充",
+                    "objective": "检查成果归属",
+                    "requiredClauseTypes": ["IP"],
+                },
+            ]}
+
+    monkeypatch.setattr("app.services.llm_service.LLMService", FakeService)
+
+    focused = create_domain_tasks({
+        "case_snapshot": {
+            "evalCaseKey": "CR-001",
+            "evalExpectedDimensions": ["PAYMENT"],
+        },
+        "subject_id": 1,
+        "run_id": 1,
+    })
+    focused_keys = {task["domainKey"] for task in focused["domain_tasks"]}
+    assert focused_keys == {"price_payment_tax", "payment_extra"}
+    assert focused["observations"][0]["output"]["filteredForEvaluation"] is True
+
+    production = create_domain_tasks({
+        "case_snapshot": {},
+        "subject_id": 1,
+        "run_id": 1,
+    })
+    production_keys = {task["domainKey"] for task in production["domain_tasks"]}
+    assert "price_payment_tax" in production_keys
+    assert "liability_remedies" in production_keys
+    assert "ip_extra" in production_keys
+    assert production["observations"][0]["output"].get("filteredForEvaluation", False) is False
+
+
 def test_finding_keeps_only_retrieved_citation_ids():
     finding = _normalize_finding({
         "title": "环保责任范围不完整",
@@ -63,6 +111,55 @@ def test_finding_keeps_only_retrieved_citation_ids():
     assert finding["contractCitationIds"] == ["CONTRACT_CLAUSE:11"]
     assert finding["policyCitationIds"] == ["KB_CHUNK:22"]
     assert finding["evidenceStatus"] == "DUAL_CITED"
+
+
+def test_report_separates_evidence_incomplete_findings_into_candidates():
+    publishable, candidates = _split_publishable_findings([
+        {
+            "findingKey": "dual",
+            "title": "有完整证据",
+            "contractCitationIds": ["CONTRACT_CLAUSE:11"],
+            "policyCitationIds": ["KB_CHUNK:22"],
+        },
+        {
+            "findingKey": "policy-only",
+            "title": "待补合同依据",
+            "policyCitationIds": ["KB_CHUNK:22"],
+        },
+    ])
+
+    assert [item["findingKey"] for item in publishable] == ["dual"]
+    assert [item["findingKey"] for item in candidates] == ["policy-only"]
+    assert candidates[0]["publicationStatus"] == "CANDIDATE"
+    assert candidates[0]["candidateReason"] == ["MISSING_CONTRACT_CITATION"]
+
+
+def test_compose_report_publishes_only_dual_cited_findings():
+    result = compose_report({
+        "validated_findings": [
+            {
+                "findingKey": "publish",
+                "title": "可发布风险",
+                "severity": "HIGH",
+                "clauseType": "PAYMENT",
+                "contractCitationIds": ["CONTRACT_CLAUSE:11"],
+                "policyCitationIds": ["KB_CHUNK:22"],
+            },
+            {
+                "findingKey": "candidate",
+                "title": "待补依据",
+                "severity": "MEDIUM",
+                "clauseType": "PAYMENT",
+                "policyCitationIds": ["KB_CHUNK:22"],
+            },
+        ],
+        "case_snapshot": {"title": "测试合同"},
+        "coverage": {"domains": {}},
+        "scoring": {},
+    })
+    artifact = result["artifact"]
+    assert [item["findingKey"] for item in artifact["findings"]] == ["publish"]
+    assert [item["findingKey"] for item in artifact["candidateFindings"]] == ["candidate"]
 
 
 def test_high_risk_without_contract_evidence_is_downgraded():

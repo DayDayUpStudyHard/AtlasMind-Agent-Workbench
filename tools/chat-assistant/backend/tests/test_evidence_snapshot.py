@@ -476,6 +476,39 @@ def test_four_graphs_observe_same_snapshot_hash(monkeypatch):
     assert extraction_state["extraction_context"]["evidenceSnapshotHash"] == expected
 
 
+def test_load_run_context_preserves_eval_dimensions_from_initial_project(monkeypatch):
+    from app.agent_runtime.graph.nodes import context as context_nodes
+
+    snapshot = {
+        "case": {"id": 1, "title": "合同", "contractType": "SERVICE_PROCUREMENT"},
+        "extractionSnapshot": {},
+        "documents": [],
+        "currentDocument": {},
+        "documentQuality": {},
+        "snapshot_hash": "snapshot-1",
+        "clauses": [],
+    }
+    monkeypatch.setattr(
+        context_nodes,
+        "load_contract_evidence_snapshot",
+        lambda *args, **kwargs: snapshot,
+    )
+
+    result = asyncio.run(context_nodes.load_run_context({
+        "run_id": 1,
+        "subject_id": 1,
+        "task_input": {},
+        "case_snapshot": {
+            "evalExpectedDimensions": ["PAYMENT"],
+            "evalCaseKey": "CR-001",
+        },
+        "state_revision": 0,
+    }))
+
+    assert result["case_snapshot"]["evalExpectedDimensions"] == ["PAYMENT"]
+    assert result["case_snapshot"]["evalCaseKey"] == "CR-001"
+
+
 def test_state_copy_drops_bulk_clauses_but_keeps_identity(monkeypatch):
     from app.agent_runtime.graph.evidence_snapshot import state_copy_of_snapshot
 
