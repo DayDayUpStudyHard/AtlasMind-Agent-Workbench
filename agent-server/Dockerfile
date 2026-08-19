@@ -1,7 +1,12 @@
 # ============================================
 # 阶段一：Maven 编译打包
 # ============================================
-FROM maven:3.9-eclipse-temurin-17-alpine AS builder
+# Use an accessible registry by default; override these build args when
+# deploying in an environment with direct Docker Hub access.
+ARG MAVEN_BASE_IMAGE=dockerproxy.net/library/maven:3.9-eclipse-temurin-17-alpine
+ARG JAVA_BASE_IMAGE=dockerproxy.net/library/eclipse-temurin:17-jre-alpine
+
+FROM ${MAVEN_BASE_IMAGE} AS builder
 
 WORKDIR /build
 COPY pom.xml .
@@ -14,7 +19,7 @@ RUN mvn -s .mvn/settings.xml package -DskipTests -B -q
 # ============================================
 # 阶段二：JRE 运行镜像
 # ============================================
-FROM eclipse-temurin:17-jre-alpine AS runtime
+FROM ${JAVA_BASE_IMAGE} AS runtime
 
 # 创建非 root 用户
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
