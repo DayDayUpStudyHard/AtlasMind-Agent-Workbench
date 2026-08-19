@@ -1,8 +1,8 @@
 # Build knowledge portal
 # Docker Hub is not reliably reachable from every local or mainland deployment.
 # Deployments with direct Docker Hub access can override these at build time.
-ARG NODE_BASE_IMAGE=docker.m.daocloud.io/library/node:20-alpine
-ARG NGINX_BASE_IMAGE=docker.m.daocloud.io/library/nginx:alpine
+ARG NODE_BASE_IMAGE=dockerproxy.net/library/node:20-alpine
+ARG NGINX_BASE_IMAGE=dockerproxy.net/library/nginx:alpine
 
 FROM ${NODE_BASE_IMAGE} AS front-build
 WORKDIR /app
