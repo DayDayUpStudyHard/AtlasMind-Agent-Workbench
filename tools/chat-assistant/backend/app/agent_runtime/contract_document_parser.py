@@ -43,9 +43,9 @@ _CHUNK_SIZE = 900
 _CHUNK_OVERLAP = 120
 _SUPPORTED_FILE_TYPES = {"DOC", "DOCX", "PDF", "TXT", "MD"}
 _ABSOLUTE_DATE_PATTERN = re.compile(
-    r"(20\d{2})\s*[-年./]\s*(0?[1-9]|1[0-2])\s*[-月./]\s*(0?[1-9]|[12]\d|3[01])\s*日?"
+    r"(20\d{2})\s*[-年./]\s*(1[0-2]|0?[1-9])\s*[-月./]\s*(3[01]|[12]\d|0?[1-9])\s*日?(?!\d)"
 )
-_MONTH_DAY_PATTERN = re.compile(r"(?<!\d)(0?[1-9]|1[0-2])月(0?[1-9]|[12]\d|3[01])日")
+_MONTH_DAY_PATTERN = re.compile(r"(?<!\d)(1[0-2]|0?[1-9])月(3[01]|[12]\d|0?[1-9])日")
 _RELATIVE_TERM_PATTERN = re.compile(
     r"(合同签署之日|合同生效|生效日|服务期满|合同到期|验收通过|收到发票|交付完成|付款通知|书面通知)"
     r"(前|后|起)?\s*(\d{1,3})\s*(个)?\s*(工作日|自然日|日|天|月|年)(内|前|后)?"
@@ -58,12 +58,12 @@ _CHINESE_DURATION_TERM_PATTERN = re.compile(
     r"(提前|逾期|超过|不少于|不晚于|不迟于|每|自|在|期满|续签|终止|验收|付款|交付|通知)?"
     r"[^，。；;\n]{0,20}?([一二两三四五六七八九十]+)\s*(个)?\s*(工作日|自然日|日|天|月|年)(内|前|后|起|届满|期)?"
 )
-_CN_DATE_TEXT = r"20\d{2}\s*" + "\u5e74" + r"\s*(?:0?[1-9]|1[0-2])\s*" + "\u6708" + r"\s*(?:0?[1-9]|[12]\d|3[01])\s*" + "\u65e5"
+_CN_DATE_TEXT = r"20\d{2}\s*" + "\u5e74" + r"\s*(?:1[0-2]|0?[1-9])\s*" + "\u6708" + r"\s*(?:3[01]|[12]\d|0?[1-9])\s*" + "\u65e5"
 _CN_DATE_PATTERN = re.compile(
-    r"(20\d{2})\s*" + "\u5e74" + r"\s*(0?[1-9]|1[0-2])\s*" + "\u6708" + r"\s*(0?[1-9]|[12]\d|3[01])\s*" + "\u65e5"
+    r"(20\d{2})\s*" + "\u5e74" + r"\s*(1[0-2]|0?[1-9])\s*" + "\u6708" + r"\s*(3[01]|[12]\d|0?[1-9])\s*" + "\u65e5" + r"(?!\d)"
 )
 _ISO_DATE_PATTERN = re.compile(
-    r"(20\d{2})\s*[-/.]\s*(0?[1-9]|1[0-2])\s*[-/.]\s*(0?[1-9]|[12]\d|3[01])"
+    r"(20\d{2})\s*[-/.]\s*(1[0-2]|0?[1-9])\s*[-/.]\s*(3[01]|[12]\d|0?[1-9])(?!\d)"
 )
 _CN_DATE_RANGE_PATTERN = re.compile(
     rf"(?P<prefix>[^。\n；;]{{0,42}}?)"
@@ -998,7 +998,7 @@ def _add_timeline_node(
         return
     if date is None and not condition:
         return
-    node_type = _timeline_type(clause.get("clauseType"), quote)
+    node_type = _timeline_type(clause.get("clauseType"), quote, condition or date)
     label = _timeline_label(node_type, quote)
     key = f"{clause.get('id')}|{date}|{condition}|{label}|{quote[:80]}"
     if key in seen:
@@ -1040,7 +1040,7 @@ def _add_timeline_node(
 _CN_DURATION_FOCUS_PATTERN = re.compile(
     r"(?:不可抗力[^。；;\n]{0,24}\d{1,3}\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)(?:以上|以内|内|前|后|届满)?)"
     r"|(?:(?:本合同|合同)?期满[^。；;\n]{0,12}(?:前|后|内)\s*\d{1,3}\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年))"
-    r"|(?:收到(?:发票|通知)[^。；;\n]{0,16}\d{1,3}\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)(?:内|前|后)?)"
+    r"|(?:收到[^。；;\n]{0,16}?(?:发票|申请|通知)[^。；;\n]{0,16}\d{1,3}\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)(?:内|前|后)?)"
     r"|(?:(?:验收|交付|付款|开具发票|书面通知)[^。；;\n]{0,20}\d{1,3}\s*(?:个)?(?:工作日|自然日|日|天|个月|月|年)(?:内|前|后)?)"
 )
 
@@ -1171,6 +1171,10 @@ def _add_timeline_candidate(
         node["condition"] = cleaned_condition
     if node_type:
         node["nodeType"] = node_type
+    elif cleaned_condition:
+        node["nodeType"] = _timeline_type(
+            clause.get("clauseType"), quote, cleaned_condition
+        )
     node["label"] = label or _rule_timeline_label(node["nodeType"], quote, cleaned_condition)
     node["businessMeaning"] = _rule_business_meaning(node, quote)
 
@@ -1316,11 +1320,28 @@ def _clean_rule_condition(condition: str | None, quote: str) -> str:
     matches = list(_DURATION_TOKEN_PATTERN.finditer(text))
     if not matches:
         return raw
-    target = matches[-1]
+    trigger_terms = tuple(
+        term for term in ("发票", "申请", "通知", "验收", "交付", "付款", "支付", "生效", "到期")
+        if term in raw
+    )
+
+    def match_score(item):
+        sentence_start = max(
+            text.rfind(mark, 0, item.start())
+            for mark in ("。", "；", ";", "\n")
+        ) + 1
+        sentence_end = min(
+            (value for value in (text.find(mark, item.end()) for mark in ("。", "；", ";", "\n")) if value >= 0),
+            default=len(text),
+        )
+        sentence = text[sentence_start:sentence_end]
+        return sum(term in sentence for term in trigger_terms)
+
+    target = max(matches, key=match_score) if trigger_terms else matches[-1]
     if numbers:
         same_number = [item for item in matches if item.group("number") in numbers]
         if same_number:
-            target = same_number[-1]
+            target = max(same_number, key=match_score) if trigger_terms else same_number[-1]
     start = max(text.rfind(mark, 0, target.start()) for mark in ("。", "；", ";", "\n")) + 1
     prefix = text[start:target.start()]
     if "：" in prefix or ":" in prefix:
@@ -1398,8 +1419,13 @@ def _enrich_timeline_nodes(
         })
     if not candidates:
         return nodes, {"status": "SKIPPED", "reason": "NO_RELIABLE_CANDIDATES"}
+    llm_usage: dict[str, int] = {"calls": 0, "promptTokens": 0, "completionTokens": 0, "tokens": 0}
     try:
         response = LLMService().enrich_contract_timeline(candidates)
+        llm_usage = {
+            key: int((response.get("_llmUsage") or {}).get(key) or 0)
+            for key in llm_usage
+        }
     except Exception as exc:
         logger.warning("Contract timeline LLM enrichment failed: %s", exc)
         return nodes, {"status": "FALLBACK_RULE", "error": str(exc)[:300]}
@@ -1425,6 +1451,12 @@ def _enrich_timeline_nodes(
                 batch = missing_candidates[batch_start:batch_start + 8]
                 try:
                     retry_response = LLMService().enrich_contract_timeline(batch)
+                    retry_usage = retry_response.get("_llmUsage") or {}
+                    for key in llm_usage:
+                        try:
+                            llm_usage[key] += max(0, int(retry_usage.get(key) or 0))
+                        except (TypeError, ValueError):
+                            pass
                     recovered.update(_timeline_results_by_id(retry_response))
                 except Exception as exc:
                     retry_errors.append(str(exc)[:300])
@@ -1451,13 +1483,14 @@ def _enrich_timeline_nodes(
             meaning = str(result.get("businessMeaning") or "").strip()[:500]
             actor = str(result.get("responsibleParty") or "").strip().upper()
             event_type = str(result.get("eventType") or "").strip().upper()
-            if label:
+            preserve_delivery = _preserve_explicit_delivery_type(node, event_type)
+            if label and not preserve_delivery:
                 node["label"] = label
-            if meaning:
+            if meaning and not preserve_delivery:
                 node["businessMeaning"] = meaning
             if actor in {"OUR_ENTITY", "COUNTERPARTY", "BOTH", "UNKNOWN"}:
                 node["responsibleParty"] = actor
-            if event_type in {"CONTRACT_START", "CONTRACT_END", "SERVICE_START", "SERVICE_END", "PAYMENT", "ACCEPTANCE", "NOTICE", "RENEWAL", "TERMINATION", "PENALTY", "OTHER"}:
+            if event_type in {"CONTRACT_START", "CONTRACT_END", "SERVICE_START", "SERVICE_END", "PAYMENT", "DELIVERY", "ACCEPTANCE", "NOTICE", "RENEWAL", "TERMINATION", "PENALTY", "OTHER"} and not preserve_delivery:
                 node["nodeType"] = event_type
             try:
                 node["confidence"] = min(0.99, max(float(node.get("confidence") or 0), float(result.get("confidence") or 0)))
@@ -1500,6 +1533,7 @@ def _enrich_timeline_nodes(
         "dropped": dropped,
         "retryCount": retry_count,
         "retryErrors": retry_errors,
+        "llmUsage": llm_usage,
     }
 
 
@@ -1509,6 +1543,25 @@ def _timeline_results_by_id(response: dict | None) -> dict[str, dict]:
         for item in ((response or {}).get("nodes") or [])
         if isinstance(item, dict) and item.get("candidateId")
     }
+
+
+def _preserve_explicit_delivery_type(node: dict, proposed_type: str) -> bool:
+    """Keep a rule-anchored delivery obligation from becoming acceptance.
+
+    A delivery clause can require the supplier to submit an acceptance
+    application. That is still a delivery obligation; acceptance starts only
+    when the other party subsequently reviews the application.
+    """
+    if str(node.get("nodeType") or "").upper() != "DELIVERY":
+        return False
+    if proposed_type != "ACCEPTANCE":
+        return False
+    text = " ".join(str(value or "") for value in (
+        (node.get("citation") or {}).get("quote"),
+        node.get("condition"),
+        node.get("businessMeaning"),
+    ))
+    return any(term in text for term in ("交付", "提交", "完成", "履行"))
 
 
 _CONTRACT_END_TARGET_PATTERN = re.compile(
@@ -1854,13 +1907,21 @@ def _resolve_relative_date(condition: str, effective_date) -> str | None:
     except Exception:
         return None
 
-    # "签订/生效后N日/天/个工作日内"
-    m = re.search(r"(?:签订|生效|签署).*?[后之后]\s*(\d+)\s*(?:日|天|个工作日)", condition)
+    normalized = re.sub(r"\s+", "", str(condition or ""))
+
+    # Only resolve when the known contract date is the direct trigger.  A
+    # phrase such as "合同生效后，收到发票后10日内" is anchored to the unknown
+    # invoice receipt date, not to the effective date.
+    direct_anchor = (
+        r"(?:合同(?:签订|签署|生效)(?:之日)?|签订合同|合同签订|合同签署之日|生效日)"
+        r"(?:后|之后|之日起|起)"
+    )
+    m = re.search(direct_anchor + r"(\d+)\s*(?:个工作日|自然日|日|天)", normalized)
     if m:
         days = int(m.group(1))
         return (base + timedelta(days=days)).strftime("%Y-%m-%d")
     # "签订/生效后N个月"
-    m = re.search(r"(?:签订|生效|签署).*?[后之后]\s*(\d+)\s*(?:个?月)", condition)
+    m = re.search(direct_anchor + r"(\d+)\s*(?:个?月)", normalized)
     if m:
         months = int(m.group(1))
         new_month = base.month + months
@@ -1874,6 +1935,38 @@ def _resolve_relative_date(condition: str, effective_date) -> str | None:
         # We don't have expiry_date here, skip
         return None
     return None
+
+
+def _timeline_date_is_grounded(
+    date_value: str | None,
+    source_text: str,
+    extraction_mode: str | None,
+    condition: str | None = None,
+    effective_date=None,
+) -> bool:
+    """Verify that a timeline date is quoted or reproducibly derived."""
+    if not date_value:
+        return True
+    try:
+        year, month, day = (int(part) for part in str(date_value)[:10].split("-"))
+    except (TypeError, ValueError):
+        return False
+
+    mode = str(extraction_mode or "")
+    if mode.endswith("_RESOLVED"):
+        return _resolve_relative_date(str(condition or ""), effective_date) == date_value
+
+    for pattern in (_ABSOLUTE_DATE_PATTERN, _CN_DATE_PATTERN, _ISO_DATE_PATTERN):
+        for match in pattern.finditer(str(source_text or "")):
+            if _safe_date(match.group(1), match.group(2), match.group(3)) == date_value:
+                return True
+
+    if mode == "TEXT_DATE_INFERRED_YEAR":
+        return any(
+            int(match.group(1)) == month and int(match.group(2)) == day
+            for match in _MONTH_DAY_PATTERN.finditer(str(source_text or ""))
+        )
+    return False
 
 
 def _year_from_date(value) -> int:
@@ -1906,9 +1999,9 @@ def _is_date_fragment(condition: str) -> bool:
         return True
     if re.match(r"^(0?[1-9]|1[0-2])月$", value):
         return True
-    if re.match(r"^(0?[1-9]|[12]\d|3[01])日(起|内|前|后)?$", value):
+    if re.match(r"^(3[01]|[12]\d|0?[1-9])日(起|内|前|后)?$", value):
         return True
-    return bool(re.match(r"^(至|自)?(0?[1-9]|1[0-2])月(0?[1-9]|[12]\d|3[01])日(起|内|前|后)?$", value))
+    return bool(re.match(r"^(至|自)?(1[0-2]|0?[1-9])月(3[01]|[12]\d|0?[1-9])日(起|内|前|后)?$", value))
 
 
 def _looks_like_timeline_term(snippet: str) -> bool:
@@ -1920,23 +2013,41 @@ def _looks_like_timeline_term(snippet: str) -> bool:
     return any(keyword in snippet for keyword in keywords)
 
 
-def _timeline_type(clause_type: str | None, quote: str) -> str:
-    text = f"{clause_type or ''} {quote}".upper()
-    if "ACCEPTANCE" in text or "验收" in quote:
-        return "ACCEPTANCE"
-    if "TERMINATION" in text or any(k in quote for k in ("终止", "解除", "到期", "期满")) or (
-        "不可抗力" in quote and any(k in quote for k in ("解除", "终止", "无法继续履行", "协商解除"))
+def _timeline_type(clause_type: str | None, quote: str, anchor: str | None = None) -> str:
+    """Classify the obligation for one date or condition candidate.
+
+    A single clause commonly contains both a supplier's delivery and the
+    customer's later acceptance. Looking only for the word ``验收`` in the
+    whole excerpt incorrectly turns the delivery event into ACCEPTANCE.
+    """
+    focus = str(quote or "")
+    anchor_text = str(anchor or "").strip()
+    if anchor_text and anchor_text in focus:
+        position = focus.find(anchor_text)
+        left = max(focus.rfind(mark, 0, position) for mark in ("。", "；", ";", "\n")) + 1
+        right_candidates = [focus.find(mark, position) for mark in ("。", "；", ";", "\n")]
+        right = min((value for value in right_candidates if value >= 0), default=len(focus))
+        focus = focus[left:right]
+    text = f"{clause_type or ''} {focus}".upper()
+    if "TERMINATION" in text or any(k in focus for k in ("终止", "解除", "到期", "期满")) or (
+        "不可抗力" in focus and any(k in focus for k in ("解除", "终止", "无法继续履行", "协商解除"))
     ):
         return "TERMINATION"
-    if "PAYMENT" in text or any(k in quote for k in ("付款", "支付", "发票", "费用", "价款", "结算")):
+    if "PAYMENT" in text or any(k in focus for k in ("付款", "支付", "发票", "费用", "价款", "结算")):
         return "PAYMENT"
-    if "DELIVERY" in text or any(k in quote for k in ("交付", "服务", "完成", "履行")):
+    if "生效" in focus:
+        return "CONTRACT_START"
+    if any(k in focus for k in ("交付", "提交", "完成", "履行", "服务")):
         return "DELIVERY"
-    if "NOTICE" in text or "通知" in quote:
+    if "ACCEPTANCE" in text or "验收" in focus:
+        return "ACCEPTANCE"
+    if "DELIVERY" in text:
+        return "DELIVERY"
+    if "NOTICE" in text or "通知" in focus:
         return "NOTICE"
-    if any(k in quote for k in ("续签", "续约")):
+    if any(k in focus for k in ("续签", "续约")):
         return "RENEWAL"
-    if any(k in quote for k in ("逾期", "违约金", "赔偿")):
+    if any(k in focus for k in ("逾期", "违约金", "赔偿")):
         return "PENALTY"
     return "OTHER"
 

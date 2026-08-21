@@ -146,6 +146,11 @@ def test_date_rule():
     ok = er.date_rule({"documentDate": "2026-02-15"}, deadline="2026-03-01",
                       effective_date="2025-08-15")
     assert ok["status"] == "PASS"
+    content_date = er.date_rule(
+        {"contentText": "交付回执：已于2026-02-28提交并签章"},
+        deadline="2026-03-01", effective_date="2025-08-15",
+    )
+    assert content_date["code"] == "DATE_OK"
 
 
 def test_amount_rule():

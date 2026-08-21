@@ -147,6 +147,30 @@ def _node_output_summary(
     }
 
 
+def _node_token_usage(channel_values: dict[str, Any], node_name: str) -> tuple[int, int]:
+    """Return real prompt/completion usage for one graph node.
+
+    Usage is deliberately keyed by node rather than read from the cumulative
+    WorkUnit budget, because a cumulative value would be double-counted on
+    every checkpoint.
+    """
+    usage_map = channel_values.get("llm_usage") or {}
+    if not isinstance(usage_map, dict):
+        return 0, 0
+    usage = usage_map.get(node_name) or {}
+    if not isinstance(usage, dict):
+        return 0, 0
+    try:
+        prompt = max(0, int(usage.get("promptTokens") or usage.get("prompt_tokens") or 0))
+    except (TypeError, ValueError):
+        prompt = 0
+    try:
+        completion = max(0, int(usage.get("completionTokens") or usage.get("completion_tokens") or 0))
+    except (TypeError, ValueError):
+        completion = 0
+    return prompt, completion
+
+
 # LangGraph Checkpoint type (TypedDict, but we use dict at runtime)
 # Checkpoint: {v, id, ts, channel_values, channel_versions, versions_seen, updated_channels}
 # CheckpointMetadata: {source, step, parents}
@@ -353,6 +377,7 @@ class MySqlCheckpointSaver:
                                 logger.debug("Agent run snapshot hash update skipped: %s", snapshot_exc)
 
                         sequence_no = max(0, state_revision)
+                        token_input, token_output = _node_token_usage(channel_values, node_name)
                         input_summary = self._serde.dumps(
                             _node_input_summary(channel_values, node_name)
                         )
@@ -371,6 +396,7 @@ class MySqlCheckpointSaver:
                                        output_hash=%s, output_summary=%s,
                                        finished_at=NOW(), latency_ms=COALESCE(latency_ms, 0),
                                        llm_model=%s, prompt_version=%s,
+                                       token_input=%s, token_output=%s,
                                        error_message=%s
                                    WHERE run_id=%s AND sequence_no=%s""",
                                 (
@@ -380,6 +406,8 @@ class MySqlCheckpointSaver:
                                     output_summary,
                                     str(channel_values.get("model") or "")[:128],
                                     str(channel_values.get("prompt_version") or channel_values.get("promptVersion") or "")[:64],
+                                    token_input,
+                                    token_output,
                                     str((channel_values.get("errors") or [{}])[-1].get("error") or "")[:4000]
                                     if channel_values.get("errors") else None,
                                     run_id,
@@ -392,8 +420,8 @@ class MySqlCheckpointSaver:
                                        (run_id, node_name, node_type, sequence_no, attempt,
                                         status, input_hash, output_hash, started_at, finished_at,
                                         latency_ms, llm_model, prompt_version, input_summary,
-                                        output_summary, error_message)
-                                       VALUES (%s,%s,'GRAPH_NODE',%s,1,%s,%s,%s,NOW(),NOW(),%s,%s,%s,%s,%s,%s)""",
+                                        output_summary, token_input, token_output, error_message)
+                                       VALUES (%s,%s,'GRAPH_NODE',%s,1,%s,%s,%s,NOW(),NOW(),%s,%s,%s,%s,%s,%s,%s,%s)""",
                                     (
                                         run_id,
                                         node_name,
@@ -406,6 +434,8 @@ class MySqlCheckpointSaver:
                                         str(channel_values.get("prompt_version") or channel_values.get("promptVersion") or "")[:64],
                                         input_summary,
                                         output_summary,
+                                        token_input,
+                                        token_output,
                                         str((channel_values.get("errors") or [{}])[-1].get("error") or "")[:4000]
                                         if channel_values.get("errors") else None,
                                     ),

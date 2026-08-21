@@ -13,6 +13,8 @@ import re
 import time
 from typing import Any
 
+from ..state import merge_llm_usage
+
 # Task 6: conclusions the AI may never produce — not even as a suggestion.
 _FORBIDDEN_AI_CONCLUSIONS = {"COMPLETED", "FAILED", "ACCEPTED", "REJECTED"}
 _ALLOWED_AI_CONCLUSIONS = {
@@ -184,6 +186,7 @@ def _suggest_with_llm(state: dict[str, Any], rule_results: list[dict[str, Any]])
             run_id=int(state.get("run_id") or 0),
         )
         normalized = normalize_ai_suggestion(artifact)
+        normalized["llmUsage"] = artifact.get("_llmUsage") or {}
         normalized["durationMs"] = int((time.monotonic() - started) * 1000)
         return normalized
     except Exception as exc:
@@ -459,4 +462,7 @@ def judge_each_requirement(state: dict[str, Any]) -> dict[str, Any]:
             "fulfillmentAssessment": assessment,
         },
         "fulfillment_ai": ai,
+        "llm_usage": merge_llm_usage(
+            state, "judge_each_requirement", ai.get("llmUsage") or {}
+        ),
     }

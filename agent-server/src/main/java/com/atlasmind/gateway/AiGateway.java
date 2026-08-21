@@ -43,4 +43,6 @@ public interface AiGateway {
     Map<String, Object> health();
 
     void runEvaluation(Long evalRunId);
+
+    Map<String, Object> recomputeEvaluationGates(Map<String, Object> payload);
 }

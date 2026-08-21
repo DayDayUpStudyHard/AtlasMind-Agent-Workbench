@@ -10,6 +10,7 @@ from typing import Any
 from ...harness.budget import record_unit_usage
 from ...harness.retrieval import dedupe_pool, normalize_hit, run_async
 from .fulfillment_judge import _match_score
+from ..state import merge_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -799,6 +800,7 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
             return key, fallback, "FALLBACK", str(exc), usage_out
 
     usage = dict(state.get("work_unit_usage") or {})
+    draft_usage: dict[str, int] = {"calls": 0, "promptTokens": 0, "completionTokens": 0, "tokens": 0}
     results: dict[str, tuple[list[dict[str, Any]], str, str]] = {}
     with ThreadPoolExecutor(max_workers=min(3, max(1, len(domain_tasks)))) as executor:
         future_map = {executor.submit(_analyze, task): task for task in domain_tasks}
@@ -810,6 +812,11 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
                 llm_calls=int(call_usage.get("calls") or 0),
                 tokens=int(call_usage.get("tokens") or 0),
             )
+            for field in draft_usage:
+                try:
+                    draft_usage[field] += max(0, int(call_usage.get(field) or 0))
+                except (TypeError, ValueError):
+                    pass
 
     draft: list[dict[str, Any]] = []
     domain_analysis: dict[str, dict[str, Any]] = {}
@@ -878,4 +885,5 @@ def draft_domain_findings(state: dict[str, Any]) -> dict[str, Any]:
         "domain_analysis": domain_analysis,
         "observations": observations,
         "work_unit_usage": usage,
+        "llm_usage": merge_llm_usage(state, "draft_domain_findings", draft_usage),
     }

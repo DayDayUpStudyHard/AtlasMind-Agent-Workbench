@@ -37,6 +37,7 @@ from ..contract_document_parser import (
     _enrich_timeline_nodes,
     _extract_clause_timeline_nodes_v2,
     _json,
+    _timeline_date_is_grounded,
     _year_from_date,
 )
 from ..harness.graph_builder import build_task_graph
@@ -44,6 +45,7 @@ from ..harness.models import Role, TaskSpec
 from ..persistence import new_connection
 from .nodes.context import freeze_case_snapshot, load_run_context
 from .versioning import stamp_artifact_versions
+from .state import merge_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +316,9 @@ def enrich_timeline_candidates(state: dict[str, Any]) -> dict[str, Any]:
         "current_node": "enrich_timeline_candidates",
         "timeline_candidates": enriched,
         "timeline_enrichment": enrichment,
+        "llm_usage": merge_llm_usage(
+            state, "enrich_timeline_candidates", enrichment.get("llmUsage") or {}
+        ),
         "observations": [{
             "callId": f"timeline-llm-{state.get('run_id', 0)}",
             "planStepId": "enrich_timeline_candidates",
@@ -342,6 +347,7 @@ def validate_timeline_nodes(state: dict[str, Any]) -> dict[str, Any]:
     start = time.monotonic()
     nodes = list(state.get("timeline_candidates") or [])
     clauses = state.get("timeline_clauses") or []
+    scope = state.get("timeline_scope") or {}
     clause_text_by_id = {
         str(clause.get("id")): str(clause.get("content") or "")
         for clause in clauses
@@ -375,6 +381,21 @@ def validate_timeline_nodes(state: dict[str, Any]) -> dict[str, Any]:
             citation["quoteUngrounded"] = True
             node["status"] = "NEEDS_REVIEW"
             ungrounded_quotes += 1
+
+        if node.get("date") and not _timeline_date_is_grounded(
+            node.get("date"),
+            full_text or quote,
+            citation.get("extractionMode"),
+            node.get("condition"),
+            scope.get("effectiveDate"),
+        ):
+            # A date that cannot be quoted or deterministically reproduced is
+            # never safe to publish. Keep the real condition for review, but
+            # remove the fabricated date from the formal schedule.
+            citation["dateUngrounded"] = True
+            citation.setdefault("issues", []).append("日期未在合同原文中落地")
+            node["date"] = None
+            node["status"] = "NEEDS_REVIEW"
 
         if node.get("date") is None:
             conditional_count += 1

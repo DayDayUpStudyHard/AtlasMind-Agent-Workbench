@@ -18,6 +18,7 @@ from typing import Any
 
 from .benchmark import BenchmarkDataset, BenchmarkDatasetError, canonical_json, load_benchmark_dataset
 from .metrics import build_release_gate
+from .specs import legacy_expected_findings
 from .versioning import EVAL_SCORER_VERSION
 
 
@@ -56,14 +57,15 @@ def compare_snapshots(
         failed = ", ".join(key for key, matches in compatibility.items() if not matches)
         raise BenchmarkDatasetError(f"runs are not comparable: {failed} differs")
 
-    metric_keys = (
-        "highRiskRecall",
-        "dualCitationRate",
-        "falsePositiveRate",
-        "schemaValidRate",
-    )
     left_summary = left.get("summary") or {}
     right_summary = right.get("summary") or {}
+    left_task_metrics = left_summary.get("taskMetrics") if isinstance(left_summary.get("taskMetrics"), dict) else {}
+    right_task_metrics = right_summary.get("taskMetrics") if isinstance(right_summary.get("taskMetrics"), dict) else {}
+    metric_keys = tuple(sorted(set(left_task_metrics) | set(right_task_metrics))) or (
+        "highRiskRecall", "dualCitationRate", "falsePositiveRate", "schemaValidRate",
+    )
+    left_metrics = left_task_metrics or left_summary
+    right_metrics = right_task_metrics or right_summary
     return {
         "leftRunId": left.get("runId"),
         "rightRunId": right.get("runId"),
@@ -71,9 +73,9 @@ def compare_snapshots(
         "compatibility": compatibility,
         "metrics": {
             key: {
-                "left": left_summary.get(key),
-                "right": right_summary.get(key),
-                "delta": _metric_delta(left_summary.get(key), right_summary.get(key)),
+                "left": left_metrics.get(key),
+                "right": right_metrics.get(key),
+                "delta": _metric_delta(left_metrics.get(key), right_metrics.get(key)),
             }
             for key in metric_keys
         },
@@ -163,13 +165,47 @@ def _import_dataset_snapshot(dataset: BenchmarkDataset) -> int:
             )
             existing = cur.fetchone()
             if existing:
-                return int(existing["id"])
+                # Repair snapshots imported before the fulfillment-specific
+                # columns were wired into the importer. Keep the dataset
+                # identity stable while restoring its declared case inputs.
+                dataset_id = int(existing["id"])
+                for case in dataset.cases:
+                    raw = case.raw
+                    if not any(
+                        raw.get(key) is not None
+                        for key in (
+                            "targetTimelineSelectorJson",
+                            "fulfillmentEvidenceJson",
+                            "expectedJudgementsJson",
+                            "expectedManualResult",
+                        )
+                    ):
+                        continue
+                    cur.execute(
+                        """UPDATE agent_eval_case
+                           SET fulfillment_evidence_json=%s,
+                               target_timeline_selector_json=%s,
+                               expected_judgements_json=%s,
+                               expected_manual_result=%s
+                           WHERE dataset_id=%s AND case_key=%s""",
+                        (
+                            canonical_json(raw.get("fulfillmentEvidenceJson") or []),
+                            canonical_json(raw.get("targetTimelineSelectorJson") or {}),
+                            canonical_json(raw.get("expectedJudgementsJson") or []),
+                            str(raw.get("expectedManualResult") or "").upper(),
+                            dataset_id,
+                            case.case_id,
+                        ),
+                    )
+                conn.commit()
+                return dataset_id
 
             cur.execute(
                 """INSERT INTO agent_eval_dataset
                    (name, version, description, contract_type, task_purpose, case_count, status,
-                    dataset_hash, schema_version, source_uri, published_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,'FROZEN',%s,%s,%s,NOW())""",
+                    dataset_hash, schema_version, source_uri, published_at, benchmark_profile_json,
+                    label_status, private_corpus, target_case_count)
+                   VALUES (%s,%s,%s,%s,%s,%s,'FROZEN',%s,%s,%s,NOW(),%s,%s,%s,%s)""",
                 (
                     dataset.manifest["name"],
                     dataset.manifest["version"],
@@ -180,6 +216,10 @@ def _import_dataset_snapshot(dataset: BenchmarkDataset) -> int:
                     dataset.dataset_hash,
                     int(dataset.manifest["schemaVersion"]),
                     dataset.root.as_posix(),
+                    canonical_json(dataset.manifest.get("profile") or {}),
+                    str(dataset.manifest.get("labelStatus") or "APPROVED").upper(),
+                    int(bool(dataset.manifest.get("privateCorpus", False))),
+                    int(dataset.manifest.get("targetCaseCount") or len(dataset.cases)),
                 ),
             )
             dataset_id = int(cur.lastrowid)
@@ -190,15 +230,21 @@ def _import_dataset_snapshot(dataset: BenchmarkDataset) -> int:
                        (dataset_id, case_key, title, contract_type, contract_text,
                         expected_findings_json, should_not_find_json, expected_citation_count,
                         scenario, industry, difficulty, noise_level,
-                        must_have_contract_citation, must_have_policy_citation, status)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE')""",
+                        must_have_contract_citation, must_have_policy_citation,
+                        expected_output_json, annotation_status, candidate_label_json,
+                        label_provider, label_model, label_prompt_version,
+                        fulfillment_evidence_json, target_timeline_selector_json,
+                        expected_judgements_json, expected_manual_result, status)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE')""",
                     (
                         dataset_id,
                         case.case_id,
                         str(raw.get("title") or case.case_id),
                         str(raw.get("contractType") or "SERVICE_PROCUREMENT"),
                         str(raw["contractText"]),
-                        canonical_json(raw.get("expectedFindings") or []),
+                        canonical_json(raw.get("expectedFindings") or legacy_expected_findings(
+                            {"expected_output_json": canonical_json(raw.get("expected") or {})}, dataset.task_type
+                        )),
                         canonical_json(raw.get("shouldNotFind") or []),
                         int(raw.get("expectedCitationCount") or 0),
                         str(raw.get("scenario") or ""),
@@ -207,6 +253,16 @@ def _import_dataset_snapshot(dataset: BenchmarkDataset) -> int:
                         str(raw.get("noiseLevel") or ""),
                         int(bool(raw.get("mustHaveContractCitation", False))),
                         int(bool(raw.get("mustHavePolicyCitation", False))),
+                        canonical_json(raw.get("expected") or {}),
+                        str(raw.get("annotationStatus") or dataset.manifest.get("labelStatus") or "APPROVED").upper(),
+                        canonical_json(raw.get("candidateLabel") or {}),
+                        str((raw.get("labelSource") or {}).get("provider") or ""),
+                        str((raw.get("labelSource") or {}).get("model") or ""),
+                        str((raw.get("labelSource") or {}).get("promptVersion") or ""),
+                        canonical_json(raw.get("fulfillmentEvidenceJson") or []),
+                        canonical_json(raw.get("targetTimelineSelectorJson") or {}),
+                        canonical_json(raw.get("expectedJudgementsJson") or []),
+                        str(raw.get("expectedManualResult") or "").upper(),
                     ),
                 )
             conn.commit()

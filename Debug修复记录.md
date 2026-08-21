@@ -4643,3 +4643,231 @@ Run #70 首次通过发布门禁后，需要确认结果不是单次偶然成功
 | `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-1.json` | 新增 | Run #71 重复评测结果 |
 | `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-2.json` | 新增 | Run #72 重复评测结果 |
 | `tools/chat-assistant/backend/benchmark-results/contract-review-v1-langgraph-p4-repeat-3.json` | 新增 | Run #73 重复评测结果 |
+
+---
+
+## 2026-08-21：五项核心能力统一 Benchmark 与私有候选金标
+
+### 问题
+
+评测中心此前主要覆盖风险审查，且不同能力共用风险 findings 的期望结构与评分口径，无法可靠衡量首次识别、动态要素、履约日程和履约核验。现有合同可用于本地评测，但合同正文与候选标注不能进入代码仓库，也需要区分模型候选答案与人工最终金标。
+
+### 根因与修复
+
+1. **建立统一 Benchmark schema v2 与任务契约**
+   - 新增 `BenchmarkTaskSpec`，为首次识别、要素提取、履约日程、风险审查、履约核验分别声明执行计划、期望结构、主指标和发布门禁。
+   - v2 用任务专属 expected 字段替代风险审查独占的 `expectedFindings`：`intakeFields`、`elements`、`timelineNodes`、`risks`、`fulfillment`。
+   - 风险 v1 数据集及其历史 `release-gate-v1` 保持兼容，避免历史基线不可比较。
+
+2. **引入候选金标与人工确认生命周期**
+   - V040 为数据集和用例增加 profile、私有语料、来源哈希、候选标注、标注模型/提示词、审阅人和审阅时间字段。
+   - `PROVISIONAL` / `CANDIDATE` 用例可用于观察评测，但不能成为生产发布基线；v2 发布门禁要求至少 10 个 `APPROVED` 用例。
+   - 管理端用例详情可查看候选答案与 expected output，并可将候选标注确认成 `APPROVED`。
+
+3. **统一评分、比较和管理端展示**
+   - Python 运行器按任务聚合 `taskMetrics`，写入 schema 版本、任务标签、已确认/候选用例数。
+   - CLI 比较优先使用任务专属指标；管理端列表、详情、逐 case 与比较视图按任务显示指标，不再把非风险任务伪装成风险召回率。
+
+4. **构建本地私有评测集**
+   - 增加本地生成器和标注规范，私有目录 `benchmark-private/` 已加入 `.gitignore`。
+   - `core-v1` 共 36 份合同：工程/EPC 18、服务 7、货物 5、软件/IT 4、其他 2；现有本地真实合同不足的部分明确标记为 `SYNTHETIC_EXTENSION`，不伪装为生产样本。
+   - 已导入五个核心数据集：首次识别/要素/日程/风险各 36 case，履约核验 24 case，共 168 case；所有初始标注均为待人工确认的候选标注。
+
+5. **运行环境预检与自动队列**
+   - 新增单队列启动脚本，按首次识别、要素、日程、风险、履约核验顺序运行，避免 LLM、Embedding、重排序与 Elasticsearch 并发争抢。
+   - 首次自动启动 Run #74-#78 时，环境门禁正确阻止了 Elasticsearch 不可用情况下的降级评测，记录为 `ENVIRONMENT_UNAVAILABLE`，没有产生无效质量结果。
+   - 根因是 Docker Desktop 未运行，`localhost:9200` 无 Elasticsearch；启动仅 Elasticsearch 容器、恢复 `contract_chunks` 索引（3,247 条证据）后，LLM、Embedding、ES 预检均为 `READY`。
+   - 已自动重新排队 Run #79-#83；Run #79 正在执行首次识别，后续任务按单队列等待。实际完成结果、耗时和任务指标将在运行结束后写回评测中心。
+
+### 验证结果
+
+- Python 全量测试：`433 passed, 1 warning`。
+- 私有数据集 v2 文件校验通过；五个数据集已导入：#27-#31。
+- `python -m py_compile scripts/build_private_benchmark_corpus.py scripts/start_private_benchmark_runs.py` 通过。
+- Java 后端编译及管理端构建通过。
+- 数据库迁移 `V040` 已应用；Python AI 服务与 Java 管理端已重启并加载新代码。
+- 运行时健康探针：DeepSeek、Qwen3-Embedding-8B、Elasticsearch 均为 `ok`。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|------|------|------|
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/specs.py` | 新增 | 五项核心任务的 Benchmark 契约 |
+| `tools/chat-assistant/backend/migrations/V040__benchmark_task_contracts.sql` | 新增 | 候选/人工金标和私有语料元数据 |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/*.py` | 修改 | v2 校验、运行、评分、比较兼容 |
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | 任务指标汇总与运行写入 |
+| `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java` | 修改 | 标注确认与 v2 查询 |
+| `agent-admin/src/views/EvalCenter.vue` | 修改 | 按任务指标展示与金标确认入口 |
+| `docs/benchmark-labeling-spec-v1.md` | 新增 | 私有评测标注规范 |
+| `scripts/build_private_benchmark_corpus.py` | 新增 | 本地私有语料构建 |
+| `scripts/start_private_benchmark_runs.py` | 新增 | 单队列自动评测启动 |
+
+## 2026-08-21：履约评测字段、节点选择与基础设施失败分类修复
+
+### 问题
+
+五项核心 Benchmark 自动评测后，履约核验集仍出现大量用例失败。初步表现像是履约节点选择失败，但继续排查发现还叠加了中文日期评分不识别，以及模型服务余额不足被当作普通任务失败的问题。
+
+### 根因与修复
+
+1. **履约评测导入字段不完整**
+   - `_import_dataset_snapshot()` 漏写 `fulfillment_evidence_json`、`target_timeline_selector_json`、`expected_judgements_json` 和 `expected_manual_result`。
+   - 已补齐导入字段，并对已存在数据集增加幂等补齐逻辑；履约数据集 24 个 case 已完成字段补齐。
+
+2. **履约节点 selector 过度依赖类型和标签**
+   - 旧逻辑要求 `nodeType` 与 label 同时匹配，但时间节点 Agent 可能把同一事实分类为 `ACCEPTANCE`，或将标签改写为“验收节点”。
+   - 已改为先做完整 selector 精确匹配；仅在类型导致不匹配时去掉类型约束；最终仍必须唯一匹配，禁止按最新节点或任意节点兜底。
+   - 增加 `businessMeaningContains`，私有履约集已更新为每个 case 的完整履约义务短语，避免泛化“交付”导致 0 个或多个节点匹配。
+
+3. **中文日期未参与履约日程评分**
+   - 评分器原来只识别 `YYYY-MM-DD`，无法比较 `2017年11月30日` 和中文数字日期。
+   - 新增统一日期解析，支持短横线、斜线、中文年月日和中文数字日期后再比较。
+
+4. **模型余额/鉴权错误未被归为基础设施失败**
+   - `_is_infra_error()` 已识别余额不足、402、401/403、认证失败、超时、连接拒绝和服务不可用等错误。
+   - 这样评测结果会进入环境失败审计，不会把供应商不可用误算为召回率、准确率或履约判断质量。
+
+### 评测结果与结论
+
+- Run 84：使用旧履约字段，selector 不兼容导致大量失败。
+- Run 85：放宽类型/标签匹配后，24 例中 9 例成功，仍有 15 例因泛化 selector 无匹配或多匹配失败。
+- Run 86：使用 `businessMeaningContains: 交付` 后，13 例成功，11 例仍受泛词匹配影响。
+- Run 87：使用每个 case 的完整履约义务短语后，selector 错误基本消失；23 例失败均发生在正式履约日程 LLM 语义复核阶段，直接原因是 DeepSeek 返回 HTTP 402 `Insufficient Balance`，不是履约 selector 或评分器错误。
+- 余额恢复前不继续重跑履约集，避免浪费额度；Run 87 不作为履约能力质量基线。
+
+### 验证
+
+- 履约/日期/selector/供应商错误分类定向测试：13 passed。
+- Python 全量测试：442 passed，1 warning。
+- 相关 Python 文件语法检查通过。
+- AI 服务可访问 `/openapi.json`；`/health` 不是该服务的根路径，不能用其 404 判断服务不可用。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | selector 唯一匹配、日期归一化、基础设施错误分类 |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/cli.py` | 修改 | 补齐履约评测快照字段并支持幂等修复 |
+| `tools/chat-assistant/backend/tests/test_evaluation.py` | 修改 | 增加履约字段、日期、selector 和基础设施失败回归测试 |
+
+## 2026-08-21：履约核验 Benchmark 语义分类、日期解析与超时生命周期修复
+
+### 问题
+
+DeepSeek 余额恢复后，履约核验私有候选集首次真实运行（Run #88）仍只有部分 case 完成。排查确认这不是单一模型质量问题，而是时间节点抽取、Benchmark selector、日期正则和评测运行生命周期四处叠加：
+
+1. 包含“验收申请”的供应商交付义务会被错误归为 `ACCEPTANCE`，导致履约 selector 无法定位应核验的 `DELIVERY` 节点。
+2. 日期正则的分支顺序错误，将 `2026-01-10`、`2026-03-14` 截断识别为当月 1 日，进而产生重复或错误日程节点。
+3. 证明材料的日期只在文档正文中时，证据规则只读取数据库日期元数据，无法验证是否在履约截止日之前。
+4. 多阶段用例的每个 Agent 阶段各自可消耗完整超时预算；外部时间节点 LLM 调用卡住后，`agent_run` 已创建但尚未返回给 Harness，评测只能人工收尾并拖延后续队列。
+
+### 根因与修复
+
+1. **交付/验收语义区分**
+   - 时间节点 LLM 提示词明确增加 `DELIVERY`，并规定供应商交付、提交、报送文件与客户验收不是同一类事实。
+   - 规则已可靠识别的交付节点优先保留 `DELIVERY`，分类改为基于义务锚点句和动作词，而不是全文出现“验收”就归为 `ACCEPTANCE`。
+   - 增加 `CONTRACT_START` 对“生效”节点的确定性分类。
+
+2. **完整日期解析与证据日期回退**
+   - 将日/月正则调整为先匹配两位日期，覆盖 10、14、31 等值，避免被单数字分支提前截断。
+   - 证据日期规则在元数据缺失时，从 `content` / `contentText` 解析正文日期；私有证明材料改为可解析 PDF，并提供具体日期、义务表述及签章文字。
+
+3. **履约评分语义匹配**
+   - 新增履约义务匹配器，按义务文本、动作词和日期共同匹配，避免复用泛化的要素文本匹配导致交付/验收节点误配。
+
+4. **Benchmark 单用例超时收口**
+   - Agent 阶段创建后立即把 `run_id` 注册到当前用例，超时发生在 dispatch 返回前也能被标记为 `FAILED`，不遗留 `RUNNING` 行。
+   - 整个多阶段用例共享一个 wall-clock timeout；后续阶段和人工 resume 只使用剩余预算，不能让“日程提取 + 履约核验”各自占满完整超时。
+   - 超时继续按 `INFRA_FAILED` 记录，计入 `infraFailedCount`，不污染抽取/判断质量分母，评测运行自动以 `DEGRADED` 收口。
+
+### 评测结果与结论
+
+- Run #89、#90 是修复过程中的取消诊断运行：分别运行在服务重启前和日期正则修复前，仅保留审计记录，不作为基线。
+- Run #91 在余额、Embedding、Elasticsearch 均可用的环境下完成 `24/24`，无任务失败：义务召回 `91.67%`、引用覆盖 `100%`、误报 `0%`、Schema `100%`、人工结果一致 `100%`。
+- Run #91 的 `judgementAccuracy=8.33%`、`restraintRate=0%`，发布门禁正确阻断。该集 24 条仍为 `PROVISIONAL` 候选标注，不能据此声明真实模型能力或设为生产基线；应由人工先确认金标，再针对 AI 建议判断和证据不足处理做质量优化。
+- 五项核心任务的首次真实 Benchmark 均已跑通：Run #79 首次识别、#80 要素提取、#81 日程提取、#82 风险审查、#91 履约核验。所有候选集均未达到 `APPROVED >= 10` 的发布门槛，符合私有评测治理约束。
+
+### 验证
+
+- 履约、日程、评分与超时 Harness 专项：`105 passed, 1 warning`。
+- Python 后端全量：`447 passed, 1 warning`。
+- Run #91 已自动完成并写入管理端，`passed_count=24`、`failed_count=0`、`infraFailedCount=0`。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `tools/chat-assistant/backend/app/services/llm_service.py` | 修改 | 时间节点的交付/验收语义约束 |
+| `tools/chat-assistant/backend/app/agent_runtime/contract_document_parser.py` | 修改 | 交付节点保留、锚点分类和完整日期正则 |
+| `tools/chat-assistant/backend/app/agent_runtime/graph/nodes/evidence_rules.py` | 修改 | 证据正文日期回退解析 |
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | 履约义务评分、单用例 wall-clock timeout 和运行收口 |
+| `scripts/build_private_benchmark_corpus.py` | 修改 | 私有证明材料使用可解析 PDF |
+| `tools/chat-assistant/backend/tests/test_contract_document_parser.py` | 修改 | 交付分类和两位日期回归 |
+| `tools/chat-assistant/backend/tests/test_evaluation.py` | 修改 | 履约语义评分、selector、日期和单用例超时回归 |
+| `tools/chat-assistant/backend/tests/test_fulfillment_check_v2.py` | 修改 | 证明日期规则回归 |
+
+## 2026-08-22：评测口径 v4、存量重算与四状态拆分
+
+### 修复
+
+- 将评测运行状态、质量状态、金标状态、发布状态拆开保存到 `releaseGate`：运行完成不再被错误显示为“运行阻断”，质量失败、金标未确认和发布不可用分别展示。
+- 管理端将“运行阻断”改为“不可发布”，并按任务显示当前任务自己的质量、金标和发布状态。
+- 首次识别独立统计主体角色、金额、日期、合同标题；按金标字段 `key/kind/value` 匹配，不再把四类字段全部复用通用要素召回。
+- 履约核验分别统计 `proofStatus`、`judgement`、`aiSuggestion`。没有对应金标的维度记为“未观测”，不把未标注误判成模型答错；证据不足克制率使用规范化后的状态值。
+- `LIMITED` 仅在影响当前评测目标域时阻断；风险审查会比较预期风险维度与实际发现，其它任务仍按目标任务完整性处理。
+- 候选私有评测集采用任务专属候选发布门槛，门槛降低只影响发布判断，不改变任何指标的分子、分母或已保存模型输出；门槛版本升级为 `release-gate-v4`，评分器升级为 `eval-scorers-v4`。
+
+### 存量重算
+
+- 新增 `POST /internal/agent/evaluations/recompute-gates` 和管理端代理接口，直接读取已保存的 `result_json` 重算评分、任务指标和发布门禁，不重新调用 Agent、LLM、Embedding、重排序或 Elasticsearch。
+- 已重算 Run #79、#80、#81、#82、#91。旧指标仍保留在历史记录中，当前结果明确标记 `scorerVersion=eval-scorers-v4` 和 `agentExecutionReused=true`，新旧口径不可直接混比。
+
+### 验证
+
+- Python 后端：`451 passed`。
+- 管理端 Vite 构建通过。
+- Java 后端 Maven compile 通过。
+
+## 2026-08-22：TIM-011 履约日程日期截断与未知触发日期修复
+
+### 问题
+
+履约日程评测用例 `TIM-011`（评测用例 ID `391`，历史 Agent Run `968`）中，合同原文明确写有：
+
+- `合同自2026-01-16起生效`
+- `乙方应于2026-03-22前完成约定交付`
+
+但生成结果出现 `2026-01-01`、`2026-03-02`，并把“收到发票后10日内”错误计算成 `2026-01-26`。该问题属于 Agent 履约日程生成链路，不属于评分器问题。本次不修改任何评测指标、匹配规则或发布门禁。
+
+### 根因
+
+1. 日期正则中的单数字分支可能先匹配日期前缀，且末尾没有数字边界：`2026-03-22` 可被截断成 `2026-03-2`，随后归一化为 `2026-03-02`。
+2. 相对日期解析只看到同一候选中存在“合同生效后”和“10日内”，没有确认 10 日的直接触发条件，导致“合同生效后，收到发票后10日内”被错误绑定到合同生效日。
+3. 同一父条款可能同时包含付款、交付和验收，宽泛期限匹配和全条款关键词分类会让条件节点互相污染。
+4. 发布前没有检查生成的绝对日期是否能在引用原文中找到，无法拦截代码阶段产生的伪日期。
+
+### 修复
+
+1. 日期正则调整为两位日期分支优先，并增加末尾数字边界；日期 `10`、`14`、`16`、`22`、`30`、`31` 不再被截断。
+2. 相对日期只在“合同生效后10日”“合同签订后30日”等已知基准日期是期限直接触发条件时计算；“收到发票/申请/通知后”没有实际到达日期时保留 `date=null` 和原始条件。
+3. 条件清洗按发票、申请、验收、付款等局部语义锚点选择对应期限，避免同一条款中多个 `10日内` 相互串用。
+4. 履约日程校验增加日期落地检查：原文直接日期必须能在完整条款中归一化命中；代码推导日期必须能由已知基准日期和原始条件重新计算。无法验证的日期会被置空并标记 `NEEDS_REVIEW`，不会进入正式日期结果。
+
+### 验证
+
+- TIM-011 最小回归：`2026-01-16`、`2026-03-22` 正确保留；付款和验收均为无日期条件节点。
+- 日期截断回归：拒绝 `2026-01-160`、`2026-03-221`、`2026年06月300日` 的前缀误匹配。
+- 日期未落地回归：`2026-03-02` 在原文只有 `2026-03-22` 时被清除并标记待复核。
+- 履约日程与解析专项：`44 passed, 1 warning`。
+- Python 后端全量：`455 passed, 1 warning`。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `tools/chat-assistant/backend/app/agent_runtime/contract_document_parser.py` | 修改 | 日期边界、相对日期直接触发条件、局部条件锚点与候选生成校正 |
+| `tools/chat-assistant/backend/app/agent_runtime/graph/timeline_extraction.py` | 修改 | 正式发布前增加日期原文落地校验 |
+| `tools/chat-assistant/backend/tests/test_contract_document_parser.py` | 修改 | TIM-011、日期边界、付款/验收条件回归 |
+| `tools/chat-assistant/backend/tests/test_timeline_v2.py` | 修改 | 未落地日期不得发布回归 |
+
+历史评测 Run 的错误产物不会自动改变；修复后需要重新运行履约日程评测，才能观察新生成结果。

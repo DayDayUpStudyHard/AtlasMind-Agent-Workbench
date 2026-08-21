@@ -60,3 +60,6 @@ __pycache__/
 
 # Local one-off diagnostics
 scripts/_tmp_*
+
+# Private benchmark corpus: may contain real contracts and LLM candidate labels.
+benchmark-private/

@@ -571,6 +571,22 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         addColumnIfMissing("agent_eval_run", "execution_stack_json", "LONGTEXT");
         addColumnIfMissing("agent_eval_run", "is_production_baseline", "TINYINT NOT NULL DEFAULT 0");
         addColumnIfMissing("agent_eval_run", "promoted_at", "DATETIME NULL");
+        // Benchmark schema v2: task-owned gold labels and review lifecycle.
+        addColumnIfMissing("agent_eval_dataset", "benchmark_profile_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_dataset", "label_status", "VARCHAR(32) NOT NULL DEFAULT 'PROVISIONAL'");
+        addColumnIfMissing("agent_eval_dataset", "private_corpus", "TINYINT NOT NULL DEFAULT 0");
+        addColumnIfMissing("agent_eval_dataset", "target_case_count", "INT NOT NULL DEFAULT 0");
+        addColumnIfMissing("agent_eval_case", "expected_output_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_case", "annotation_status", "VARCHAR(32) NOT NULL DEFAULT 'PROVISIONAL'");
+        addColumnIfMissing("agent_eval_case", "source_case_id", "BIGINT NULL");
+        addColumnIfMissing("agent_eval_case", "source_document_id", "BIGINT NULL");
+        addColumnIfMissing("agent_eval_case", "source_document_hash", "CHAR(64) NULL");
+        addColumnIfMissing("agent_eval_case", "candidate_label_json", "LONGTEXT");
+        addColumnIfMissing("agent_eval_case", "label_provider", "VARCHAR(64) NULL");
+        addColumnIfMissing("agent_eval_case", "label_model", "VARCHAR(128) NULL");
+        addColumnIfMissing("agent_eval_case", "label_prompt_version", "VARCHAR(64) NULL");
+        addColumnIfMissing("agent_eval_case", "reviewed_by", "VARCHAR(128) NULL");
+        addColumnIfMissing("agent_eval_case", "reviewed_at", "DATETIME NULL");
         try {
             jdbcTemplate.execute("""
                     ALTER TABLE agent_eval_result

@@ -41,6 +41,9 @@ public class HttpAiGateway implements AiGateway {
     @Value("${atlasmind.chat-assistant.project-analysis-timeout-seconds:120}")
     private long projectAnalysisTimeoutSeconds;
 
+    @Value("${atlasmind.chat-assistant.evaluation-recompute-timeout-seconds:180}")
+    private long evaluationRecomputeTimeoutSeconds;
+
     @Override
     public void triggerIngest(Map<String, Object> payload) {
         post("/internal/kb/ingest/jobs", payload);
@@ -64,6 +67,12 @@ public class HttpAiGateway implements AiGateway {
     @Override
     public void runEvaluation(Long evalRunId) {
         post("/internal/agent/evaluations/run", Map.of("evalRunId", evalRunId));
+    }
+
+    @Override
+    public Map<String, Object> recomputeEvaluationGates(Map<String, Object> payload) {
+        return request("POST", "/internal/agent/evaluations/recompute-gates", payload,
+                evaluationRecomputeTimeoutSeconds);
     }
 
     @Override

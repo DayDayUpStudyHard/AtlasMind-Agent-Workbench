@@ -4,7 +4,7 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from app.agent_runtime.api_models import AgentTaskContext
 from app.agent_runtime.runtime import GraphAdapter, ResumeCommand, ResumeAction
-from app.agent_runtime.graph.checkpoint import MySqlCheckpointSaver
+from app.agent_runtime.graph.checkpoint import MySqlCheckpointSaver, _node_token_usage
 
 
 class _CompletedGraph:
@@ -34,6 +34,22 @@ def test_mysql_checkpoint_versions_are_strictly_monotonic():
     assert saver.get_next_version(1, None) == 2
     assert saver.get_next_version(7, None) == 8
     assert saver.get_next_version(1.5, None) > 1.5
+
+
+def test_checkpoint_reads_prompt_and_completion_tokens_for_current_node():
+    state = {
+        "llm_usage": {
+            "extract_element_batches": {
+                "calls": 2,
+                "promptTokens": 1200,
+                "completionTokens": 340,
+            },
+            "other_node": {"promptTokens": 999, "completionTokens": 999},
+        }
+    }
+
+    assert _node_token_usage(state, "extract_element_batches") == (1200, 340)
+    assert _node_token_usage(state, "missing_node") == (0, 0)
 
 
 def test_mysql_checkpoint_accepts_fulfillment_evidence_list(monkeypatch):
@@ -68,6 +84,12 @@ def test_mysql_checkpoint_accepts_fulfillment_evidence_list(monkeypatch):
                 "graph_version": "v1",
                 "evidence_snapshot": [{"documentId": 7}],
                 "analysis_workflow": [],
+                "llm_usage": {
+                    "prepare_human_confirmation": {
+                        "promptTokens": 11,
+                        "completionTokens": 7,
+                    }
+                },
             },
         },
         {"step": 9, "source": "loop"},
@@ -75,6 +97,7 @@ def test_mysql_checkpoint_accepts_fulfillment_evidence_list(monkeypatch):
     )
 
     assert any("INSERT INTO agent_graph_checkpoint" in sql for sql in executed)
+    assert any("token_input=%s" in sql and "token_output=%s" in sql for sql in executed)
 
 
 def test_graph_adapter_keeps_runtime_metadata_in_state_and_result(monkeypatch):

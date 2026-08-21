@@ -158,7 +158,14 @@ const router = useRouter()
 const message = useMessage()
 const keyword = ref('')
 const scrolled = ref(false)
-const adminUrl = import.meta.env.VITE_ADMIN_URL || '/admin/'
+// In local development the admin UI is a separate Vite app. A relative
+// /admin/ URL is handled by the front-end SPA on :15174 and falls back to
+// this app instead of opening the admin app on :15173.
+const adminUrl = import.meta.env.VITE_ADMIN_URL || (
+  window.location.port === '15174'
+    ? `${window.location.protocol}//${window.location.hostname}:15173/`
+    : '/admin/'
+)
 const notificationOpen = ref(false)
 const failureDialog = ref(null)
 const unreadCount = ref(0)

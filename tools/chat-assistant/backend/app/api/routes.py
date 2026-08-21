@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from difflib import SequenceMatcher
+from datetime import date
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -33,6 +35,13 @@ from app.services.llm_service import LLMService
 from app.agent_runtime.evaluation.versioning import EVAL_SCORER_VERSION
 from app.agent_runtime.evaluation.telemetry import aggregate_telemetry, case_telemetry, stage_telemetry
 from app.agent_runtime.evaluation.metrics import build_release_gate
+from app.agent_runtime.evaluation.specs import (
+    BENCHMARK_SCHEMA_VERSION,
+    expected_output,
+    get_benchmark_spec,
+    legacy_expected_findings,
+    normalize_task_type,
+)
 
 logger = logging.getLogger(__name__)
 HEALTH_PROBE_TIMEOUT_SECONDS = 15.0
@@ -2110,6 +2119,19 @@ def _is_infra_error(error: Any) -> bool:
         "api connection",
         "apiconnection",
         "apierror",
+        "insufficient balance",
+        "insufficient_balance",
+        "error code: 402",
+        "http 402",
+        "authenticationerror",
+        "authentication failed",
+        "authentication failure",
+        "error code: 401",
+        "error code: 403",
+        "http 401",
+        "http 403",
+        "401 unauthorized",
+        "403 forbidden",
         "embedding api",
         "request timed out",
         "timeout",
@@ -2120,28 +2142,7 @@ def _is_infra_error(error: Any) -> bool:
 
 
 def _eval_task_plan(dataset_type: str) -> list[str]:
-    raw = str(dataset_type or "").upper()
-    mapping = {
-        "CONTRACT_REVIEW": ["CONTRACT_REVIEW"],
-        "RISK_REVIEW": ["CONTRACT_REVIEW"],
-        "INTAKE": ["CONTRACT_ELEMENT_EXTRACTION"],
-        "ELEMENT_EXTRACTION": ["CONTRACT_ELEMENT_EXTRACTION"],
-        "CONTRACT_ELEMENT_EXTRACTION": ["CONTRACT_ELEMENT_EXTRACTION"],
-        "FULFILLMENT_TIMELINE": ["TIMELINE_EXTRACTION"],
-        "TIMELINE_EXTRACTION": ["TIMELINE_EXTRACTION"],
-        # Fulfillment verification is evidence-based.  It must first produce
-        # the target timeline node from the contract, then verify separately
-        # uploaded proof against that node.  Never mix proof text into the
-        # contract fixture just to make an evaluation executable.
-        "FULFILLMENT_CHECK": ["TIMELINE_EXTRACTION", "FULFILLMENT_CHECK"],
-        "FULFILLMENT_VERIFICATION": ["TIMELINE_EXTRACTION", "FULFILLMENT_CHECK"],
-        "COMPREHENSIVE": [
-            "CONTRACT_ELEMENT_EXTRACTION",
-            "TIMELINE_EXTRACTION",
-            "CONTRACT_REVIEW",
-        ],
-    }
-    return mapping.get(raw, ["CONTRACT_REVIEW"])
+    return list(get_benchmark_spec(dataset_type).task_plan)
 
 
 class EvalCaseConfigurationError(ValueError):
@@ -2737,6 +2738,126 @@ def _eval_fixture_intake_metadata(contract_text: str) -> dict[str, Any]:
     }
 
 
+def _recompute_eval_run_scores(eval_run_id: int) -> dict[str, Any]:
+    """Rescore persisted artifacts without executing any agent stage."""
+    from app.agent_runtime.persistence import _conn
+
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """SELECT r.id, r.status, r.summary_json, d.contract_type AS dataset_type
+                   FROM agent_eval_run r JOIN agent_eval_dataset d ON d.id=r.dataset_id
+                   WHERE r.id=%s""",
+                (eval_run_id,),
+            )
+            run = cur.fetchone()
+            cur.execute(
+                """SELECT ec.id, ec.case_key, ec.contract_type, ec.contract_text,
+                          ec.expected_findings_json, ec.should_not_find_json,
+                          ec.expected_output_json, ec.expected_judgements_json,
+                          ec.expected_manual_result, ec.annotation_status, ec.scenario,
+                          er.result_json, er.analysis_mode
+                   FROM agent_eval_result er JOIN agent_eval_case ec ON ec.id=er.case_id
+                   WHERE er.run_id=%s ORDER BY ec.id""",
+                (eval_run_id,),
+            )
+            rows = cur.fetchall()
+    if not run:
+        raise ValueError(f"evaluation run {eval_run_id} not found")
+    dataset_type = normalize_task_type(run.get("dataset_type"))
+    rescored: list[dict[str, Any]] = []
+    for item in rows:
+        try:
+            artifact = json.loads(item.get("result_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            artifact = {"artifactError": "invalid persisted result_json"}
+        score_mode = "CONTRACT_REVIEW" if dataset_type == "COMPREHENSIVE" else dataset_type
+        row = _score_eval_artifact(item, artifact, score_mode)
+        row["taskMetrics"] = _task_metrics(dataset_type, row)
+        row["benchmarkTaskType"] = dataset_type
+        row["limitedImpact"] = _limited_result_impacts_target_domain(item, artifact, dataset_type)
+        row["scorerVersion"] = EVAL_SCORER_VERSION
+        row["artifact"] = {
+            **artifact,
+            "taskMetrics": row["taskMetrics"],
+            "benchmarkTaskType": dataset_type,
+            "scorerVersion": EVAL_SCORER_VERSION,
+        }
+        _record_eval_result(eval_run_id, int(item["id"]), row)
+        rescored.append(row)
+
+    metric_results = [row for row in rescored if row.get("analysisMode") != "INFRA_FAILED" and row.get("scored", True) is not False]
+    try:
+        summary = json.loads(run.get("summary_json") or "{}") if run.get("summary_json") else {}
+    except (TypeError, json.JSONDecodeError):
+        summary = {}
+    summary["benchmarkSchemaVersion"] = BENCHMARK_SCHEMA_VERSION
+    summary["benchmarkTaskType"] = dataset_type
+    summary["taskMetrics"] = _aggregate_task_metrics(dataset_type, metric_results)
+    summary["metricDenominators"] = _aggregate_metric_denominators(dataset_type, metric_results)
+    summary["scorerVersions"] = [EVAL_SCORER_VERSION]
+    summary["metricCaseCount"] = len(metric_results)
+    summary["approvedCaseCount"] = sum(str(item.get("annotation_status") or "PROVISIONAL").upper() == "APPROVED" for item in rows)
+    summary["provisionalCaseCount"] = len(rows) - summary["approvedCaseCount"]
+    summary["limitedImpactCount"] = sum(1 for row in metric_results if row.get("analysisMode") == "LIMITED" and row.get("limitedImpact", True))
+    summary["limitedNonImpactCount"] = sum(1 for row in metric_results if row.get("analysisMode") == "LIMITED" and not row.get("limitedImpact", True))
+    summary["resultValid"] = bool(metric_results) and not summary.get("infraFailedCount") and not summary.get("failedCount")
+    summary["rescore"] = {
+        "scorerVersion": EVAL_SCORER_VERSION,
+        "reason": "task-specific scoring and status decomposition",
+        "agentExecutionReused": True,
+    }
+    gate = build_release_gate(summary, status=str(run.get("status") or ""), task_type=dataset_type)
+    summary["releaseGate"] = gate
+    with _conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """UPDATE agent_eval_run
+                   SET summary_json=%s, high_risk_recall=%s, dual_citation_rate=%s,
+                       false_positive_rate=%s, schema_valid_rate=%s
+                   WHERE id=%s""",
+                (
+                    _json_safe(summary),
+                    float(summary.get("taskMetrics", {}).get("riskRecall", summary.get("taskMetrics", {}).get("fieldRecall", 0)) or 0),
+                    float(summary.get("taskMetrics", {}).get("citationCoverage", 0) or 0),
+                    float(summary.get("taskMetrics", {}).get("falsePositiveRate", 0) or 0),
+                    float(summary.get("taskMetrics", {}).get("schemaValidRate", 0) or 0),
+                    eval_run_id,
+                ),
+            )
+            conn.commit()
+    return {"runId": eval_run_id, "releaseGate": gate, "taskMetrics": summary["taskMetrics"]}
+
+
+@internal_router.post("/agent/evaluations/recompute-gates")
+async def recompute_evaluation_gates(
+    payload: dict | None = None,
+    x_internal_token: str | None = Header(default=None),
+):
+    """Recompute stored scores/gates; never dispatches an Agent run."""
+    _check_internal_token(x_internal_token)
+    requested = (payload or {}).get("runIds")
+    if requested:
+        run_ids = [int(value) for value in requested]
+    else:
+        from app.agent_runtime.persistence import _conn
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM agent_eval_run WHERE status NOT IN ('QUEUED','PRECHECKING','RUNNING') ORDER BY id")
+                run_ids = [int(row["id"]) for row in cur.fetchall()]
+    results: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for run_id in run_ids:
+        try:
+            results.append(_recompute_eval_run_scores(run_id))
+        except Exception as exc:
+            # One historical/unsupported dataset must not prevent supported
+            # runs from being rescored in the same maintenance request.
+            logger.warning("Skipping evaluation gate recompute for run %s: %s", run_id, exc)
+            skipped.append({"runId": run_id, "reason": str(exc)[:300]})
+    return {"recomputed": len(results), "skipped": skipped, "results": results}
+
+
 def _eval_fixture_ready(cur, case_id: int) -> bool:
     """Return true when DB chunks and the latest ES indexing pass are reusable."""
     cur.execute(
@@ -2788,6 +2909,43 @@ def _eval_expected_dimensions(case: dict[str, Any]) -> list[str]:
         if dim and dim not in dims:
             dims.append(dim)
     return dims
+
+
+def _limited_result_impacts_target_domain(
+    case: dict[str, Any], artifact: dict[str, Any], task_type: str,
+) -> bool:
+    """Decide whether LIMITED blocks a task-scoped evaluation.
+
+    A risk run may intentionally omit unrelated domains.  Only a coverage
+    limitation touching an expected risk dimension should block its release;
+    extraction and fulfillment tasks have no unrelated-domain exemption.
+    """
+    if str((artifact or {}).get("analysisMode") or "").upper() != "LIMITED":
+        return False
+    if normalize_task_type(task_type) != "CONTRACT_REVIEW":
+        return True
+    expected = set(_eval_expected_dimensions(case))
+    if not expected:
+        return True
+    findings = (artifact or {}).get("findings") or []
+    if not isinstance(findings, list):
+        findings = []
+    if not findings:
+        content = (artifact or {}).get("content") or {}
+        if isinstance(content, dict) and isinstance(content.get("findings"), list):
+            findings = content["findings"]
+    if not findings:
+        stages = (artifact or {}).get("evaluationStages") or {}
+        if isinstance(stages, dict):
+            review_stage = stages.get("CONTRACT_REVIEW") or {}
+            if isinstance(review_stage, dict) and isinstance(review_stage.get("findings"), list):
+                findings = review_stage["findings"]
+    actual = {
+        _risk_dimension(item)
+        for item in findings
+        if isinstance(item, dict) and _risk_dimension(item)
+    }
+    return not actual or bool(expected & actual)
 
 
 def _create_eval_temp_case(
@@ -3080,36 +3238,54 @@ def _eval_fulfillment_input(case: dict[str, Any]) -> dict[str, Any]:
 
 
 def _select_eval_timeline_node_id(temp_case_id: int, selector: dict[str, Any]) -> int:
-    """Select one extracted node using an auditable semantic selector."""
-    clauses: list[str] = ["case_id=%s", "(source='AGENT_FINAL' OR manual_override=1)"]
-    params: list[Any] = [temp_case_id]
+    """Select one extracted node using an auditable semantic selector.
+
+    ``nodeType`` is a useful constraint, but it is also the field most likely
+    to differ between a timeline extractor and the fulfillment task.  Retry
+    once without that optional constraint when the textual selector is still
+    specific; never choose an arbitrary node or relax label/condition
+    constraints.
+    """
     fields = {
         "nodeType": "node_type",
         "date": "node_date",
         "labelContains": "label",
         "conditionContains": "condition_text",
+        "businessMeaningContains": "business_meaning",
     }
-    for key, column in fields.items():
-        value = str(selector.get(key) or "").strip()
-        if not value:
-            continue
-        if key.endswith("Contains"):
-            clauses.append(f"{column} LIKE %s")
-            params.append(f"%{value}%")
-        else:
-            clauses.append(f"{column}=%s")
-            params.append(value.upper() if key == "nodeType" else value)
-    if len(clauses) == 2:
+    selector_fields = [
+        (key, column, str(selector.get(key) or "").strip())
+        for key, column in fields.items()
+        if str(selector.get(key) or "").strip()
+    ]
+    if not selector_fields:
         raise EvalCaseConfigurationError("targetTimelineSelectorJson has no supported selector field")
     from app.agent_runtime.persistence import _conn
 
-    with _conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT id FROM contract_timeline_node WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 2",
-                params,
-            )
-            rows = cur.fetchall() or []
+    def _query(include_node_type: bool) -> list[dict[str, Any]]:
+        clauses: list[str] = ["case_id=%s", "(source='AGENT_FINAL' OR manual_override=1)"]
+        params: list[Any] = [temp_case_id]
+        for key, column, value in selector_fields:
+            if key == "nodeType" and not include_node_type:
+                continue
+            if key.endswith("Contains"):
+                clauses.append(f"{column} LIKE %s")
+                params.append(f"%{value}%")
+            else:
+                clauses.append(f"{column}=%s")
+                params.append(value.upper() if key == "nodeType" else value)
+        with _conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT id FROM contract_timeline_node WHERE {' AND '.join(clauses)} ORDER BY id LIMIT 2",
+                    params,
+                )
+                return cur.fetchall() or []
+
+    rows = _query(include_node_type=True)
+    relaxed_type = any(key == "nodeType" for key, _, _ in selector_fields) and not rows
+    if relaxed_type:
+        rows = _query(include_node_type=False)
     if len(rows) != 1:
         raise EvalCaseConfigurationError(
             f"timeline selector must match exactly one final node; matched {len(rows)}"
@@ -3637,7 +3813,61 @@ def _timeline_expected_parts(entry: dict[str, Any]) -> tuple[str, str]:
     return title.strip(), ""
 
 
-_DATE_TOKEN = re.compile(r"\d{4}-\d{1,2}-\d{1,2}")
+_DATE_TOKEN = re.compile(
+    r"(?:\d{4}\s*[年./-]\s*\d{1,2}\s*[月./-]\s*\d{1,2}日?|"
+    r"\d{4}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*日?|"
+    r"\d{4}-\d{1,2}-\d{1,2})"
+)
+_CN_DATE_TOKEN = re.compile(
+    r"([〇零一二三四五六七八九]{4})年"
+    r"([〇零一二三四五六七八九十百]+)月"
+    r"([〇零一二三四五六七八九十百]+)日?"
+)
+_CN_DIGITS = {
+    "〇": 0, "零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
+    "五": 5, "六": 6, "七": 7, "八": 8, "九": 9,
+}
+
+
+def _cn_date_number(value: str) -> int | None:
+    """Parse the small Chinese integer forms used in contract dates."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if all(char in _CN_DIGITS for char in text):
+        return int("".join(str(_CN_DIGITS[char]) for char in text))
+    if text == "十":
+        return 10
+    if text.startswith("十"):
+        return 10 + _CN_DIGITS.get(text[1:], 0)
+    if "十" in text:
+        left, right = text.split("十", 1)
+        return _CN_DIGITS.get(left, 0) * 10 + (_CN_DIGITS.get(right, 0) if right else 0)
+    return None
+
+
+def _extract_eval_date(value: Any) -> str | None:
+    """Return one calendar date as ISO, accepting Chinese contract formats."""
+    text = str(value or "").strip()
+    match = re.search(r"(\d{4})\s*[年./-]\s*(\d{1,2})\s*[月./-]\s*(\d{1,2})日?", text)
+    if not match:
+        match = re.search(r"(\d{4})(\d{2})(\d{2})", text)
+    if match:
+        year, month, day = (int(group) for group in match.groups())
+    else:
+        match = _CN_DATE_TOKEN.search(text)
+        if not match:
+            return None
+        year_text, month_text, day_text = match.groups()
+        year = int("".join(str(_CN_DIGITS[char]) for char in year_text))
+        month = _cn_date_number(month_text)
+        day = _cn_date_number(day_text)
+        if month is None or day is None:
+            return None
+    try:
+        return date(year, month, day).isoformat()
+    except (TypeError, ValueError):
+        return None
 
 
 def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
@@ -3684,7 +3914,7 @@ def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -
         if not label:
             continue
         label_text = _normalize_eval_text(label)
-        expected_date = _DATE_TOKEN.search(detail)
+        expected_date = _extract_eval_date(detail)
         conditional = (
             not expected_date and ("条件" in detail or "事件" in detail)
         )
@@ -3713,9 +3943,9 @@ def _score_timeline_extraction(case: dict[str, Any], artifact: dict[str, Any]) -
         if best is None:
             continue
         matched += 1
-        node_date = _DATE_TOKEN.search(str(best.get("date") or ""))
+        node_date = _extract_eval_date(best.get("date"))
         if expected_date:
-            if node_date and node_date.group(0) == expected_date.group(0):
+            if node_date and node_date == expected_date:
                 date_correct += 1
         if conditional:
             if not node_date and str(best.get("condition") or "").strip():
@@ -3774,6 +4004,52 @@ def _fulfillment_requirement_surface(row: dict[str, Any]) -> str:
     ))
 
 
+def _fulfillment_requirement_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    """Match a fulfillment gold row using its obligation semantics."""
+    expected_requirement = _normalize_eval_text(expected.get("requirement") or "")
+    actual_requirement = _normalize_eval_text(actual.get("requirement") or "")
+    actual_surface = _normalize_eval_text(_fulfillment_requirement_surface(actual))
+    if expected_requirement and (
+        expected_requirement in actual_requirement or actual_requirement in expected_requirement
+    ):
+        return True
+    expected_title = _normalize_eval_text(expected.get("title") or "")
+    expected_text = expected_requirement or expected_title
+    if not expected_text or not actual_surface or expected_text in actual_surface:
+        return bool(expected_text and expected_text in actual_surface)
+    actions = ("交付", "提交", "付款", "支付", "验收", "开票", "完成", "通知", "终止")
+    expected_actions = {action for action in actions if action in expected_text}
+    actual_actions = {action for action in actions if action in actual_surface}
+    expected_dates = set(re.findall(r"20\d{6}", expected_title))
+    actual_dates = set(re.findall(r"20\d{6}", actual_surface))
+    return bool(expected_actions & actual_actions) and bool(expected_dates & actual_dates)
+
+
+def _normalize_fulfillment_status(value: Any) -> str:
+    raw = _normalize_eval_text(value).upper()
+    return {
+        "SUPPORTED": "SUPPORTED",
+        "VERIFIED": "SUPPORTED",
+        "SUFFICIENT": "SUPPORTED",
+        "PARTIAL": "PARTIAL",
+        "INSUFFICIENT": "INSUFFICIENT_EVIDENCE",
+        "EVIDENCEINSUFFICIENT": "INSUFFICIENT_EVIDENCE",
+        "NEEDSREVIEW": "NEEDS_REVIEW",
+        "UNCLEAR": "UNCLEAR_TERMS",
+        "UNCLEARTERMS": "UNCLEAR_TERMS",
+        "BASICALLYSATISFIED": "BASICALLY_SATISFIED",
+        "SATISFIED": "BASICALLY_SATISFIED",
+        "HASISSUES": "HAS_ISSUES",
+    }.get(raw, str(value or "").upper())
+
+
+def _expected_ai_suggestion(row: dict[str, Any]) -> str:
+    value = row.get("aiSuggestion") or row.get("aiSuggestionConclusion") or row.get("aiConclusion")
+    if isinstance(value, dict):
+        value = value.get("conclusion") or value.get("status")
+    return _normalize_fulfillment_status(value)
+
+
 def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
     """Score a FULFILLMENT_REPORT artifact (PRD §9.4).
 
@@ -3810,9 +4086,7 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
         if not isinstance(entry, dict):
             continue
         if any(
-            _element_expectation_matches(
-                entry, _fulfillment_requirement_surface(row)
-            )
+            _fulfillment_requirement_matches(entry, row)
             for row in requirements
             if isinstance(row, dict)
         ):
@@ -3825,8 +4099,8 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
     ]
     restrained = sum(
         1 for row in no_evidence_rows
-        if str(row.get("proofStatus") or row.get("judgement") or "").upper()
-        in ("INSUFFICIENT", "EVIDENCE_INSUFFICIENT", "NEEDS_REVIEW", "UNCLEAR", "UNCLEAR_TERMS")
+        if _normalize_fulfillment_status(row.get("proofStatus") or row.get("judgement"))
+        in ("PARTIAL", "INSUFFICIENT_EVIDENCE", "NEEDS_REVIEW", "UNCLEAR_TERMS")
     )
     manual_result = str(content.get("manualResult") or "").strip().upper()
     expected_manual_result = str(case.get("expected_manual_result") or "").strip().upper()
@@ -3861,6 +4135,11 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
     if not isinstance(expected_judgements, list):
         expected_judgements = []
     judgement_matches = 0
+    proof_status_matches = 0
+    ai_suggestion_matches = 0
+    judgement_denominator = 0
+    proof_status_denominator = 0
+    ai_suggestion_denominator = 0
     for expected_judgement in expected_judgements:
         if not isinstance(expected_judgement, dict):
             continue
@@ -3873,13 +4152,21 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
             surface = _normalize_eval_text(_fulfillment_requirement_surface(actual))
             if requirement_token and requirement_token not in surface:
                 continue
-            expected_status = str(expected_judgement.get("proofStatus") or "").upper()
-            expected_judgement_value = str(expected_judgement.get("judgement") or "").upper()
-            if expected_status and str(actual.get("proofStatus") or "").upper() != expected_status:
-                continue
-            if expected_judgement_value and str(actual.get("judgement") or "").upper() != expected_judgement_value:
-                continue
-            judgement_matches += 1
+            expected_status = _normalize_fulfillment_status(expected_judgement.get("proofStatus"))
+            expected_judgement_value = _normalize_fulfillment_status(expected_judgement.get("judgement"))
+            expected_ai = _expected_ai_suggestion(expected_judgement)
+            actual_status = _normalize_fulfillment_status(actual.get("proofStatus"))
+            actual_judgement = _normalize_fulfillment_status(actual.get("judgement"))
+            actual_ai = _expected_ai_suggestion(actual)
+            if expected_status:
+                proof_status_denominator += 1
+                proof_status_matches += int(actual_status == expected_status)
+            if expected_judgement_value:
+                judgement_denominator += 1
+                judgement_matches += int(actual_judgement == expected_judgement_value)
+            if expected_ai:
+                ai_suggestion_denominator += 1
+                ai_suggestion_matches += int(actual_ai == expected_ai)
             break
     return {
         "success": True,
@@ -3909,18 +4196,227 @@ def _score_fulfillment_check(case: dict[str, Any], artifact: dict[str, Any]) -> 
         "humanResultMatch": (
             1.0 if manual_result == expected_manual_result else 0.0
         ) if expected_manual_result else (1.0 if manual_result else 0.0),
-        "judgementAccuracy": (
-            judgement_matches / len(expected_judgements)
-            if expected_judgements else 1.0
-        ),
-        "judgementDenominator": len(expected_judgements),
+        "proofStatusAccuracy": proof_status_matches / proof_status_denominator if proof_status_denominator else None,
+        "proofStatusDenominator": proof_status_denominator,
+        "judgementAccuracy": judgement_matches / judgement_denominator if judgement_denominator else None,
+        "judgementDenominator": judgement_denominator,
+        "aiSuggestionAccuracy": ai_suggestion_matches / ai_suggestion_denominator if ai_suggestion_denominator else None,
+        "aiSuggestionDenominator": ai_suggestion_denominator,
         "artifact": artifact,
+    }
+
+
+def _intake_field_kind(title: str) -> str:
+    text = _normalize_eval_text(title)
+    if text in {"party", "partya", "partyb", "partyrole"} or "party" in text:
+        return "partyRoleAccuracy"
+    if text in {"amount", "currency", "contractamount", "totalamount", "price"} or "amount" in text:
+        return "amountAccuracy"
+    if text in {"date", "signeddate", "effectivedate", "expirydate", "signdate"} or "date" in text:
+        return "dateAccuracy"
+    if text in {"title", "contracttitle", "contractname", "name"} or "title" in text:
+        return "contractTitleAccuracy"
+    if any(token in text for token in ("甲方", "乙方", "发包人", "承包人", "业主", "供应商", "我方", "对方")):
+        return "partyRoleAccuracy"
+    if any(token in text for token in ("金额", "总价", "价款", "合同价", "费用", "元", "万元", "cny", "rmb")):
+        return "amountAccuracy"
+    if any(token in text for token in ("日期", "时间", "签署", "签订", "生效", "结束", "开工", "交付", "竣工")):
+        return "dateAccuracy"
+    if any(token in text for token in ("名称", "标题", "合同名")):
+        return "contractTitleAccuracy"
+    return "fieldAccuracy"
+
+
+def _intake_field_matches(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    """Match an intake label by field key plus normalized value when present."""
+    expected_key = _normalize_eval_text(expected.get("key") or "")
+    actual_key = _normalize_eval_text(
+        actual.get("elementKey") or actual.get("key") or actual.get("fieldKey") or ""
+    )
+    expected_value = _normalize_eval_text(expected.get("value") or "")
+    if not expected_value:
+        title = str(expected.get("title") or "")
+        expected_value = _normalize_eval_text(title.split(":", 1)[-1] if ":" in title else title)
+    actual_surface = str(actual.get("_surface") or "")
+    actual_text = _normalize_eval_text(actual_surface)
+    if expected_key and actual_key and expected_key == actual_key:
+        return not expected_value or expected_value in actual_text
+    return _element_expectation_matches(expected, actual_surface)
+
+
+def _score_contract_intake(case: dict[str, Any], artifact: dict[str, Any]) -> dict[str, Any]:
+    """Score intake identity fields independently from the dynamic profile.
+
+    Intake is the first contract identity pass, so a correct amount or party
+    role must not be hidden inside a single generic element-recall number.
+    """
+    try:
+        expected = json.loads(case.get("expected_findings_json") or "[]")
+    except Exception:
+        expected = []
+    expected = expected if isinstance(expected, list) else []
+    items = _intake_extraction_surfaces(artifact)
+    matched_by_kind: dict[str, int] = {}
+    denominator_by_kind: dict[str, int] = {}
+    matched = 0
+    cited = 0
+    for entry in expected:
+        if not isinstance(entry, dict):
+            continue
+        kind = _intake_field_kind(str(
+            entry.get("kind") or entry.get("key") or entry.get("title") or ""
+        ))
+        denominator_by_kind[kind] = denominator_by_kind.get(kind, 0) + 1
+        hit = any(_intake_field_matches(entry, item) for item in items)
+        if hit:
+            matched += 1
+            matched_by_kind[kind] = matched_by_kind.get(kind, 0) + 1
+    for item in items:
+        if item.get("citations") or item.get("citation"):
+            cited += 1
+    def ratio(kind: str) -> float:
+        return matched_by_kind.get(kind, 0) / max(denominator_by_kind.get(kind, 0), 1)
+    return {
+        "success": True,
+        "scored": True,
+        "scorerVersion": EVAL_SCORER_VERSION,
+        "highRecall": matched / max(len(expected), 1),
+        "fieldAccuracy": matched / max(len(expected), 1),
+        "partyRoleAccuracy": ratio("partyRoleAccuracy"),
+        "amountAccuracy": ratio("amountAccuracy"),
+        "dateAccuracy": ratio("dateAccuracy"),
+        "contractTitleAccuracy": ratio("contractTitleAccuracy"),
+        "dualCitationRate": cited / max(len(items), 1),
+        "falsePositives": 0,
+        "schemaValid": 1 if items else 0,
+        "analysisMode": artifact.get("analysisMode", "FULL"),
+        "riskScore": artifact.get("riskScore", 0),
+        "findingCount": len(items),
+        "artifact": artifact,
+    }
+
+
+def _case_for_task_score(case: dict[str, Any], task_type: str) -> dict[str, Any]:
+    """Adapt schema-v2 gold labels to stable scorer inputs during migration."""
+    output = expected_output(case)
+    if not output:
+        return case
+    adapted = dict(case)
+    expected_rows = legacy_expected_findings(case, task_type)
+    if expected_rows:
+        adapted["expected_findings_json"] = json.dumps(expected_rows, ensure_ascii=False)
+    fulfillment = output.get("fulfillment")
+    if isinstance(fulfillment, dict):
+        if isinstance(fulfillment.get("judgements"), list):
+            adapted["expected_judgements_json"] = json.dumps(
+                fulfillment["judgements"], ensure_ascii=False
+            )
+        if fulfillment.get("manualResult"):
+            adapted["expected_manual_result"] = str(fulfillment["manualResult"])
+    return adapted
+
+
+def _task_metrics(task_type: str, row: dict[str, Any]) -> dict[str, float | int]:
+    """Expose task language without replacing the persisted legacy columns."""
+    task_type = normalize_task_type(task_type)
+    recall = float(row.get("highRecall") or 0)
+    citation = float(row.get("dualCitationRate") or 0)
+    false_positive_rate = float(row.get("falsePositiveRate") or 0)
+    if not false_positive_rate:
+        false_positive_rate = float(row.get("falsePositives") or 0) / max(
+            int(row.get("findingCount") or 0), 1
+        )
+    base = {"schemaValidRate": float(row.get("schemaValid") or 0)}
+    if task_type == "CONTRACT_INTAKE":
+        base.update({
+            "fieldAccuracy": recall,
+            "partyRoleAccuracy": float(row.get("partyRoleAccuracy", 0)),
+            "amountAccuracy": float(row.get("amountAccuracy", 0)),
+            "dateAccuracy": float(row.get("dateAccuracy", 0)),
+            "contractTitleAccuracy": float(row.get("contractTitleAccuracy", 0)),
+            "citationCoverage": citation,
+        })
+    elif task_type == "CONTRACT_ELEMENT_EXTRACTION":
+        base.update({
+            "fieldRecall": recall,
+            "valueAccuracy": float(row.get("valueAccuracy", recall)),
+            "citationCoverage": citation,
+            "hallucinationRate": float(row.get("hallucinationRate", false_positive_rate)),
+        })
+    elif task_type == "TIMELINE_EXTRACTION":
+        base.update({
+            "nodeRecall": recall,
+            "dateAccuracy": float(row.get("dateAccuracy") if row.get("dateAccuracy") is not None else 0),
+            "conditionRecognitionRate": float(
+                row.get("conditionalRecognitionRate")
+                if row.get("conditionalRecognitionRate") is not None else 0
+            ),
+            "responsiblePartyCoverage": float(row.get("responsiblePartyCoverage") or 0),
+            "hallucinationRate": false_positive_rate,
+        })
+    elif task_type == "CONTRACT_REVIEW":
+        base.update({
+            "riskRecall": recall,
+            "citationCoverage": citation,
+            "falsePositiveRate": false_positive_rate,
+            "severityAccuracy": float(row.get("severityAccuracy", recall)),
+        })
+    elif task_type == "FULFILLMENT_CHECK":
+        base.update({
+            "requirementRecall": recall,
+            "proofStatusAccuracy": row.get("proofStatusAccuracy"),
+            "judgementAccuracy": row.get("judgementAccuracy"),
+            "aiSuggestionAccuracy": row.get("aiSuggestionAccuracy"),
+            "restraintRate": float(row.get("restraintRate") or 0),
+            "humanResultMatch": float(row.get("humanResultMatch") or 0),
+            "aiAutoConfirmViolations": int(row.get("aiAutoConfirmViolations") or 0),
+        })
+    elif task_type == "COMPREHENSIVE":
+        base.update({
+            "workflowCompletionRate": 1.0 if row.get("success") else 0.0,
+            "crossStageConsistency": float(row.get("crossStageConsistency", recall)),
+            "snapshotReuseRate": float(row.get("snapshotReuseRate", 0)),
+        })
+    return base
+
+
+def _aggregate_task_metrics(
+    task_type: str, metric_results: list[dict[str, Any]]
+) -> dict[str, float | int]:
+    spec = get_benchmark_spec(task_type)
+    if not metric_results:
+        return {metric.key: 0 for metric in spec.metrics}
+    rows = [result.get("taskMetrics") or _task_metrics(task_type, result) for result in metric_results]
+    aggregate: dict[str, float | int] = {}
+    for metric in spec.metrics:
+        values = [row.get(metric.key) for row in rows if row.get(metric.key) is not None]
+        if not values:
+            continue
+        if metric.kind == "count":
+            aggregate[metric.key] = int(sum(int(value) for value in values))
+        else:
+            aggregate[metric.key] = round(sum(float(value) for value in values) / len(values), 4)
+    return aggregate
+
+
+def _aggregate_metric_denominators(
+    task_type: str, metric_results: list[dict[str, Any]]
+) -> dict[str, int]:
+    """Expose evidence/gold denominators so missing labels are not scored as 0."""
+    task_type = normalize_task_type(task_type)
+    if task_type != "FULFILLMENT_CHECK":
+        return {}
+    return {
+        "proofStatusAccuracy": sum(int(row.get("proofStatusDenominator") or 0) for row in metric_results),
+        "judgementAccuracy": sum(int(row.get("judgementDenominator") or 0) for row in metric_results),
+        "aiSuggestionAccuracy": sum(int(row.get("aiSuggestionDenominator") or 0) for row in metric_results),
     }
 
 
 _EVAL_SCORERS = {
     "CONTRACT_REVIEW": _score_risk_review,
     "RISK_REVIEW": _score_risk_review,
+    "CONTRACT_INTAKE": _score_contract_intake,
     "CONTRACT_ELEMENT_EXTRACTION": _score_element_extraction,
     "INTAKE": _score_element_extraction,
     "ELEMENT_EXTRACTION": _score_element_extraction,
@@ -3938,9 +4434,13 @@ def _score_eval_artifact(case: dict[str, Any], artifact: dict[str, Any], score_m
     + skipReason) so the run summary can exclude it from the metrics
     denominators instead of publishing fake 1.0s.
     """
-    scorer = _EVAL_SCORERS.get(str(score_mode or "").upper())
+    normalized_mode = normalize_task_type(score_mode)
+    scorer = _EVAL_SCORERS.get(normalized_mode)
     if scorer:
-        return scorer(case, artifact or {})
+        row = scorer(_case_for_task_score(case, normalized_mode), artifact or {})
+        row["taskMetrics"] = _task_metrics(normalized_mode, row)
+        row["benchmarkTaskType"] = normalized_mode
+        return row
     return {
         "success": False,
         "scored": False,
@@ -3988,6 +4488,7 @@ async def _dispatch_eval_task(
     features: dict,
     runtime: str,
     timeout_seconds: int,
+    created_run_ids: list[int] | None = None,
 ) -> tuple[int, Any]:
     from app.agent_runtime.api_models import AgentTaskContext
     from app.agent_runtime.persistence import _conn
@@ -4036,6 +4537,12 @@ async def _dispatch_eval_task(
             run_id = int(cur.lastrowid)
             conn.commit()
 
+    # A timeout can occur after the database row has been created but before
+    # this coroutine returns its tuple.  Register it immediately so the
+    # evaluation harness can always close an orphaned stage run.
+    if created_run_ids is not None:
+        created_run_ids.append(run_id)
+
     # Stamp the actual stage start before handing control to either runtime.
     # Without this transition graph runs had a NULL started_at and P1 could
     # not derive their wall-clock latency even though finished_at was present.
@@ -4078,6 +4585,20 @@ async def _dispatch_eval_task(
         router.dispatch_with_mode(ctx, runtime),
         timeout=timeout_seconds,
     )
+
+
+def _remaining_eval_case_timeout(deadline: float, *, now: float | None = None) -> int:
+    """Return the remaining whole-second budget for one evaluation case.
+
+    A multi-stage benchmark (timeline plus fulfillment, for example) has one
+    case-level timebox.  Without this calculation each stage could consume a
+    full timeout and make a single stalled case block the whole queue.
+    """
+    current = asyncio.get_running_loop().time() if now is None else now
+    remaining = deadline - current
+    if remaining <= 0:
+        raise TimeoutError("Evaluation case exceeded its wall-clock timeout")
+    return max(1, math.ceil(remaining))
 
 
 def _read_actual_engine(run_id: int) -> str:
@@ -4276,7 +4797,8 @@ async def _run_evaluation_background(eval_run_id: int):
                               scenario, industry, difficulty, noise_level,
                               must_have_contract_citation, must_have_policy_citation,
                               fulfillment_evidence_json, target_timeline_selector_json,
-                              expected_judgements_json, expected_manual_result
+                              expected_judgements_json, expected_manual_result,
+                              expected_output_json, annotation_status
                        FROM agent_eval_case
                        WHERE dataset_id=%s AND status='ACTIVE'
                        ORDER BY id""",
@@ -4327,7 +4849,9 @@ async def _run_evaluation_background(eval_run_id: int):
             case_id = int(case["id"])
             case_key = str(case.get("case_key") or case_id)
             case_run_ids: list[int] = []
+            created_stage_run_ids: list[int] = []
             completed_run_ids: set[int] = set()
+            case_deadline = asyncio.get_running_loop().time() + timeout_seconds
             try:
                 _update_eval_progress(
                     eval_run_id,
@@ -4343,15 +4867,20 @@ async def _run_evaluation_background(eval_run_id: int):
                 review_artifact: dict[str, Any] | None = None
                 for task_type in task_plan:
                     try:
-                        run_id, result = await _dispatch_eval_task(
-                            eval_run_id=eval_run_id,
-                            case=case,
-                            idx=idx,
-                            temp_case_id=temp_case_id,
-                            task_type=task_type,
-                            features=features,
-                            runtime=runtime,
-                            timeout_seconds=timeout_seconds,
+                        stage_timeout_seconds = _remaining_eval_case_timeout(case_deadline)
+                        run_id, result = await asyncio.wait_for(
+                            _dispatch_eval_task(
+                                eval_run_id=eval_run_id,
+                                case=case,
+                                idx=idx,
+                                temp_case_id=temp_case_id,
+                                task_type=task_type,
+                                features=features,
+                                runtime=runtime,
+                                timeout_seconds=stage_timeout_seconds,
+                                created_run_ids=created_stage_run_ids,
+                            ),
+                            timeout=stage_timeout_seconds,
                         )
                         case_run_ids.append(run_id)
                     except EvalCaseConfigurationError:
@@ -4385,7 +4914,8 @@ async def _run_evaluation_background(eval_run_id: int):
                         if adapter is None:
                             raise RuntimeError("Fulfillment graph adapter is unavailable for evaluation resume")
                         result = await asyncio.wait_for(
-                            adapter.resume(run_id, command), timeout=timeout_seconds
+                            adapter.resume(run_id, command),
+                            timeout=_remaining_eval_case_timeout(case_deadline),
                         )
                     artifact = result.artifact or {}
                     if not _is_scoreable_eval_result(result, artifact):
@@ -4407,12 +4937,24 @@ async def _run_evaluation_background(eval_run_id: int):
                     if task_type == "CONTRACT_REVIEW":
                         review_artifact = artifact
 
-                score_mode = "CONTRACT_REVIEW" if "CONTRACT_REVIEW" in task_plan else task_plan[-1]
+                score_mode = normalize_task_type(dataset_type)
+                if score_mode == "COMPREHENSIVE":
+                    # Comprehensive scoring is added after its three stage
+                    # results are assembled; its risk stage remains visible
+                    # for backward-compatible per-case diagnostics.
+                    score_mode = "CONTRACT_REVIEW"
                 artifact_for_score = review_artifact or {
                     "analysisMode": "FULL",
                     "evaluationStages": stage_outputs,
                 }
                 row = _score_eval_artifact(case, artifact_for_score, score_mode)
+                row["taskMetrics"] = _task_metrics(
+                    normalize_task_type(dataset_type), row
+                )
+                row["benchmarkTaskType"] = normalize_task_type(dataset_type)
+                row["limitedImpact"] = _limited_result_impacts_target_domain(
+                    case, artifact_for_score, normalize_task_type(dataset_type)
+                )
                 if row.get("scored", True):
                     row["scorerVersion"] = EVAL_SCORER_VERSION
                     score_artifact = row.get("artifact")
@@ -4445,7 +4987,8 @@ async def _run_evaluation_background(eval_run_id: int):
                     scored_case_run_ids.extend(case_run_ids)
                 success_count += 1
             except Exception as exc:
-                for run_id in _failed_eval_stage_run_ids(case_run_ids, completed_run_ids):
+                active_run_ids = list(dict.fromkeys([*created_stage_run_ids, *case_run_ids]))
+                for run_id in _failed_eval_stage_run_ids(active_run_ids, completed_run_ids):
                     _finish_eval_agent_run(run_id, "FAILED", str(exc))
                 infra_failed = _is_infra_error(exc)
                 if infra_failed:
@@ -4570,6 +5113,10 @@ async def _run_evaluation_background(eval_run_id: int):
             if not r.get("success") and r.get("analysisMode") != "INFRA_FAILED"
             and r.get("scored", True) is not False
         ])
+        limited_impact_count = sum(
+            1 for r in metric_results
+            if r.get("analysisMode") == "LIMITED" and r.get("limitedImpact", True)
+        )
         rerank_methods = sorted({
             str(result.get("rerankMethod") or "NOT_USED")
             for result in per_case_results
@@ -4590,7 +5137,7 @@ async def _run_evaluation_background(eval_run_id: int):
         elif success_count == 0:
             eval_status = "FAILED"
         elif (
-            failed_count > 0 or limited_count > 0 or infra_failed_count > 0
+            failed_count > 0 or limited_impact_count > 0 or infra_failed_count > 0
             or unscored_count > 0
             or env_status == "DEGRADED" or (requested_rerank and rerank_fallback_count > 0)
         ):
@@ -4599,6 +5146,19 @@ async def _run_evaluation_background(eval_run_id: int):
             eval_status = "COMPLETED"
 
         summary_payload = {
+            "benchmarkSchemaVersion": BENCHMARK_SCHEMA_VERSION,
+            "benchmarkTaskType": normalize_task_type(dataset_type),
+            "benchmarkTaskLabel": get_benchmark_spec(dataset_type).label,
+            "taskMetrics": _aggregate_task_metrics(dataset_type, metric_results),
+            "metricDenominators": _aggregate_metric_denominators(dataset_type, metric_results),
+            "approvedCaseCount": sum(
+                1 for case in cases
+                if str(case.get("annotation_status") or "PROVISIONAL").upper() == "APPROVED"
+            ),
+            "provisionalCaseCount": sum(
+                1 for case in cases
+                if str(case.get("annotation_status") or "PROVISIONAL").upper() != "APPROVED"
+            ),
             "highRiskRecall": round(avg_recall, 4),
             "dualCitationRate": round(avg_dual_cite, 4),
             "falsePositiveRate": round(avg_false_pos, 4),
@@ -4621,6 +5181,11 @@ async def _run_evaluation_background(eval_run_id: int):
             "failedCount": failed_count,
             "infraFailedCount": infra_failed_count,
             "limitedCount": limited_count,
+            "limitedImpactCount": limited_impact_count,
+            "limitedNonImpactCount": sum(
+                1 for r in metric_results
+                if r.get("analysisMode") == "LIMITED" and not r.get("limitedImpact", True)
+            ),
             "findingCount": finding_count,
             "dualCitationCount": dual_citation_count,
             "contractCitationMissingCount": contract_citation_missing_count,

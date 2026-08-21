@@ -15,9 +15,12 @@ from typing import Any
 
 import yaml
 
+from .specs import BENCHMARK_SCHEMA_VERSION, get_benchmark_spec
+
 
 _DATASET_ID = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 _TASK_TYPES = {
+    "CONTRACT_INTAKE",
     "CONTRACT_REVIEW",
     "CONTRACT_ELEMENT_EXTRACTION",
     "TIMELINE_EXTRACTION",
@@ -65,6 +68,7 @@ class BenchmarkDataset:
             "version": self.manifest["version"],
             "schemaVersion": self.manifest["schemaVersion"],
             "taskType": self.task_type,
+            "labelStatus": self.manifest.get("labelStatus", "APPROVED"),
             "caseCount": len(self.cases),
             "datasetHash": self.dataset_hash,
             "cases": [case.case_id for case in self.cases],
@@ -88,6 +92,9 @@ def load_benchmark_dataset(path: str | Path) -> BenchmarkDataset:
     cases: list[BenchmarkCase] = []
     for case_path in case_paths:
         raw = _load_mapping(case_path, "case")
+        raw.setdefault("schemaVersion", manifest["schemaVersion"])
+        raw.setdefault("taskType", manifest["taskType"])
+        raw.setdefault("annotationStatus", manifest.get("labelStatus", "APPROVED"))
         case_id = _validate_case(raw, case_path)
         if case_id in seen:
             raise BenchmarkDatasetError(f"duplicate caseId {case_id!r}")
@@ -124,14 +131,27 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
     missing = [key for key in required if not str(manifest.get(key) or "").strip()]
     if missing:
         raise BenchmarkDatasetError(f"manifest missing required fields: {', '.join(missing)}")
-    if manifest["schemaVersion"] != 1:
-        raise BenchmarkDatasetError("unsupported schemaVersion; expected 1")
+    if manifest["schemaVersion"] not in (1, BENCHMARK_SCHEMA_VERSION):
+        raise BenchmarkDatasetError(
+            f"unsupported schemaVersion; expected 1 or {BENCHMARK_SCHEMA_VERSION}"
+        )
     if not _DATASET_ID.fullmatch(str(manifest["id"])):
         raise BenchmarkDatasetError("manifest id must use lowercase letters, digits, and hyphens")
     task_type = str(manifest["taskType"]).upper()
     if task_type not in _TASK_TYPES:
         raise BenchmarkDatasetError(f"unsupported taskType {task_type!r}")
     manifest["taskType"] = task_type
+    if manifest["schemaVersion"] == BENCHMARK_SCHEMA_VERSION:
+        try:
+            get_benchmark_spec(task_type)
+        except ValueError as exc:
+            raise BenchmarkDatasetError(str(exc)) from exc
+        label_status = str(manifest.get("labelStatus") or "PROVISIONAL").upper()
+        if label_status not in {"PROVISIONAL", "CANDIDATE", "APPROVED"}:
+            raise BenchmarkDatasetError(
+                "manifest labelStatus must be PROVISIONAL, CANDIDATE, or APPROVED"
+            )
+        manifest["labelStatus"] = label_status
 
 
 def _case_paths(root: Path, manifest: dict[str, Any]) -> list[Path]:
@@ -161,6 +181,43 @@ def _validate_case(case: dict[str, Any], source_path: Path) -> str:
         raise BenchmarkDatasetError(f"case {source_path} is missing caseId")
     if not str(case.get("contractText") or "").strip():
         raise BenchmarkDatasetError(f"case {case_id} has no contractText")
+    schema_version = int(case.get("schemaVersion") or 0)
+    # Cases inherit the manifest schema at loading time. The v1 marker remains
+    # the default so existing golden risk datasets stay byte-for-byte valid.
+    if schema_version == BENCHMARK_SCHEMA_VERSION:
+        expected = case.get("expected")
+        if not isinstance(expected, dict):
+            raise BenchmarkDatasetError(f"case {case_id} expected must be a mapping for schema v2")
+        task_type = str(case.get("taskType") or "").upper()
+        if not task_type:
+            raise BenchmarkDatasetError(f"case {case_id} taskType is required for schema v2")
+        try:
+            spec = get_benchmark_spec(task_type)
+        except ValueError as exc:
+            raise BenchmarkDatasetError(f"case {case_id}: {exc}") from exc
+        missing = [key for key in spec.expected_keys if key not in expected]
+        if missing:
+            raise BenchmarkDatasetError(
+                f"case {case_id} expected is missing task fields: {', '.join(missing)}"
+            )
+        for key in spec.expected_keys:
+            value = expected.get(key)
+            if key == "fulfillment" and spec.task_type == "FULFILLMENT_CHECK":
+                if not isinstance(value, dict):
+                    raise BenchmarkDatasetError(f"case {case_id} expected.{key} must be a mapping")
+                continue
+            if not isinstance(value, list):
+                raise BenchmarkDatasetError(f"case {case_id} expected.{key} must be a list")
+        annotation_status = str(case.get("annotationStatus") or "PROVISIONAL").upper()
+        if annotation_status not in {"PROVISIONAL", "CANDIDATE", "APPROVED"}:
+            raise BenchmarkDatasetError(
+                f"case {case_id} annotationStatus must be PROVISIONAL, CANDIDATE, or APPROVED"
+            )
+        case["annotationStatus"] = annotation_status
+        if not isinstance(case.get("shouldNotFind", []), list):
+            raise BenchmarkDatasetError(f"case {case_id} shouldNotFind must be a list")
+        return case_id
+
     findings = case.get("expectedFindings")
     if not isinstance(findings, list):
         raise BenchmarkDatasetError(f"case {case_id} expectedFindings must be a list")

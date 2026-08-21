@@ -118,6 +118,14 @@ def date_rule(doc: dict[str, Any], deadline: str | None,
         or doc.get("uploadedAt") or doc.get("uploadDate")
     )
     if doc_date is None:
+        # Evaluation proof is stored as extracted text, so a dated receipt
+        # must remain verifiable even when the synthetic document has no
+        # separate metadata column.
+        content = " ".join(str(doc.get(key) or "") for key in ("content", "snippet", "contentText"))
+        date_match = re.search(r"(20\d{2})[-年](\d{1,2})[-月](\d{1,2})", content)
+        if date_match:
+            doc_date = f"{int(date_match.group(1)):04d}-{int(date_match.group(2)):02d}-{int(date_match.group(3)):02d}"
+    if doc_date is None:
         return {
             "rule": "DATE", "code": "DATE_MISSING", "status": "FLAG",
             "detail": "证据缺少日期，需人工核对其所属履约周期",

@@ -290,6 +290,28 @@ def test_validation_flags_ungrounded_quote_without_rewriting():
     assert result["timeline_validation"]["ungroundedQuoteCount"] == 1
 
 
+def test_validation_removes_absolute_date_not_grounded_in_clause():
+    node = _candidate(
+        date="2026-03-02",
+        citation={
+            "quote": "2026年3月2日前支付首付款",
+            "extractionMode": "TEXT_DATE",
+            "timelineEnrichment": {"reason": "ok"},
+        },
+    )
+    state = _timeline_state(
+        timeline_clauses=[_clause(1, "5", "付款", "甲方应于2026年3月22日前支付首付款。")],
+        timeline_candidates=[node],
+    )
+
+    result = te.validate_timeline_nodes(state)
+
+    repaired = result["timeline_candidates"][0]
+    assert repaired["date"] is None
+    assert repaired["citation"]["dateUngrounded"] is True
+    assert repaired["status"] == "NEEDS_REVIEW"
+
+
 def test_validation_keeps_conditional_nodes_and_checks_consistency():
     conditional = _candidate(date=None, condition="两台机组通过168小时试运后45天内",
                              confidence=0.84)

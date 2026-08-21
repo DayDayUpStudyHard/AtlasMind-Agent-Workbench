@@ -1086,6 +1086,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
             "verification": verification or {},
             "citations": citations[:10],
         }
+        usage_out: dict[str, int] = {}
         response = self._call_llm_with_retry(
             lambda: self.analysis_client.chat.completions.create(
                 model=self.model,
@@ -1101,7 +1102,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
                 extra_body=self._reasoning_guard() or None,
                 stream=False,
             ),
-            max_retries=2, backoff_base=1.0,
+            max_retries=2, backoff_base=1.0, usage_out=usage_out,
         )
         content = response.choices[0].message.content if response.choices else ""
         artifact = self._parse_json_object(content or "")
@@ -1110,6 +1111,7 @@ AI 只能给建议结论，最终“已完成/完成失败/验收通过”必须
         artifact.setdefault("content", {})
         if isinstance(artifact["content"], dict):
             artifact["content"]["manualConfirmationRequired"] = True
+        artifact["_llmUsage"] = dict(usage_out)
         return artifact
 
     def extract_contract_metadata(self, file_name: str, text_excerpt: str,
@@ -1150,6 +1152,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
             "contractExcerpt": text_excerpt,
         }
         errors: list[str] = []
+        usage_out: dict[str, int] = {}
         for structured in (True, False):
             try:
                 kwargs = {
@@ -1170,8 +1173,11 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                     lambda kwargs=kwargs: self.analysis_client.chat.completions.create(**kwargs),
                     max_retries=1,
                     backoff_base=1.0,
+                    usage_out=usage_out,
                 )
-                return self._parse_structured_response(response, required_key="fields")
+                parsed = self._parse_structured_response(response, required_key="fields")
+                parsed["_llmUsage"] = dict(usage_out)
+                return parsed
             except AuthenticationError:
                 raise
             except APIError:
@@ -1468,7 +1474,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
     {
       "candidateId": "string",
       "keep": true,
-      "eventType": "CONTRACT_START | CONTRACT_END | SERVICE_START | SERVICE_END | PAYMENT | ACCEPTANCE | NOTICE | RENEWAL | TERMINATION | PENALTY | OTHER",
+      "eventType": "CONTRACT_START | CONTRACT_END | SERVICE_START | SERVICE_END | PAYMENT | DELIVERY | ACCEPTANCE | NOTICE | RENEWAL | TERMINATION | PENALTY | OTHER",
       "label": "string",
       "responsibleParty": "OUR_ENTITY | COUNTERPARTY | BOTH | UNKNOWN",
       "businessMeaning": "string",
@@ -1494,6 +1500,7 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
 9. aiRisk 是基于节点类型推断的管理风险，必须以“AI 推断，仅供参考：”开头，不能冒充合同约定。
 10. contractRequirements 只列合同原文明确要求在该节点完成或提交的事项，例如实施方案、研究报告、验收材料；没有则返回空数组。
 11. aiSuggestions 只列为了履约留痕、验收或付款而建议准备的材料；不得冒充合同要求，且与 contractRequirements 不重复。
+12. 必须区分 DELIVERY 与 ACCEPTANCE：一方在指定日期前交付成果、提交文件或验收申请属于 DELIVERY；另一方收到申请后组织验收、作出验收意见或验收通过属于 ACCEPTANCE。即使两项义务写在同一条款，也要按当前候选对应的动作分别分类，不能因为出现“验收”就把交付义务归为 ACCEPTANCE。
 """.strip()
         all_nodes: list[dict] = []
         errors: list[str] = []
@@ -1622,6 +1629,10 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
             client = client.with_options(timeout=max(1.0, float(timeout_seconds)))
 
         errors: list[str] = []
+        # Always collect usage for graph observability.  Callers that need the
+        # WorkUnit budget can still pass their own dict; the reserved metadata
+        # is stripped/ignored by graph normalizers and is never a contract fact.
+        observed_usage = usage_out if usage_out is not None else {}
         phases = (True, False) if allow_unstructured_fallback else (True,)
         for structured in phases:
             kwargs = {
@@ -1649,9 +1660,16 @@ amount 只允许返回整份合同的总价/总金额。不得把“合同总价
                     lambda kwargs=kwargs: client.chat.completions.create(**kwargs),
                     max_retries=max(0, int(max_retries)),
                     backoff_base=2.0,
-                    usage_out=usage_out,
+                    usage_out=observed_usage,
                 )
-                return self._parse_structured_response(response, required_key)
+                parsed = self._parse_structured_response(response, required_key)
+                parsed["_llmUsage"] = {
+                    "calls": int(observed_usage.get("calls") or 0),
+                    "promptTokens": int(observed_usage.get("promptTokens") or 0),
+                    "completionTokens": int(observed_usage.get("completionTokens") or 0),
+                    "tokens": int(observed_usage.get("tokens") or 0),
+                }
+                return parsed
             except AuthenticationError:
                 raise
             except APIConnectionError:

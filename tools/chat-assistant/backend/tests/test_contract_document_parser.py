@@ -191,6 +191,85 @@ class ContractDocumentParserTest(unittest.TestCase):
         self.assertEqual(1, len(captured["candidates"]))
         self.assertEqual(clause["content"], captured["candidates"][0]["clauseText"])
 
+    def test_delivery_and_acceptance_in_one_clause_remain_distinct(self):
+        quote = (
+            "乙方应于2026-03-06前完成约定交付，并提交交付清单、电子文件及验收申请。"
+            "甲方收到申请后10个工作日内组织验收。"
+        )
+        self.assertEqual("DELIVERY", parser._timeline_type("ACCEPTANCE", quote, "2026-03-06"))
+        self.assertEqual("ACCEPTANCE", parser._timeline_type("DELIVERY", quote, "收到申请后10个工作日内"))
+
+    def test_iso_timeline_dates_keep_two_digit_days(self):
+        clause = {
+            "id": 33,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "4.1",
+            "title": "交付与验收",
+            "content": "合同于2026-01-10生效。乙方应于2026-03-14前完成交付。",
+        }
+        nodes = parser._extract_clause_timeline_nodes_v2(clause, 2026, None, set())
+        self.assertEqual(["2026-01-10", "2026-03-14"], [node["date"] for node in nodes])
+
+    def test_tim_011_keeps_unknown_trigger_dates_conditional(self):
+        clause = {
+            "id": 34,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "4.1",
+            "title": "生效、付款、交付与验收",
+            "content": (
+                "合同自2026-01-16起生效。"
+                "合同生效后，甲方在收到乙方合法发票后10日内支付预付款。"
+                "乙方应于2026-03-22前完成约定交付，并提交交付清单、电子文件及验收申请。"
+                "甲方收到申请后10个工作日内组织验收。"
+            ),
+        }
+
+        nodes = parser._extract_clause_timeline_nodes_v2(
+            clause, 2026, "2026-01-16", set()
+        )
+
+        self.assertEqual(
+            ["2026-01-16", "2026-03-22"],
+            sorted(node["date"] for node in nodes if node.get("date")),
+        )
+        payment = next(node for node in nodes if node["nodeType"] == "PAYMENT")
+        acceptance = next(node for node in nodes if node["nodeType"] == "ACCEPTANCE")
+        self.assertIsNone(payment["date"])
+        self.assertIn("收到乙方合法发票后10日内", payment["condition"])
+        self.assertIsNone(acceptance["date"])
+        self.assertIn("收到申请后10个工作日内", acceptance["condition"])
+
+    def test_absolute_date_patterns_do_not_match_numeric_prefixes(self):
+        for value in ("2026-01-160", "2026-03-221", "2026年06月300日"):
+            self.assertIsNone(parser._ABSOLUTE_DATE_PATTERN.search(value))
+            self.assertIsNone(parser._ISO_DATE_PATTERN.search(value))
+            self.assertIsNone(parser._CN_DATE_PATTERN.search(value))
+
+    def test_llm_cannot_reclassify_explicit_delivery_as_acceptance(self):
+        clause = {
+            "id": 32,
+            "clauseType": "DELIVERY",
+            "clauseNumber": "4.1",
+            "title": "交付与验收",
+            "content": "乙方应于2026-03-06前完成交付，并提交验收申请。甲方收到申请后10日内组织验收。",
+        }
+        node = {
+            "clauseId": 32, "nodeType": "DELIVERY", "label": "完成交付",
+            "date": "2026-03-06", "condition": None, "responsibleParty": "COUNTERPARTY",
+            "businessMeaning": "乙方应完成交付并提交验收申请", "confidence": 0.9,
+            "status": "EXTRACTED", "source": "RULE_CANDIDATE",
+            "citation": {"quote": clause["content"], "clauseNumber": "4.1", "title": "交付与验收"},
+        }
+        response = {"nodes": [{
+            "candidateId": "timeline-1", "keep": True, "eventType": "ACCEPTANCE",
+            "label": "交付与验收申请", "businessMeaning": "甲方组织验收",
+            "responsibleParty": "COUNTERPARTY", "confidence": 0.95,
+        }]}
+        with patch.object(parser.LLMService, "enrich_contract_timeline", return_value=response):
+            final_nodes, _ = parser._enrich_timeline_nodes([node], [clause], strict=True)
+        self.assertEqual("DELIVERY", final_nodes[0]["nodeType"])
+        self.assertEqual("完成交付", final_nodes[0]["label"])
+
     def test_timeline_llm_receives_the_complete_clause(self):
         clause_text = (
             "7.2.3 竣工图设计文件：两台机组通过168小时试运后45天内完成编制，"

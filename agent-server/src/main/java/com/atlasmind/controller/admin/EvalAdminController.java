@@ -30,7 +30,8 @@ public class EvalAdminController {
     public Result<List<Map<String, Object>>> listDatasets() {
         return Result.ok(jdbc.queryForList("""
                 SELECT d.id, d.name, d.version, d.description, d.contract_type AS contractType,
-                       d.task_purpose AS taskPurpose,
+                       d.task_purpose AS taskPurpose, d.label_status AS labelStatus,
+                       d.private_corpus AS privateCorpus, d.target_case_count AS targetCaseCount,
                        d.case_count AS caseCount, d.status, d.create_time AS createTime
                 FROM agent_eval_dataset d
                 ORDER BY d.create_time DESC
@@ -43,11 +44,14 @@ public class EvalAdminController {
         String contractType = normalizeDatasetType(str(request, "contractType"));
         jdbc.update("""
                 INSERT INTO agent_eval_dataset
-                (name, version, description, contract_type, task_purpose, case_count, status)
-                VALUES (?,?,?,?,?,0,'DRAFT')
+                (name, version, description, contract_type, task_purpose, benchmark_profile_json,
+                 label_status, private_corpus, target_case_count, case_count, status)
+                VALUES (?,?,?,?,?,?,?, ?,?,0,'DRAFT')
                 """,
                 str(request, "name"), str(request, "version"),
-                str(request, "description"), contractType, str(request, "taskPurpose"));
+                str(request, "description"), contractType, str(request, "taskPurpose"),
+                str(request, "benchmarkProfileJson"), str(request, "labelStatus").isBlank() ? "PROVISIONAL" : str(request, "labelStatus"),
+                request.getOrDefault("privateCorpus", 0), request.getOrDefault("targetCaseCount", 0));
         return Result.ok(Map.of("created", true));
     }
 
@@ -66,7 +70,8 @@ public class EvalAdminController {
         return Result.ok(jdbc.queryForList("""
                 SELECT id, case_key AS caseKey, title, contract_type AS contractType,
                        scenario, difficulty, noise_level AS noiseLevel,
-                       COALESCE(JSON_LENGTH(expected_findings_json), 0) AS expectedFindingCount, status
+                       COALESCE(JSON_LENGTH(expected_findings_json), 0) AS expectedFindingCount,
+                       annotation_status AS annotationStatus, status
                 FROM agent_eval_case
                 WHERE dataset_id=?
                 ORDER BY id
@@ -79,6 +84,7 @@ public class EvalAdminController {
                 SELECT id, case_key AS caseKey, title, contract_type AS contractType,
                        contract_text AS contractText,
                        expected_findings_json AS expectedFindingsJson,
+                       expected_output_json AS expectedOutputJson,
                        should_not_find_json AS shouldNotFindJson,
                        expected_citation_count AS expectedCitationCount,
                        scenario, industry, difficulty,
@@ -89,6 +95,11 @@ public class EvalAdminController {
                        target_timeline_selector_json AS targetTimelineSelectorJson,
                        expected_judgements_json AS expectedJudgementsJson,
                        expected_manual_result AS expectedManualResult,
+                       candidate_label_json AS candidateLabelJson,
+                       annotation_status AS annotationStatus,
+                       label_provider AS labelProvider, label_model AS labelModel,
+                       label_prompt_version AS labelPromptVersion,
+                       source_case_id AS sourceCaseId, source_document_id AS sourceDocumentId,
                        dataset_id AS datasetId, status
                 FROM agent_eval_case WHERE id=?""", caseId))));
     }
@@ -105,8 +116,10 @@ public class EvalAdminController {
                  scenario, industry, difficulty, noise_level,
                  must_have_contract_citation, must_have_policy_citation,
                  fulfillment_evidence_json, target_timeline_selector_json,
-                 expected_judgements_json, expected_manual_result, status)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')
+                 expected_judgements_json, expected_manual_result, expected_output_json,
+                 annotation_status, candidate_label_json, label_provider, label_model,
+                 label_prompt_version, source_case_id, source_document_id, status)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'ACTIVE')
                 """,
                 datasetId, str(request, "caseKey"), str(request, "title"),
                 contractType, str(request, "contractText"),
@@ -119,7 +132,11 @@ public class EvalAdminController {
                 str(request, "fulfillmentEvidenceJson"),
                 str(request, "targetTimelineSelectorJson"),
                 str(request, "expectedJudgementsJson"),
-                str(request, "expectedManualResult"));
+                str(request, "expectedManualResult"), str(request, "expectedOutputJson"),
+                str(request, "annotationStatus").isBlank() ? "PROVISIONAL" : str(request, "annotationStatus"),
+                str(request, "candidateLabelJson"), str(request, "labelProvider"),
+                str(request, "labelModel"), str(request, "labelPromptVersion"),
+                numberAsLong(request.get("sourceCaseId")), numberAsLong(request.get("sourceDocumentId")));
         jdbc.update("""
                 UPDATE agent_eval_dataset
                 SET case_count=(SELECT COUNT(*) FROM agent_eval_case WHERE dataset_id=?)
@@ -142,6 +159,32 @@ public class EvalAdminController {
                     """, datasetId, datasetId);
         }
         return Result.ok(Map.of("deleted", true));
+    }
+
+    @PatchMapping("/cases/{caseId}/annotation")
+    @OperationLog(value = "确认评测金标", type = "UPDATE")
+    public Result<Map<String, Object>> reviewCaseAnnotation(
+            @PathVariable Long caseId, @RequestBody Map<String, Object> request) {
+        String status = str(request, "annotationStatus").toUpperCase(Locale.ROOT);
+        if (!Set.of("PROVISIONAL", "CANDIDATE", "APPROVED").contains(status)) {
+            throw new IllegalArgumentException("金标状态仅支持 PROVISIONAL / CANDIDATE / APPROVED");
+        }
+        String expectedOutput = str(request, "expectedOutputJson");
+        if (!expectedOutput.isEmpty()) {
+            try {
+                objectMapper.readTree(expectedOutput);
+            } catch (Exception e) {
+                throw new IllegalArgumentException("expectedOutputJson 必须是合法 JSON");
+            }
+        }
+        jdbc.update("""
+                UPDATE agent_eval_case
+                SET annotation_status=?, expected_output_json=COALESCE(NULLIF(?, ''), expected_output_json),
+                    reviewed_by=CASE WHEN ?='APPROVED' THEN 'admin' ELSE reviewed_by END,
+                    reviewed_at=CASE WHEN ?='APPROVED' THEN NOW() ELSE reviewed_at END
+                WHERE id=?
+                """, status, expectedOutput, status, status, caseId);
+        return Result.ok(Map.of("updated", true, "annotationStatus", status));
     }
 
     // ── Eval runs ──────────────────────────────────────────────────
@@ -230,6 +273,13 @@ public class EvalAdminController {
                 JOIN agent_eval_dataset d ON d.id=r.dataset_id
                 ORDER BY r.id DESC LIMIT 50
                 """).stream().map(this::decorateRun).toList());
+    }
+
+    @PostMapping("/runs/recompute-gates")
+    @OperationLog(value = "重算评测评分与发布门禁", type = "UPDATE")
+    public Result<Map<String, Object>> recomputeGates(@RequestBody(required = false) Map<String, Object> request) {
+        Map<String, Object> payload = request == null ? Map.of() : request;
+        return Result.ok(aiGateway.recomputeEvaluationGates(payload));
     }
 
     // ── Version comparison board (PRD Phase 8 task 7) ──────────────
@@ -327,6 +377,8 @@ public class EvalAdminController {
                        ec.scenario, ec.industry, ec.difficulty,
                        ec.noise_level AS noiseLevel,
                        ec.expected_findings_json AS expectedFindingsJson,
+                       ec.expected_output_json AS expectedOutputJson,
+                       ec.annotation_status AS annotationStatus,
                        ec.should_not_find_json AS shouldNotFindJson
                 FROM agent_eval_result er
                 JOIN agent_eval_case ec ON ec.id=er.case_id
@@ -349,7 +401,7 @@ public class EvalAdminController {
         if (!"COMPLETED".equalsIgnoreCase(str(run, "status"))) {
             throw new IllegalStateException("只有 COMPLETED 评测运行可以设为生产基线");
         }
-        if (!"PASSED".equalsIgnoreCase(releaseGateStatus(run.get("summaryJson")))) {
+        if (!"PUBLISHABLE".equalsIgnoreCase(releaseGatePublishStatus(run.get("summaryJson")))) {
             throw new IllegalStateException("评测发布门禁未通过，不能设为生产基线");
         }
 
@@ -380,7 +432,8 @@ public class EvalAdminController {
                        r1.high_recall AS recall1, r2.high_recall AS recall2,
                        r1.dual_citation_rate AS dualCite1, r2.dual_citation_rate AS dualCite2,
                        r1.analysis_mode AS mode1, r2.analysis_mode AS mode2,
-                       r1.risk_score AS score1, r2.risk_score AS score2
+                       r1.risk_score AS score1, r2.risk_score AS score2,
+                       r1.result_json AS resultJson1, r2.result_json AS resultJson2
                 FROM agent_eval_result r1
                 JOIN agent_eval_result r2 ON r2.case_id=r1.case_id AND r2.run_id=?
                 JOIN agent_eval_case ec ON ec.id=r1.case_id
@@ -435,6 +488,19 @@ public class EvalAdminController {
         }
     }
 
+    private String releaseGatePublishStatus(Object rawSummary) {
+        if (rawSummary == null) return "";
+        try {
+            String publishStatus = objectMapper.readTree(rawSummary.toString())
+                    .path("releaseGate").path("publishStatus").asText("");
+            if (!publishStatus.isBlank()) return publishStatus;
+            // Historical runs only have releaseGate.status.
+            return "PASSED".equalsIgnoreCase(releaseGateStatus(rawSummary)) ? "PUBLISHABLE" : "BLOCKED";
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
     private static Map<String, Object> first(List<Map<String, Object>> list) {
         return list.isEmpty() ? null : list.get(0);
     }
@@ -470,6 +536,14 @@ public class EvalAdminController {
                 actualEngine = actual == null ? "" : actual.toString().trim();
                 mismatch = Boolean.TRUE.equals(mismatchFlag);
                 Object operations = summary.get("operations");
+                Object releaseGate = summary.get("releaseGate");
+                if (releaseGate instanceof Map<?, ?> gate) {
+                    row.put("executionStatus", gate.get("executionStatus"));
+                    row.put("qualityStatus", gate.get("qualityStatus"));
+                    row.put("goldStatus", gate.get("goldStatus"));
+                    row.put("publishStatus", gate.get("publishStatus"));
+                    row.put("releaseGate", gate);
+                }
                 if (operations instanceof Map<?, ?> operationMap) {
                     row.put("operations", operationMap);
                     row.put("latencyP50Ms", operationMap.get("latencyP50Ms"));
@@ -497,6 +571,7 @@ public class EvalAdminController {
     private Map<String, Object> decorateResult(Map<String, Object> row) {
         if (row == null) return null;
         row.put("analysisModeLabel", analysisModeLabel(str(row, "analysisMode")));
+        extractTaskMetrics(row, "resultJson", "taskMetrics");
         return row;
     }
 
@@ -504,7 +579,21 @@ public class EvalAdminController {
         if (row == null) return null;
         row.put("mode1Label", analysisModeLabel(str(row, "mode1")));
         row.put("mode2Label", analysisModeLabel(str(row, "mode2")));
+        extractTaskMetrics(row, "resultJson1", "taskMetrics1");
+        extractTaskMetrics(row, "resultJson2", "taskMetrics2");
         return row;
+    }
+
+    private void extractTaskMetrics(Map<String, Object> row, String jsonKey, String targetKey) {
+        String raw = str(row, jsonKey);
+        if (raw.isEmpty()) return;
+        try {
+            Map<String, Object> root = objectMapper.readValue(raw, new TypeReference<>() {});
+            Object metrics = root.get("taskMetrics");
+            if (metrics instanceof Map<?, ?>) row.put(targetKey, metrics);
+        } catch (Exception ignored) {
+            // Historical result rows may contain malformed or legacy artifacts.
+        }
     }
 
     private static String normalizeDatasetType(String value) {
@@ -512,8 +601,9 @@ public class EvalAdminController {
         if (v.isBlank()) return "CONTRACT_REVIEW";
         return switch (v) {
             case "CONTRACT_REVIEW", "RISK_REVIEW" -> "CONTRACT_REVIEW";
-            case "INTAKE", "ELEMENT_EXTRACTION" -> "INTAKE";
-            case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "FULFILLMENT_TIMELINE";
+            case "CONTRACT_INTAKE" -> "CONTRACT_INTAKE";
+            case "INTAKE", "ELEMENT_EXTRACTION", "CONTRACT_ELEMENT_EXTRACTION" -> "CONTRACT_ELEMENT_EXTRACTION";
+            case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "TIMELINE_EXTRACTION";
             case "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION" -> "FULFILLMENT_CHECK";
             case "COMPREHENSIVE" -> "COMPREHENSIVE";
             default -> "CONTRACT_REVIEW";
@@ -544,7 +634,8 @@ public class EvalAdminController {
     private static String datasetTypeLabel(String value) {
         return switch (value == null ? "" : value.trim().toUpperCase(Locale.ROOT)) {
             case "CONTRACT_REVIEW", "RISK_REVIEW" -> "风险审查";
-            case "INTAKE", "ELEMENT_EXTRACTION" -> "合同要素提取";
+            case "CONTRACT_INTAKE" -> "首次合同识别";
+            case "INTAKE", "ELEMENT_EXTRACTION", "CONTRACT_ELEMENT_EXTRACTION" -> "合同要素提取";
             case "FULFILLMENT_TIMELINE", "TIMELINE_EXTRACTION" -> "履约日程提取";
             case "FULFILLMENT_CHECK", "FULFILLMENT_VERIFICATION" -> "履约核验";
             case "COMPREHENSIVE" -> "综合评测";

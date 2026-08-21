@@ -18,6 +18,7 @@ from ..harness.models import Role, TaskSpec
 from .element_normalization import validate_base_field, validate_structured_element
 from .evidence_snapshot import load_contract_evidence_snapshot, state_copy_of_snapshot
 from .versioning import stamp_artifact_versions
+from .state import merge_llm_usage
 
 logger = logging.getLogger(__name__)
 
@@ -315,6 +316,7 @@ def _plan_element_packs(
                 "contractTypeRefined": str(raw.get("contractTypeRefined") or case.get("contractType") or "OTHER")[:64],
                 "subjectSummary": str(raw.get("subjectSummary") or "")[:1000],
                 "rationale": str(raw.get("rationale") or "")[:1000],
+                "_llmUsage": raw.get("_llmUsage") or {},
             }
         logger.warning("LLM element plan was unusable; falling back to static packs")
     except Exception as exc:
@@ -395,6 +397,7 @@ def select_element_packs(state: dict[str, Any]) -> dict[str, Any]:
     run_id = int(state.get("run_id") or 0)
 
     packs, plan_meta = _plan_element_packs(context, run_id)
+    planner_usage = plan_meta.pop("_llmUsage", {}) if isinstance(plan_meta, dict) else {}
 
     # Field-level rerun (PRD Phase 5, task 6): settled elements of the
     # previous snapshot are carried, and only packs that still have pending
@@ -449,6 +452,7 @@ def select_element_packs(state: dict[str, Any]) -> dict[str, Any]:
             "planning": plan_meta,
             "rerun": rerun,
         },
+        "llm_usage": merge_llm_usage(state, "select_element_packs", planner_usage),
         "observations": [{
             "callId": f"extraction-plan-{run_id}",
             "planStepId": "select_element_packs",
@@ -709,6 +713,7 @@ def extract_element_batches(state: dict[str, Any]) -> dict[str, Any]:
     elements: list[dict[str, Any]] = []
     observations: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
+    node_usage: dict[str, int] = {"calls": 0, "promptTokens": 0, "completionTokens": 0, "tokens": 0}
     for pack in state.get("element_packs") or []:
         pack_key = str(pack.get("packKey") or "")
         evidence = (state.get("element_evidence") or {}).get(pack_key) or []
@@ -716,6 +721,12 @@ def extract_element_batches(state: dict[str, Any]) -> dict[str, Any]:
             raw = llm.extract_contract_elements(
                 context.get("case") or {}, pack, evidence, int(state.get("run_id") or 0)
             )
+            usage = raw.get("_llmUsage") or {}
+            for field in node_usage:
+                try:
+                    node_usage[field] += max(0, int(usage.get(field) or 0))
+                except (TypeError, ValueError):
+                    pass
             normalized = _normalize_model_elements(raw.get("elements") or [], pack, evidence)
             status = "DONE"
             error = ""
@@ -753,6 +764,7 @@ def extract_element_batches(state: dict[str, Any]) -> dict[str, Any]:
         "extracted_elements": elements,
         "observations": observations,
         "errors": state.get("errors", []) + errors,
+        "llm_usage": merge_llm_usage(state, "extract_element_batches", node_usage),
     }
 
 
@@ -1154,6 +1166,7 @@ def build_contract_profile(state: dict[str, Any]) -> dict[str, Any]:
         raw = LLMService().extract_contract_profile(
             case_hint, evidence, elements, int(state.get("run_id") or 0)
         )
+        usage = raw.get("_llmUsage") or {}
         profile, validation = normalize_contract_profile(
             raw, context, elements, evidence, base_fields=base_fields
         )
@@ -1182,6 +1195,7 @@ def build_contract_profile(state: dict[str, Any]) -> dict[str, Any]:
             "error": error,
         }],
         "errors": state.get("errors", []) + ([{"node": "build_contract_profile", "error": error}] if error else []),
+        "llm_usage": merge_llm_usage(state, "build_contract_profile", usage if "usage" in locals() else {}),
     }
 
 

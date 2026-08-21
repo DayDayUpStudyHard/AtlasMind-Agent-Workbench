@@ -138,6 +138,88 @@ def test_release_gate_passes_only_for_full_quality_run():
     assert gate["thresholdVersion"] == "release-gate-v1"
 
 
+def test_v4_release_gate_exposes_four_independent_statuses():
+    from app.agent_runtime.evaluation.metrics import build_release_gate
+
+    gate = build_release_gate({
+        "benchmarkSchemaVersion": 2,
+        "benchmarkTaskType": "FULFILLMENT_CHECK",
+        "taskMetrics": {"requirementRecall": 0.9},
+        "metricDenominators": {
+            "proofStatusAccuracy": 1,
+            "judgementAccuracy": 0,
+            "aiSuggestionAccuracy": 0,
+        },
+        "metricCaseCount": 1,
+        "resultValid": True,
+        "approvedCaseCount": 5,
+        "provisionalCaseCount": 0,
+    }, status="COMPLETED")
+
+    assert gate["executionStatus"] == "COMPLETED"
+    assert gate["qualityStatus"] == "FAILED"  # required metrics not supplied
+    assert gate["goldStatus"] == "APPROVED"
+    assert gate["publishStatus"] == "BLOCKED"
+    assert "judgementAccuracy" in gate["unobservedMetrics"]
+
+
+def test_unlabelled_fulfillment_dimensions_are_not_scored_as_zero():
+    from app.api.routes import _score_fulfillment_check
+
+    case = {
+        "expected_findings_json": '[{"title":"交付文件","requirement":"提交交付文件"}]',
+        "expected_judgements_json": '[{"requirementContains":"交付文件","proofStatus":"SUPPORTED"}]',
+        "expected_manual_result": "SATISFIED",
+    }
+    artifact = {
+        "content": {"manualResult": "SATISFIED"},
+        "requirements": [{
+            "requirement": "提交交付文件",
+            "proofStatus": "SUPPORTED",
+            "judgement": "BASICALLY_SATISFIED",
+            "aiSuggestion": {"conclusion": "BASICALLY_SATISFIED", "status": "LLM_ENRICHED"},
+            "evidenceSnapshot": {"text": "已提交"},
+        }],
+    }
+    result = _score_fulfillment_check(case, artifact)
+    assert result["proofStatusAccuracy"] == 1.0
+    assert result["proofStatusDenominator"] == 1
+    assert result["judgementAccuracy"] is None
+    assert result["aiSuggestionAccuracy"] is None
+
+
+def test_contract_intake_scores_identity_kinds_independently():
+    from app.api.routes import _score_contract_intake
+
+    case = {"expected_findings_json": json.dumps([
+        {"title": "甲方:甲公司", "key": "partyA", "value": "甲公司", "kind": "partyRole"},
+        {"title": "合同金额:100万元", "key": "amount", "value": "100万元", "kind": "amount"},
+        {"title": "签订日期:2026-01-01", "key": "signedDate", "value": "2026-01-01", "kind": "date"},
+        {"title": "合同名称:技术服务合同", "key": "contractTitle", "value": "技术服务合同", "kind": "title"},
+    ], ensure_ascii=False)}
+    artifact = {"elements": [
+        {"elementKey": "partyA", "rawValue": "甲公司", "citations": [{"quote": "甲公司"}]},
+        {"elementKey": "amount", "rawValue": "100万元", "citations": [{"quote": "100万元"}]},
+        {"elementKey": "signedDate", "rawValue": "2026-01-01", "citations": [{"quote": "2026-01-01"}]},
+        {"elementKey": "contractTitle", "rawValue": "技术服务合同", "citations": [{"quote": "技术服务合同"}]},
+    ]}
+    result = _score_contract_intake(case, artifact)
+    assert result["partyRoleAccuracy"] == 1.0
+    assert result["amountAccuracy"] == 1.0
+    assert result["dateAccuracy"] == 1.0
+    assert result["contractTitleAccuracy"] == 1.0
+
+
+def test_limited_only_blocks_when_it_hits_expected_risk_dimension():
+    from app.api.routes import _limited_result_impacts_target_domain
+
+    case = {"expected_findings_json": '[{"title":"付款周期过长","riskDimension":"PAYMENT"}]'}
+    unrelated = {"analysisMode": "LIMITED", "findings": [{"title": "验收不明", "domainKey": "ACCEPTANCE"}]}
+    related = {"analysisMode": "LIMITED", "findings": [{"title": "付款无期限", "domainKey": "PAYMENT"}]}
+    assert not _limited_result_impacts_target_domain(case, unrelated, "CONTRACT_REVIEW")
+    assert _limited_result_impacts_target_domain(case, related, "CONTRACT_REVIEW")
+
+
 def test_risk_title_matching_accepts_semantically_equivalent_wording():
     from app.api.routes import _risk_finding_matches
 
@@ -178,6 +260,17 @@ def test_only_current_failed_stage_is_marked_failed():
         [101, 102, 103],
         completed_run_ids={101, 102},
     ) == [103]
+
+
+def test_eval_case_timebox_uses_one_budget_for_all_stages():
+    from app.api.routes import _remaining_eval_case_timeout
+
+    # The second stage receives only the budget left by the first stage;
+    # multi-stage fulfillment checks cannot consume a full timeout twice.
+    assert _remaining_eval_case_timeout(110.1, now=100.0) == 11
+    assert _remaining_eval_case_timeout(110.1, now=109.2) == 1
+    with pytest.raises(TimeoutError, match="wall-clock timeout"):
+        _remaining_eval_case_timeout(110.0, now=110.0)
 
 
 def test_limited_agent_result_remains_scoreable_for_evaluation():
@@ -264,6 +357,20 @@ def test_eval_environment_gate_retries_transient_embedding_probe(monkeypatch):
 
     assert snapshot["environmentStatus"] == "READY"
     assert snapshot["probeAttempts"] == 2
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Error code: 402 - Insufficient Balance",
+        "HTTP 403 Forbidden",
+        "LLM authentication failed",
+    ],
+)
+def test_eval_provider_auth_and_balance_errors_are_infrastructure_failures(message):
+    from app.api.routes import _is_infra_error
+
+    assert _is_infra_error(message) is True
 
 
 def test_eval_fixture_seeds_deterministic_intake_metadata():
@@ -638,7 +745,7 @@ def test_score_eval_artifact_registry_routes_risk_review():
     assert result["dualCitationRate"] == 1.0
     assert result["schemaValid"] == 1
     assert result["scored"] is True
-    assert result["scorerVersion"] == "eval-scorers-v2"
+    assert result["scorerVersion"] == "eval-scorers-v4"
 
 
 def test_score_eval_artifact_element_extraction_scores_elements_and_missing():
@@ -684,7 +791,7 @@ def test_score_eval_artifact_element_extraction_scores_elements_and_missing():
     assert result["schemaValid"] == 1
     assert result["findingCount"] == 2
     assert result["scored"] is True
-    assert result["scorerVersion"] == "eval-scorers-v2"
+    assert result["scorerVersion"] == "eval-scorers-v4"
 
 
 def test_score_eval_artifact_element_missing_not_detected_scores_zero():
@@ -802,6 +909,42 @@ def test_score_eval_artifact_timeline_date_mismatch_and_fabricated_node():
     assert result["dateDenominator"] == 1
     # fabricated fixed termination date surfaces as a false positive
     assert result["falsePositives"] == 1
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("2017年11月30日", "2017-11-30"),
+        ("2017/11/30", "2017-11-30"),
+        ("二〇一七年十一月三十日", "2017-11-30"),
+        ("合同生效后十日内", None),
+    ],
+)
+def test_timeline_scorer_normalizes_contract_date_formats(raw, expected):
+    from app.api.routes import _extract_eval_date
+
+    assert _extract_eval_date(raw) == expected
+
+
+def test_timeline_scorer_compares_chinese_expected_date():
+    from app.api.routes import _score_eval_artifact
+
+    result = _score_eval_artifact(
+        {"expected_findings_json": json.dumps([
+            {"title": "签署:2017年11月30日", "severity": "LOW"},
+        ], ensure_ascii=False)},
+        {"nodes": [{
+            "label": "签署",
+            "date": "2017-11-30",
+            "condition": None,
+            "nodeType": "SIGNING",
+            "businessMeaning": "合同签署日期",
+        }]},
+        "TIMELINE_EXTRACTION",
+    )
+
+    assert result["dateAccuracy"] == 1.0
+    assert result["dateDenominator"] == 1
 
 
 def test_timeline_scorer_reads_evaluation_stage_wrapper():
@@ -957,6 +1100,50 @@ def test_fulfillment_eval_requires_separate_evidence_selector_and_manual_result(
     assert result["expectedManualResult"] == "SATISFIED"
 
 
+def test_fulfillment_timeline_selector_can_relax_mismatched_node_type(monkeypatch):
+    from app.api.routes import _select_eval_timeline_node_id
+
+    class Cursor:
+        def __init__(self):
+            self.calls = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query, params):
+            self.calls.append((query, params))
+
+        def fetchall(self):
+            query, params = self.calls[-1]
+            # The extractor classified a delivery obligation as ACCEPTANCE;
+            # the gold selector still identifies it by its label.
+            if "node_type=%s" in query:
+                return []
+            return [{"id": 901}]
+
+    cursor = Cursor()
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def cursor(self):
+            return cursor
+
+    monkeypatch.setattr("app.agent_runtime.persistence._conn", lambda: Conn())
+
+    assert _select_eval_timeline_node_id(
+        7, {"nodeType": "DELIVERY", "labelContains": "交付"}
+    ) == 901
+    assert len(cursor.calls) == 2
+
+
 def test_fulfillment_scorer_uses_stage_artifact_and_expected_human_decision():
     from app.api.routes import _score_eval_artifact
 
@@ -983,8 +1170,30 @@ def test_fulfillment_scorer_uses_stage_artifact_and_expected_human_decision():
 
     result = _score_eval_artifact(case, artifact, "FULFILLMENT_CHECK")
     assert result["highRecall"] == 1.0
-    assert result["judgementAccuracy"] == 1.0
+    assert result["judgementAccuracy"] is None
     assert result["humanResultMatch"] == 1.0
+
+
+def test_fulfillment_scorer_matches_requirement_text_and_deadline():
+    from app.api.routes import _score_eval_artifact
+
+    case = {
+        "expected_findings_json": json.dumps([{
+            "title": "交付:2026-03-06",
+            "requirement": "提交交付清单、电子文件及验收申请",
+        }]),
+    }
+    artifact = {
+        "requirements": [{
+            "requirement": "完成交付并提交验收申请",
+            "deadline": "2026-03-06",
+            "proofStatus": "SUPPORTED",
+        }],
+        "content": {"requirements": []},
+    }
+
+    result = _score_eval_artifact(case, artifact, "FULFILLMENT_CHECK")
+    assert result["highRecall"] == 1.0
 
 
 def test_fulfillment_eval_evidence_versions_follow_main_contract(monkeypatch):

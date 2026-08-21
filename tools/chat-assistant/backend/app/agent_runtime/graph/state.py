@@ -40,6 +40,33 @@ def _overwrite_or_keep(_left: Any, right: Any) -> Any:
     return right if right is not None else _left
 
 
+def merge_llm_usage(
+    state: dict[str, Any], node_name: str, usage: dict[str, Any] | None
+) -> dict[str, dict[str, int]]:
+    """Merge one node's API usage into the graph's per-node ledger."""
+    result = {
+        str(key): dict(value)
+        for key, value in (state.get("llm_usage") or {}).items()
+        if isinstance(value, dict)
+    }
+    raw = usage if isinstance(usage, dict) else {}
+    current = dict(result.get(node_name) or {})
+    for target, aliases in (
+        ("calls", ("calls",)),
+        ("promptTokens", ("promptTokens", "prompt_tokens")),
+        ("completionTokens", ("completionTokens", "completion_tokens")),
+        ("tokens", ("tokens",)),
+    ):
+        value = next((raw.get(alias) for alias in aliases if raw.get(alias) is not None), 0)
+        try:
+            current[target] = max(0, int(current.get(target) or 0)) + max(0, int(value or 0))
+        except (TypeError, ValueError):
+            continue
+    if current and any(int(current.get(key) or 0) > 0 for key in ("calls", "promptTokens", "completionTokens", "tokens")):
+        result[node_name] = current
+    return result
+
+
 class BaseGraphState(TypedDict, total=False):
     """Common state shared across all contract agent graphs.
 
@@ -150,6 +177,10 @@ class BaseGraphState(TypedDict, total=False):
     # the schema gate audits it against WorkUnitBudget and can flip the run
     # to LIMITED. Keyed by work unit id (risk v1: domainKey).
     work_unit_usage: dict[str, dict[str, int]]
+    # Real LLM API usage grouped by graph node.  Nodes merge their own
+    # prompt/completion counts here; the MySQL checkpoint persists the entry
+    # for the current node into agent_node_execution.
+    llm_usage: dict[str, dict[str, int]]
     # §7.2/§6.4: when a node marks the run scope-limited (over-budget or
     # coverage-limited WorkUnit), it writes the mandatory diagnostics here;
     # the runtime turns the run into LIMITED, never FAILED / false COMPLETED.

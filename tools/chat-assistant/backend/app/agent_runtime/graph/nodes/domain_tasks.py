@@ -6,6 +6,8 @@ import logging
 import re
 from typing import Any
 
+from ..state import merge_llm_usage
+
 logger = logging.getLogger(__name__)
 
 VALID_CLAUSE_TYPES = {
@@ -179,6 +181,7 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
         focus_dimensions = set()
     dynamic: list[dict[str, Any]] = []
     planner_error = ""
+    planner_usage: dict[str, Any] = {}
 
     try:
         from app.services.llm_service import LLMService
@@ -189,6 +192,7 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
             baseline,
             int(state.get("run_id") or 0),
         )
+        planner_usage = result.get("_llmUsage") or {} if isinstance(result, dict) else {}
         for index, raw in enumerate((result or {}).get("domains") or []):
             if not isinstance(raw, dict):
                 continue
@@ -230,9 +234,13 @@ def create_domain_tasks(state: dict[str, Any]) -> dict[str, Any]:
         "status": "DONE" if not planner_error else "FALLBACK",
     }
 
-    return {
+    result = {
         "state_revision": state.get("state_revision", 0) + 1,
         "current_node": "create_domain_tasks",
         "domain_tasks": domain_tasks,
         "observations": [observation],
     }
+    merged_usage = merge_llm_usage(state, "create_domain_tasks", planner_usage)
+    if merged_usage != (state.get("llm_usage") or {}):
+        result["llm_usage"] = merged_usage
+    return result
