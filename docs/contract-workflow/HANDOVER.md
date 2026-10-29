@@ -3,6 +3,7 @@
 > 目的：让一个**没有参与过讨论**的人或 Agent，能独立完成一期，而不需要猜。
 > 读完本文再读 [phase-1-workflow-view.md](./phase-1-workflow-view.md)。
 > **不要读 phase-2 / phase-3** —— 它们是草案，里面的"建议默认值"是留给人拍板的，不是给你的施工图。
+> 当前进度：一期已续实施并完成本地分层验收。接手时先读 [实施记录](./implementation-phase-1.md) 末尾带时间的最新追加节；原始“未编译、未验收”段落是保留的历史记录。
 
 ---
 
@@ -64,7 +65,7 @@ CI 就是这几条（`.github/workflows/ci.yml`），本地跑通即等于过了
 
 ### 3.2 手工验收
 
-按 phase-1 §11 的 12 条，用真实浏览器点。三个宽度都要看：1280 / 768 / 375。
+按 phase-1 §11 的 13 条，用真实浏览器点。三个宽度都要看：1280 / 768 / 375。构造数据验证、浏览器操作与真实 AI 全链路需分别记载，不能互相替代。
 
 ### 3.3 降级状态要分清
 
@@ -76,7 +77,8 @@ LLM、Embedding、Reranker 或 Elasticsearch 任一不可用时，系统会记�
 
 | 想改什么 | 先看 |
 | --- | --- |
-| 工作流条 / 下一步卡片 | `agent-front/src/views/ContractCaseView.vue`（搜索 `analysis-workflow-panel`、`analysisStages`） |
+| 工作流条 / 下一步卡片 | `agent-front/src/views/ContractCaseView.vue`（搜索 `case-workflow-panel`、`loadWorkflow`、`handleWorkflowAction`） |
+| 阶段推导与批量数据 | `agent-server/src/main/java/com/atlasmind/service/ContractWorkflowService.java` |
 | 列表页阶段标签 | `agent-front/src/views/ContractPortfolioView.vue` |
 | 接口 | `agent-server/src/main/java/com/atlasmind/controller/ContractWorkspaceController.java` |
 | 案件状态与数据 | `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java` |
@@ -121,7 +123,7 @@ LLM、Embedding、Reranker 或 Elasticsearch 任一不可用时，系统会记�
 ## 7. 已知的坑
 
 1. **中文文件用 `read` 工具读，不要用 `Get-Content`** —— PowerShell 控制台会乱码，看起来像文件坏了。
-2. **文档里的行号会漂**。用锚点搜索（`analysis-workflow-panel`、`analysisStages`、`nextTaskType`、`canStart`），不要硬信行号。
+2. **文档里的行号会漂**。用锚点搜索（`case-workflow-panel`、`loadWorkflow`、`nextTaskType`、`canStart`），不要硬信行号。
 3. **前端改完要重新构建**（`npm run dev` 热更新，`npm run build` 才进产物）；后端改完要重启 18080。
 4. **`approvalMemo` 是 AI 生成的草案**，页面自己标了"不代表审批已完成"。不要把它当审批结果，也不要因为它存在就以为审批功能已实现。
 5. **docs 下有两套"六层"**：技术架构六层 ≠ 改造层次 0~6，见 README §9。
@@ -132,7 +134,7 @@ LLM、Embedding、Reranker 或 Elasticsearch 任一不可用时，系统会记�
 ## 8. 交付前自检
 
 - [ ] `mvn test` / `npm run build` ×2 / `pytest` 全绿
-- [ ] 12 条验收逐条过，三个宽度都看过
+- [ ] 13 条验收逐条记录证据层级与未覆盖范围，三个宽度都看过
 - [ ] 没有新增表、没有改迁移、没有动任务图
 - [ ] 阶段判断只有一处实现，前端没有第二套推导逻辑
 - [ ] 枚举与 README §4 完全一致

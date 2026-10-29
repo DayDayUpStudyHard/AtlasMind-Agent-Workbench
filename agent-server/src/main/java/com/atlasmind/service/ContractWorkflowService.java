@@ -121,127 +121,64 @@ public class ContractWorkflowService {
     // ── 数据装载 ────────────────────────────────────────────────────
 
     private Signals loadSignals(Long caseId) {
-        Signals s = new Signals();
-        Map<String, Object> c = first(jdbcTemplate.queryForList(
-                "SELECT id, status, create_time AS createTime, expiry_date AS expiryDate "
-                        + "FROM contract_case WHERE id=? AND deleted=0", caseId));
-        if (c == null) throw new IllegalArgumentException("合同案件不存在");
-        s.caseStatus = upper(str(c.get("status")));
-        s.createdAt = localDateTime(c.get("createTime"));
-        s.expiryDate = localDate(c.get("expiryDate"));
-
-        try {
-            Map<String, Object> doc = first(jdbcTemplate.queryForList("""
-                    SELECT id, parse_status AS parseStatus, parse_quality AS parseQuality,
-                           create_time AS createTime
-                    FROM contract_document
-                    WHERE case_id=? AND document_type='MAIN' AND COALESCE(deleted,0)=0
-                    ORDER BY version DESC, id DESC LIMIT 1
-                    """, caseId));
-            if (doc != null) {
-                s.hasMainDocument = true;
-                s.parseStatus = upper(str(doc.get("parseStatus")));
-                s.parseQuality = upper(str(doc.get("parseQuality")));
-                s.mainDocumentCreatedAt = localDateTime(doc.get("createTime"));
-            }
-        } catch (Exception ignored) { /* 滚动部署期缺列时按无文档处理 */ }
-
-        try {
-            Map<String, Object> snap = first(jdbcTemplate.queryForList("""
-                    SELECT status FROM contract_extraction_snapshot
-                    WHERE case_id=? ORDER BY id DESC LIMIT 1
-                    """, caseId));
-            s.snapshotStatus = upper(str(snap == null ? null : snap.get("status")));
-        } catch (Exception ignored) { /* V026 未应用 */ }
-
-        try {
-            List<Map<String, Object>> runs = jdbcTemplate.queryForList("""
-                    SELECT run_type AS runType, status, id
-                    FROM agent_run
-                    WHERE subject_type='CONTRACT_CASE' AND subject_id=?
-                      AND run_type IN ('CONTRACT_ELEMENT_EXTRACTION','TIMELINE_EXTRACTION','CONTRACT_REVIEW')
-                    ORDER BY id DESC
-                    """, caseId);
-            for (Map<String, Object> run : runs) {
-                String type = upper(str(run.get("runType")));
-                String status = upper(str(run.get("status")));
-                switch (type) {
-                    case "CONTRACT_ELEMENT_EXTRACTION" -> { if (!s.hasExtractionRun) { s.extractionRunStatus = status; s.hasExtractionRun = true; } }
-                    case "TIMELINE_EXTRACTION" -> { if (!s.hasTimelineRun) { s.timelineRunStatus = status; s.hasTimelineRun = true; } }
-                    case "CONTRACT_REVIEW" -> { if (!s.hasReviewRun) { s.reviewRunStatus = status; s.hasReviewRun = true; } }
-                    default -> { }
-                }
-            }
-        } catch (Exception ignored) { /* agent_run 不可用时按无运行处理 */ }
-
-        try {
-            Map<String, Object> wf = first(jdbcTemplate.queryForList(
-                    "SELECT timeline_status AS timelineStatus FROM contract_analysis_workflow "
-                            + "WHERE case_id=? ORDER BY id DESC LIMIT 1", caseId));
-            s.timelineStatus = upper(str(wf == null ? null : wf.get("timelineStatus")));
-        } catch (Exception ignored) { /* V025 未应用 */ }
-
-        try {
-            Map<String, Object> counts = first(jdbcTemplate.queryForList("""
-                    SELECT COUNT(*) AS total,
-                           SUM(CASE WHEN COALESCE(UPPER(review_status),'') IN ('CONFIRMED','NOT_APPLICABLE')
-                                    THEN 0 ELSE 1 END) AS pending
-                    FROM contract_timeline_node
-                    WHERE case_id=? AND (source='AGENT_FINAL' OR manual_override=1)
-                    """, caseId));
-            s.timelineTotal = intOf(counts == null ? null : counts.get("total"));
-            s.timelinePending = intOf(counts == null ? null : counts.get("pending"));
-        } catch (Exception ignored) { /* 无时间节点表 */ }
-
-        try {
-            Integer open = jdbcTemplate.queryForObject(
-                    "SELECT COUNT(*) FROM contract_review_finding WHERE case_id=? AND status='OPEN'",
-                    Integer.class, caseId);
-            s.openFindings = open == null ? 0 : open;
-        } catch (Exception ignored) { /* 无发现表 */ }
-
-        s.reviewLimited = "LIMITED".equals(s.reviewRunStatus);
-        return s;
+        Signals signals = loadSignalsBatch(List.of(caseId)).get(caseId);
+        if (signals == null) throw new IllegalArgumentException("合同案件不存在");
+        return signals;
     }
 
     private Map<Long, Signals> loadSignalsBatch(Collection<Long> ids) {
         Map<Long, Signals> map = new HashMap<>();
         List<Object> params = new ArrayList<>(ids);
         String in = placeholders(ids.size());
-        for (Long id : ids) map.put(id, new Signals());
 
         List<Map<String, Object>> cases = jdbcTemplate.queryForList(
                 "SELECT id, status, create_time AS createTime, expiry_date AS expiryDate "
-                        + "FROM contract_case WHERE id IN (" + in + ")", params.toArray());
+                        + "FROM contract_case WHERE deleted=0 AND id IN (" + in + ")", params.toArray());
         for (Map<String, Object> row : cases) {
-            Signals s = map.get(longOrNull(row.get("id")));
-            if (s == null) continue;
+            Signals s = new Signals();
+            map.put(longOrNull(row.get("id")), s);
             s.caseStatus = upper(str(row.get("status")));
             s.createdAt = localDateTime(row.get("createTime"));
             s.expiryDate = localDate(row.get("expiryDate"));
         }
 
-        List<Map<String, Object>> docs = jdbcTemplate.queryForList(
-                "SELECT case_id AS caseId, parse_status AS parseStatus, parse_quality AS parseQuality, "
-                        + "create_time AS createTime FROM contract_document "
-                        + "WHERE document_type='MAIN' AND COALESCE(deleted,0)=0 AND case_id IN (" + in + ") "
-                        + "ORDER BY case_id, version DESC, id DESC", params.toArray());
-        for (Map<String, Object> row : docs) {
-            Signals s = map.get(longOrNull(row.get("caseId")));
-            if (s == null || s.hasMainDocument) continue;
-            s.hasMainDocument = true;
-            s.parseStatus = upper(str(row.get("parseStatus")));
-            s.parseQuality = upper(str(row.get("parseQuality")));
-            s.mainDocumentCreatedAt = localDateTime(row.get("createTime"));
-        }
+        try {
+            List<Map<String, Object>> docs = jdbcTemplate.queryForList(
+                    "SELECT case_id AS caseId, parse_status AS parseStatus, parse_quality AS parseQuality, "
+                            + "create_time AS createTime FROM contract_document "
+                            + "WHERE document_type='MAIN' AND COALESCE(deleted,0)=0 AND case_id IN (" + in + ") "
+                            + "ORDER BY case_id, version DESC, id DESC", params.toArray());
+            for (Map<String, Object> row : docs) {
+                Signals s = map.get(longOrNull(row.get("caseId")));
+                if (s == null || s.hasMainDocument) continue;
+                s.hasMainDocument = true;
+                s.parseStatus = upper(str(row.get("parseStatus")));
+                s.parseQuality = upper(str(row.get("parseQuality")));
+                s.mainDocumentCreatedAt = localDateTime(row.get("createTime"));
+            }
+        } catch (Exception ignored) { /* 滚动部署期缺列时按无文档处理 */ }
 
         try {
             List<Map<String, Object>> snaps = jdbcTemplate.queryForList(
-                    "SELECT case_id AS caseId, status FROM contract_extraction_snapshot "
-                            + "WHERE case_id IN (" + in + ") ORDER BY case_id, id DESC", params.toArray());
+                    "SELECT s.case_id AS caseId, s.status, COUNT(e.id) AS total, "
+                            + "SUM(CASE WHEN e.id IS NOT NULL AND COALESCE(UPPER(e.review_status),'') "
+                            + "NOT IN ('CONFIRMED','NOT_APPLICABLE') THEN 1 ELSE 0 END) AS pending "
+                            + "FROM contract_extraction_snapshot s "
+                            + "LEFT JOIN contract_extracted_element e ON e.snapshot_id=s.id "
+                            + "WHERE s.case_id IN (" + in + ") AND s.document_id=("
+                            + "SELECT d.id FROM contract_document d WHERE d.case_id=s.case_id "
+                            + "AND d.document_type='MAIN' AND COALESCE(d.deleted,0)=0 "
+                            + "ORDER BY d.version DESC,d.id DESC LIMIT 1) "
+                            + "AND s.status IN ('READY_FOR_CONFIRMATION','CONFIRMED') "
+                            + "GROUP BY s.id,s.case_id,s.status "
+                            + "ORDER BY s.case_id,(s.status='CONFIRMED') DESC,s.id DESC", params.toArray());
             for (Map<String, Object> row : snaps) {
                 Signals s = map.get(longOrNull(row.get("caseId")));
-                if (s != null && s.snapshotStatus == null) s.snapshotStatus = upper(str(row.get("status")));
+                if (s != null && s.snapshotStatus == null) {
+                    s.snapshotStatus = upper(str(row.get("status")));
+                    s.elementTotal = intOf(row.get("total"));
+                    s.elementPending = intOf(row.get("pending"));
+                }
             }
         } catch (Exception ignored) { /* V026 未应用 */ }
 
@@ -266,6 +203,16 @@ public class ContractWorkflowService {
         } catch (Exception ignored) { /* 无运行表 */ }
 
         try {
+            List<Map<String, Object>> workflows = jdbcTemplate.queryForList(
+                    "SELECT case_id AS caseId, timeline_status AS timelineStatus FROM contract_analysis_workflow "
+                            + "WHERE case_id IN (" + in + ") ORDER BY case_id,id DESC", params.toArray());
+            for (Map<String, Object> row : workflows) {
+                Signals s = map.get(longOrNull(row.get("caseId")));
+                if (s != null && s.timelineStatus == null) s.timelineStatus = upper(str(row.get("timelineStatus")));
+            }
+        } catch (Exception ignored) { /* V025 未应用 */ }
+
+        try {
             List<Map<String, Object>> counts = jdbcTemplate.queryForList(
                     "SELECT case_id AS caseId, COUNT(*) AS total, "
                             + "SUM(CASE WHEN COALESCE(UPPER(review_status),'') IN ('CONFIRMED','NOT_APPLICABLE') "
@@ -282,8 +229,12 @@ public class ContractWorkflowService {
 
         try {
             List<Map<String, Object>> opens = jdbcTemplate.queryForList(
-                    "SELECT case_id AS caseId, COUNT(*) AS openCount FROM contract_review_finding "
-                            + "WHERE status='OPEN' AND case_id IN (" + in + ") GROUP BY case_id", params.toArray());
+                    "SELECT f.case_id AS caseId, COUNT(*) AS openCount FROM contract_review_finding f "
+                            + "WHERE f.status='OPEN' AND f.case_id IN (" + in + ") "
+                            + "AND f.run_id=(SELECT MAX(ar.id) FROM agent_run ar "
+                            + "WHERE ar.subject_type='CONTRACT_CASE' AND ar.subject_id=f.case_id "
+                            + "AND ar.run_type='CONTRACT_REVIEW' AND ar.status IN ('COMPLETED','LIMITED')) "
+                            + "GROUP BY f.case_id", params.toArray());
             for (Map<String, Object> row : opens) {
                 Signals s = map.get(longOrNull(row.get("caseId")));
                 if (s != null) s.openFindings = intOf(row.get("openCount"));
@@ -307,6 +258,16 @@ public class ContractWorkflowService {
         stages.add(fulfillment(s));
         stages.add(archive(s));
 
+        // 后期业务状态是已有的明确推进信号；历史案件可能没有新版快照/日程数据。
+        // 只读视图承认已有业务进度，不写状态、不凭空补业务记录。
+        if (RISK_DONE_STATUS.contains(nvl(s.caseStatus))) {
+            for (int i = 0; i < 5; i++) {
+                Stage st = stages.get(i);
+                stages.set(i, new Stage(st.key, DONE, null, st.enteredAt, null,
+                        "根据案件业务状态推断已完成", null, null, false));
+            }
+        }
+
         // 只推导到第一个非 DONE 阶段，其后一律 PENDING，避免"后面完成、前面未完成"。
         int currentIndex = stages.size() - 1;
         for (int i = 0; i < stages.size(); i++) {
@@ -314,7 +275,7 @@ public class ContractWorkflowService {
         }
         for (int i = currentIndex + 1; i < stages.size(); i++) {
             Stage st = stages.get(i);
-            stages.set(i, new Stage(st.key, PENDING, st.ownerRole, null, null, null, false));
+            stages.set(i, new Stage(st.key, PENDING, st.ownerRole, null, null, null, null, null, false));
         }
         Stage current = stages.get(currentIndex);
 
@@ -355,7 +316,7 @@ public class ContractWorkflowService {
     private static Stage intake(Signals s) {
         if (!s.hasMainDocument) {
             return new Stage("INTAKE", WAITING_HUMAN, "发起人", iso(s.createdAt),
-                    null, "待上传主合同", "UPLOAD_DOCUMENT", "上传主合同", true);
+                    null, "待上传主合同", "UPLOAD_DOCUMENT", "上传主合同", false);
         }
         return new Stage("INTAKE", DONE, null, iso(s.createdAt), null, null, null, null, false);
     }
@@ -364,32 +325,37 @@ public class ContractWorkflowService {
         if (!s.hasMainDocument) return pending("PARSE");
         String ps = nvl(s.parseStatus);
         if (Set.of("PENDING", "PARSING", "UPLOADED", "PROCESSING").contains(ps)) {
-            return new Stage("PARSE", ACTIVE, null, null, null, "合同解析中", null, null, false);
+            return new Stage("PARSE", ACTIVE, null, iso(s.mainDocumentCreatedAt), null, "合同解析中", null, null, false);
         }
         if ("FAILED".equals(ps)) {
-            return new Stage("PARSE", BLOCKED, "发起人", null, "PARSE_FAILED",
+            return new Stage("PARSE", BLOCKED, "发起人", iso(s.mainDocumentCreatedAt), "PARSE_FAILED",
                     "合同解析失败，需要重试或换解析方式", "RETRY_PARSE", "重新上传合同", false);
         }
         if ("READY".equals(ps) && "LOW".equals(nvl(s.parseQuality))) {
-            return new Stage("PARSE", BLOCKED, "业务负责人", null, "QUALITY_LOW",
-                    "解析质量低，结论只能作为参考，需人工放行", "NONE", null, false);
+            return new Stage("PARSE", BLOCKED, "业务负责人", iso(s.mainDocumentCreatedAt), "QUALITY_LOW",
+                    "解析质量低，结论只能作为参考，请业务负责人核对并重新上传清晰合同", "RETRY_PARSE", "上传清晰合同", false);
         }
         if ("READY".equals(ps)) {
             return new Stage("PARSE", DONE, null, iso(s.mainDocumentCreatedAt), null, null, null, null, false);
         }
-        return new Stage("PARSE", ACTIVE, null, null, null, "合同解析中", null, null, false);
+        return new Stage("PARSE", ACTIVE, null, iso(s.mainDocumentCreatedAt), null, "合同解析中", null, null, false);
     }
 
     private static Stage element(Signals s) {
         String snap = nvl(s.snapshotStatus);
-        if ("CONFIRMED".equals(snap)) return new Stage("ELEMENT_CONFIRM", DONE, null, null, null, null, null, null, false);
+        Map<String, Object> counters = Map.of("total", s.elementTotal,
+                "confirmed", s.elementTotal - s.elementPending, "pending", s.elementPending);
+        if ("CONFIRMED".equals(snap) || ("READY_FOR_CONFIRMATION".equals(snap)
+                && s.elementTotal > 0 && s.elementPending == 0)) {
+            return new Stage("ELEMENT_CONFIRM", DONE, null, null, null, "合同要素已确认", null, null, false, counters);
+        }
         if ("READY_FOR_CONFIRMATION".equals(snap)) {
             return new Stage("ELEMENT_CONFIRM", WAITING_HUMAN, "业务负责人", null, null,
-                    "合同要素已生成，待业务负责人确认", "CONFIRM_ELEMENTS", "确认合同要素", false);
+                    "合同要素已生成，" + s.elementPending + " 个字段待确认", "CONFIRM_ELEMENTS", "确认合同要素", false, counters);
         }
         if ("FAILED".equals(nvl(s.extractionRunStatus))) {
             return new Stage("ELEMENT_CONFIRM", BLOCKED, "发起人", null, "EXTRACTION_FAILED",
-                    "要素提取失败，可重试", "NONE", null, false);
+                    "要素提取失败，可重试", "CONFIRM_ELEMENTS", "重新提取合同要素", false);
         }
         if (RUN_ACTIVE.contains(nvl(s.extractionRunStatus))) {
             return new Stage("ELEMENT_CONFIRM", ACTIVE, null, null, null, "合同要素提取中", null, null, false);
@@ -407,7 +373,7 @@ public class ContractWorkflowService {
         String wf = nvl(s.timelineStatus);
         if ("FAILED".equals(run) || "FAILED".equals(wf)) {
             return new Stage("TIMELINE_CONFIRM", BLOCKED, "发起人", null, "TIMELINE_FAILED",
-                    "履约日程生成失败，可重试", "NONE", null, false);
+                    "履约日程生成失败，可重试", "CONFIRM_TIMELINE", "重新生成履约日程", false);
         }
         if ("RUNNING".equals(run) || "RUNNING".equals(wf) || RUN_ACTIVE.contains(run)) {
             return new Stage("TIMELINE_CONFIRM", ACTIVE, null, null, null, "履约日程生成中", null, null, false);
@@ -439,7 +405,7 @@ public class ContractWorkflowService {
         }
         if ("FAILED".equals(run)) {
             return new Stage("RISK_DISPOSAL", BLOCKED, "发起人", null, "REVIEW_FAILED",
-                    "风险审查失败，可重试", "NONE", null, false);
+                    "风险审查失败，可重试", "HANDLE_FINDINGS", "重新风险审查", false);
         }
         if (RUN_ACTIVE.contains(run)) {
             return new Stage("RISK_DISPOSAL", ACTIVE, null, null, null, "风险审查进行中", null, null, false);
@@ -469,7 +435,7 @@ public class ContractWorkflowService {
                     "审批功能建设中，请线下处理", "NONE", null, false);
         }
         return new Stage("RISK_DISPOSAL", PENDING, "法务", null, null,
-                "尚未进行风险审查", "NONE", null, false);
+                "尚未进行风险审查", "HANDLE_FINDINGS", "开始风险审查", false);
     }
 
     private static Stage signing(Signals s) {
@@ -582,13 +548,15 @@ public class ContractWorkflowService {
         String parseQuality = "";
         LocalDateTime mainDocumentCreatedAt;
         String snapshotStatus;
+        int elementTotal;
+        int elementPending;
         boolean hasExtractionRun;
         String extractionRunStatus = "";
         boolean hasTimelineRun;
         String timelineRunStatus = "";
         boolean hasReviewRun;
         String reviewRunStatus = "";
-        String timelineStatus = "";
+        String timelineStatus;
         int timelineTotal;
         int timelinePending;
         int openFindings;

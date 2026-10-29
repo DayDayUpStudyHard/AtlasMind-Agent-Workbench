@@ -203,8 +203,8 @@ public class EvalAdminController {
             throw new IllegalArgumentException(
                     "未知运行时引擎: " + runtime + "（支持 legacy / langgraph / langgraph_v2）");
         }
-        String featuresJson = str(request, "features");
-        if (featuresJson.isEmpty()) featuresJson = "{}";
+        String requestedFeatures = str(request, "features");
+        String featuresJson = requestedFeatures.isEmpty() ? "{}" : requestedFeatures;
         if ("legacy".equalsIgnoreCase(runtime)) {
             // The legacy pipeline cannot produce extraction/timeline artifacts.
             // Reject up front instead of failing every case at runtime.

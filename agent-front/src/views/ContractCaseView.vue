@@ -133,6 +133,7 @@
           :next-action="workflow.nextAction || {}"
           :blocked-reason="workflow.blockedReason || ''"
           :summary="workflow.currentDetail?.summary || ''"
+          :busy="(running || hasActiveRun) && !['UPLOAD_DOCUMENT', 'RETRY_PARSE', 'UPLOAD_EVIDENCE'].includes(workflow.nextAction?.type)"
           @action="handleWorkflowAction"
         />
       </div>
@@ -1111,6 +1112,53 @@
       </section>
     </div>
 
+    <NModal v-model:show="showUpload" :mask-closable="!uploading" :close-on-esc="!uploading">
+      <div class="modal-content contract-upload-modal" role="dialog" aria-modal="true" aria-labelledby="contract-upload-title">
+        <form class="contract-upload-form" @submit.prevent="doUpload">
+        <div class="modal-head">
+          <h3 id="contract-upload-title">{{ upload.docType === 'FULFILLMENT_EVIDENCE' ? '上传履约证据' : '上传合同文件' }}</h3>
+          <button type="button" class="quiet-button small" :disabled="uploading" @click="showUpload = false">关闭</button>
+        </div>
+        <fieldset class="upload-form" :disabled="uploading">
+          <div class="upload-row">
+            <label for="contract-upload-type">文件类型</label>
+            <select id="contract-upload-type" v-model="upload.docType">
+              <option value="MAIN">主合同</option>
+              <option value="ATTACHMENT">附件</option>
+              <option value="PRICING">报价</option>
+              <option value="CERTIFICATE">资质</option>
+              <option value="FULFILLMENT_EVIDENCE">履约证据</option>
+            </select>
+            <label for="contract-upload-mode">提交方式</label>
+            <select id="contract-upload-mode" v-model="upload.mode">
+              <option value="file">文件上传</option>
+              <option value="text">粘贴文字</option>
+            </select>
+          </div>
+          <div v-if="upload.mode === 'file'" class="upload-file-mode">
+            <label for="contract-upload-file">选择文件</label>
+            <input id="contract-upload-file" type="file" @change="chooseContractFile" />
+          </div>
+          <div class="upload-row">
+            <label for="contract-upload-name">文件名</label>
+            <input id="contract-upload-name" v-model="upload.fileName" required placeholder="如：服务采购合同.pdf" />
+          </div>
+          <div v-if="upload.mode === 'text'" class="upload-text-mode">
+            <label for="contract-upload-text">合同正文</label>
+            <textarea id="contract-upload-text" v-model="upload.contentText" class="upload-textarea" required placeholder="粘贴需要解析的合同文字" />
+          </div>
+          <small class="upload-hint">主合同会作为新版本解析；附件和履约证据保留各自用途。</small>
+        </fieldset>
+        <div class="modal-foot intake-actions">
+          <button type="button" class="quiet-button" :disabled="uploading" @click="showUpload = false">取消</button>
+          <button type="submit" class="primary-button" :disabled="uploading || (upload.mode === 'file' ? !upload.file : !upload.contentText.trim())" :aria-busy="uploading">
+            {{ uploading ? '提交中…' : '提交文件' }}
+          </button>
+        </div>
+        </form>
+      </div>
+    </NModal>
+
     <!-- Text preview modal -->
     <div v-if="viewTextDoc" class="modal-overlay" @click.self="viewTextDoc = null">
       <div class="modal-content text-preview">
@@ -1394,7 +1442,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { useMessage } from 'naive-ui'
+import { NModal, useMessage } from 'naive-ui'
 import api, { getContractMembers, getContractWorkflow, getUserInfo, updateContractCase } from '../api/index.js'
 import WorkflowStrip from '../components/WorkflowStrip.vue'
 import WorkflowNextAction from '../components/WorkflowNextAction.vue'
@@ -1530,26 +1578,42 @@ async function loadWorkflow() {
   }
 }
 
-function handleWorkflowAction(type) {
+async function handleWorkflowAction(type) {
   const action = String(type || '').toUpperCase()
   if (action === 'UPLOAD_DOCUMENT' || action === 'RETRY_PARSE') {
     openRevisionUpload()
     return
   }
+  if (action === 'UPLOAD_EVIDENCE') {
+    openRevisionUpload()
+    upload.value.docType = 'FULFILLMENT_EVIDENCE'
+    scrollToSection('evidence')
+    return
+  }
+  if (running.value || hasActiveRun.value) return
   if (action === 'CONFIRM_ELEMENTS') {
+    if (!extractionSnapshot.value.id || workflow.value?.blockedReason === 'EXTRACTION_FAILED') {
+      await startAdditionalTask('CONTRACT_ELEMENT_EXTRACTION')
+      return
+    }
     scrollToSection('elements')
     return
   }
   if (action === 'CONFIRM_TIMELINE') {
+    if (!workflow.value?.currentDetail?.counters?.total || workflow.value?.blockedReason === 'TIMELINE_FAILED') {
+      await startAdditionalTask('TIMELINE_EXTRACTION')
+      return
+    }
     scrollToSection('timeline')
     return
   }
   if (action === 'HANDLE_FINDINGS') {
+    if (!hasContractReviewResult.value || workflow.value?.blockedReason === 'REVIEW_FAILED') {
+      await startAdditionalTask('CONTRACT_REVIEW')
+      return
+    }
     scrollToSection('risks')
     return
-  }
-  if (action === 'UPLOAD_EVIDENCE') {
-    scrollToSection('evidence')
   }
 }
 const extractionSnapshot = computed(() => c.value.extractionSnapshot || {})
@@ -1667,7 +1731,7 @@ const latestMainDocument = computed(() => (Array.isArray(c.value.documents) ? c.
 const hasParsedContractDocument = computed(() => Boolean(latestMainDocument.value))
 const ACTIVE_RUN_STATUSES = new Set([
   'CREATED', 'CONTEXT_BUILDING', 'PLANNING', 'ANALYZING',
-  'VERIFYING', 'WAITING_HUMAN', 'WAITING_APPROVAL',
+  'VERIFYING', 'WAITING_HUMAN', 'WAITING_APPROVAL', 'RUNNING', 'PENDING', 'QUEUED',
 ])
 const hasActiveRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .some(run => ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
@@ -2540,6 +2604,7 @@ async function updateFinding(findingId, status) {
     c.value = r.data.data
     ensureSelectedContractElement()
     message.success('审查发现已更新')
+    await loadWorkflow()
   } catch (e) {
     message.error('更新审查发现失败')
   }
@@ -2563,7 +2628,7 @@ async function scrollToFinding(finding) {
 }
 
 function startAdditionalTask(taskType) {
-  startRun(taskType, {
+  return startRun(taskType, {
     autoPipeline: ['CONTRACT_ELEMENT_EXTRACTION', 'TIMELINE_EXTRACTION'].includes(taskType),
   })
 }
@@ -2758,6 +2823,7 @@ async function reviewContractElement(element, reviewStatus) {
     c.value = r.data.data
     ensureSelectedContractElement()
     message.success('合同要素审核状态已更新')
+    await loadWorkflow()
   } catch (e) {
     message.error(e.response?.data?.message || '合同要素审核失败')
   }
@@ -2802,6 +2868,7 @@ async function reviewTimelineNodeFact(node, reviewStatus) {
     c.value = r.data.data
     syncSelectedTimelineNode(node)
     message.success('时间节点审核状态已更新')
+    await loadWorkflow()
   } catch (e) {
     message.error(e.response?.data?.message || '时间节点审核失败')
   }
@@ -3103,6 +3170,7 @@ async function saveTimelineBaseDate(node) {
     const response = await api.put(`/api/workspace/contracts/${route.params.id}`, { [field.key]: value })
     c.value = response.data.data
     delete timelineBaseSelection[timelineKey(node)]
+    await loadWorkflow()
     message.success(`${field.label}已保存，相关时间节点已重新计算`)
   } catch (e) {
     message.error(e.response?.data?.message || `${field.label}保存失败`)
@@ -3891,6 +3959,12 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .revision-upload-callout strong{display:block;color:var(--atlas-text);font-size:13px}
 .revision-upload-callout small{display:block;margin-top:3px;color:var(--atlas-muted);font-size:11px;line-height:1.45}
 .upload-form{margin:12px 0;padding:14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:4px}
+.modal-content.contract-upload-modal{width:min(680px,94vw);overflow:auto}
+.contract-upload-form{display:contents}
+.contract-upload-modal .modal-head{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:16px 20px}
+.contract-upload-modal .modal-head h3{margin:0;font-size:16px;color:var(--atlas-text)}
+.contract-upload-modal .upload-form{margin:0 16px;min-width:0;display:flex;flex-direction:column;gap:14px}
+.contract-upload-modal input[type=file]{max-width:100%}
 .upload-file-mode{display:flex;flex-direction:column;gap:8px}
 .upload-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .upload-row select,.upload-row input{min-height:34px;padding:4px 8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-surface);color:var(--atlas-text);font-size:12px}

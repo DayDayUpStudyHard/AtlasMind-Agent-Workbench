@@ -68,19 +68,27 @@
     </section>
 
     <!-- Case list -->
-    <section class="case-list" v-if="cases.length">
+    <section class="case-list" :aria-busy="casesLoading">
       <div class="case-list-header">
         <h2>合同案件</h2>
         <div class="case-list-filters">
-          <select v-model="stageFilter" @change="loadCases">
+          <select v-model="stageFilter" aria-label="按合同阶段筛选" @change="loadCases">
             <option value="">全部阶段</option>
             <option v-for="s in workflowStages" :key="s.key" :value="s.key">{{ s.label }}</option>
           </select>
-          <select v-model="statusFilter" @change="loadCases">
+          <select v-model="statusFilter" aria-label="按合同状态筛选" @change="loadCases">
             <option value="">全部状态</option>
             <option v-for="s in statuses" :key="s.value" :value="s.value">{{ s.label }}</option>
           </select>
         </div>
+      </div>
+      <div v-if="casesLoading" class="blank-state compact" role="status">正在加载合同…</div>
+      <div v-else-if="casesError" class="blank-state compact" role="alert">
+        加载合同失败。<button class="quiet-button" @click="loadCases">重试</button>
+      </div>
+      <div v-else-if="!cases.length" class="blank-state compact">
+        {{ stageFilter || statusFilter ? '没有符合筛选条件的合同。' : '暂无合同案件。点击“发起新合同”开始。' }}
+        <button v-if="stageFilter || statusFilter" class="quiet-button" @click="clearFilters">清空筛选</button>
       </div>
       <article v-for="c in cases" :key="c.id" class="case-card" @click="$router.push(`/contracts/${c.id}`)">
         <div class="case-topline">
@@ -132,7 +140,6 @@
         </div>
       </article>
     </section>
-    <div v-else class="blank-state">暂无合同案件。点击"发起新合同"开始。</div>
   </div>
 </template>
 
@@ -146,6 +153,9 @@ const router = useRouter()
 const message = useMessage()
 const portfolio = ref({})
 const cases = ref([])
+const casesLoading = ref(false)
+const casesError = ref(false)
+let casesRequest = 0
 const statusFilter = ref('')
 const stageFilter = ref('')
 const activeQueue = ref('')
@@ -184,15 +194,32 @@ onMounted(async () => {
 })
 
 async function loadCases() {
+  const request = ++casesRequest
+  casesLoading.value = true
+  casesError.value = false
   try {
     const params = statusFilter.value ? { status: statusFilter.value } : {}
     const r = await api.get('/api/workspace/contracts', { params })
+    if (request !== casesRequest) return
     const list = r.data.data || []
     // 阶段由后端批量推导；阶段筛选在前端完成，避免为筛阶段再打一次接口。
     cases.value = stageFilter.value
       ? list.filter(item => String(item.stage || '') === stageFilter.value)
       : list
-  } catch {}
+  } catch {
+    if (request !== casesRequest) return
+    cases.value = []
+    casesError.value = true
+    message.error('加载合同列表失败')
+  } finally {
+    if (request === casesRequest) casesLoading.value = false
+  }
+}
+
+function clearFilters() {
+  stageFilter.value = ''
+  statusFilter.value = ''
+  return loadCases()
 }
 
 function filterStatus(s) { activeQueue.value = ''; statusFilter.value = s; loadCases() }

@@ -1559,6 +1559,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 """, reviewStatus, note.isBlank() ? null : note,
                 actor == null || actor.isBlank() ? "authenticated-user" : actor,
                 elementId);
+        contractWorkflowService.evict(caseId);
         return getCase(caseId);
     }
 
@@ -1595,6 +1596,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 """,
                 caseId, factKey, factIdentity, factLabel.isBlank() ? null : factLabel,
                 valueHash, reviewStatus, note.isBlank() ? null : note, reviewer);
+        contractWorkflowService.evict(caseId);
         return getCase(caseId);
     }
 
@@ -1613,6 +1615,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                 """, reviewStatus, note.isBlank() ? null : note,
                 actor == null || actor.isBlank() ? "authenticated-user" : actor,
                 timelineNodeId, caseId);
+        contractWorkflowService.evict(caseId);
         return getCase(caseId);
     }
 

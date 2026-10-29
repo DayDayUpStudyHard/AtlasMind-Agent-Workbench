@@ -5053,3 +5053,54 @@ DeepSeek 余额恢复后，履约核验私有候选集首次真实运行（Run #
 | `agent-front/src/views/ContractPortfolioView.vue` | 修改 | 卡片增加阶段标签；筛选增加阶段维度 |
 | `agent-front/src/api/index.js` | 修改 | 新增 `getContractWorkflow` |
 | `docs/contract-workflow/implementation-phase-1.md` | 新增 | 一期实施情况与下次开工清单 |
+
+## 2026-10-29 19:25：合同工作流一期续实施与验收
+
+### 问题
+
+上一轮一期仅完成静态实现，未编译、构建或浏览器验收。本次补跑时发现 Java 编译阻断；工作流详情与列表数据口径不一致；③缺少真实字段计数且逐字段全部确认后仍可能停留；旧主合同快照和历史风险可能污染当前进度；失败任务主按钮只跳转空区域；上传函数有实现却缺弹窗模板；列表筛选无结果后筛选器消失，无法直接恢复。
+
+### 根因与修复
+
+1. **编译阻断**：工作流 `Stage` 构造缺少参数；评测控制器 `featuresJson` 重赋值后用于 lambda，不满足 effectively final。补齐参数、改为单次赋值，未改变评测业务逻辑。
+2. **统一读侧口径**：详情复用批量装载，固定 7 条查询，不做 N+1；列表补读分析工作流的日程状态；不存在/删除案件不创建推导信号。保留旧库缺表的降级兼容。
+3. **当前版本与确认计数**：取最新未删除主合同，快照绑定其 document_id，选择规则与案件详情一致。统计真实字段总数/待确认数；非空待确认快照字段全部为 CONFIRMED/NOT_APPLICABLE 后只读推导完成，不补写快照状态；空未确认快照不完成。字段、事实、日程复核后增加缓存失效，页面同步刷新。
+4. **历史进度与风险**：后期业务状态只读认定①~⑤完成，防历史缺新版快照导致阶段倒退；OPEN 仅计最近 COMPLETED/LIMITED 合同审查运行，与详情风险集合一致，旧报告风险不再阻塞当前案件。解析失败/低质量保留实际上传时间，无主合同不误显示 LIMITED。
+5. **恢复动作接线**：要素/日程/审查缺结果或失败时通过主按钮调用原有任务，有结果时跳确认/风险区域。低质量给重新上传入口，一期无人工放行 API。运行中防重复创建任务，上传入口不受后台任务忙碌阻断，上传提交自身防重复。
+6. **补齐上传界面**：复用既有 `doUpload`，补 Naive UI 弹窗、文件/文字模式、五种文档类型、文件名/正文校验及提交反馈；弹窗根容器兼容焦点管理。履约证据入口预选对应类型。
+7. **页面反馈与可操作性**：下一步卡片在 NONE 时保留建设中等说明，不误显示暂无待办；主按钮主题色、44px 高度、焦点和禁用状态。列表空结果保留筛选、清空入口，增加加载/错误/重试反馈与请求序号，避免旧响应覆盖当前筛选。
+8. **记录与交接**：完整保留原实施记录，标明历史日期，末尾追加带时间的本次结果、13 项证据层级及未覆盖范围；同步当前 README、一期施工图与 HANDOVER 的进度、入口和“6 菜单 + 2 上下文任务”口径。不实施二三期草案。
+
+### 验证结果
+
+- Java 全量：**71 tests，0 failures，0 errors，0 skipped**。其中原有工作流推导 17 条，新增 H2 真实 SQL 集成测试 10 条；历史 OPEN 风险回归先验证失败、修正后全量通过。
+- 用户端与管理端 `npm run build` 均通过；用户端最后一次上传忙碌状态修正后已重新构建。仅有 chunk 大于 500KB 提示。
+- Python 全量：**455 passed，1 warning**；本次未改 Python 业务代码和四个任务图。旧记录 439 passed/16 failed 保留为历史结论，当前环境未复现。
+- `docker compose config --quiet` 通过；四服务实际启动，MySQL/Redis 可用，Elasticsearch 未启动。
+- 真实 MySQL/API：20 个合成案件详情与列表阶段一致；字段/日程计数与复核即时缓存失效、当前风险计数、审批 NONE、③~⑧ enteredAt null、无权 404/匿名 401 均通过。25 条实际列表 30 次串行请求，**P95 53.74ms，最大 81.04ms**，低于 300ms；不是压力测试。
+- 浏览器：文字合同上传成功；字段 3→2→1→⑤、日程 3→2→1→⑤；2 项合成 OPEN 风险显示与主按钮定位；失败要素重试创建任务并变为进行中；审批草案仍标明不代表审批完成；阶段/状态无结果筛选可清空恢复；高级操作默认折叠、展开保留 6 项及说明。
+- 真实合成 PDF 经过上传与解析得到 `READY/LOW`，页面停②并可打开重新上传弹窗；375px 弹窗可见。1280/768/375 三档阶段条同排、窄屏内部横滚、主按钮可操作；截图保存在 `docs/contract-workflow/evidence/`。
+- **未全覆盖**：全部 8 类任务与所有文件类型的真实 AI 端到端回归，尤其受理/履约上下文与真实版本复核；本地检索依赖缺失产生的 LIMITED 未当成正常 AI 全流程完成。逐项范围见实施记录最新追加节。
+- `git diff --check` 通过；无表结构/迁移/任务图改动，不改状态机；⑥⑦⑧继续只读案件状态与到期日，不生成履约指标。临时验收案件、账号、关联数据、合成 PDF 与脚本在交付前定向清理，保留测试源码与截图；停止本轮启动的服务。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java` | 修改 | 修复 lambda 捕获非 final 变量编译错误 |
+| `agent-server/src/main/java/com/atlasmind/service/ContractWorkflowService.java` | 修改 | 修复构造与只读推导；统一详情/列表、版本、计数及当前风险口径 |
+| `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java` | 修改 | 字段、事实、日程复核后失效工作流缓存 |
+| `agent-server/src/test/java/com/atlasmind/service/ContractWorkflowDataTest.java` | 新增 | 10 项真实 SQL 装载与推导集成回归 |
+| `agent-front/src/components/WorkflowNextAction.vue` | 修改 | NONE 说明、责任人、任务忙碌状态与主按钮样式 |
+| `agent-front/src/views/ContractCaseView.vue` | 修改 | 缺结果/失败恢复、上传弹窗、运行中防重、确认后刷新 |
+| `agent-front/src/views/ContractPortfolioView.vue` | 修改 | 空列表保留筛选、清空、加载/错误/重试及防旧响应覆盖 |
+| `docs/contract-workflow/implementation-phase-1.md` | 追加 | 保留历史，新增带时间的完成情况、逐项证据与限制 |
+| `docs/contract-workflow/README.md` | 修改 | 当前状态与 v1.4 兼容性口径 |
+| `docs/contract-workflow/phase-1-workflow-view.md` | 修改 | 当前实现状态、字段确认与风险口径、低质量恢复、任务入口说明 |
+| `docs/contract-workflow/HANDOVER.md` | 修改 | 最新实施记录入口、13 项验收与当前代码锚点 |
+| `docs/contract-workflow/evidence/` | 新增 | 三档阶段条截图及 375px 低质量重传弹窗截图 |
+| `Debug修复记录.md` | 追加 | 本次续实施与验收记录；未改写既有修复记录 |
+
+### 收尾确认（2026-10-29 19:29）
+
+已定向清理 20 个本轮验收案件、2 个临时账号及关联记录、2 份合成 PDF、临时验收脚本；回查验收案件、账号、任务均为 0。临时账号已退出登录，四个验收服务已停止且端口无监听。保留测试源码与截图，未删除原有业务数据；本轮未创建 Git 提交。
