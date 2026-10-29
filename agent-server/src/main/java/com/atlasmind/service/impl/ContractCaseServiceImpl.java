@@ -936,10 +936,10 @@ public class ContractCaseServiceImpl implements ContractCaseService {
             if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
         }
         if (request.containsKey("ourSide")) { sets.add("our_side=?"); params.add(normalizeOurSide(str(request, "ourSide"))); }
-        String[] numFields = {"amount", "ownerId"};
-        for (String f : numFields) {
-            if (request.containsKey(f)) { sets.add(f + "=?"); params.add(request.get(f)); }
-        }
+        // 字段名与列名必须显式分离：contract_case 的列是 owner_id，
+        // 直接拼 ownerId 会生成 Unknown column。
+        if (request.containsKey("amount")) { sets.add("amount=?"); params.add(request.get("amount")); }
+        if (request.containsKey("ownerId")) { sets.add("owner_id=?"); params.add(request.get("ownerId")); }
         if (request.containsKey("contractType")) { sets.add("contract_type=?"); params.add(str(request, "contractType")); }
         if (request.containsKey("currency")) { sets.add("currency=?"); params.add(str(request, "currency")); }
         if (request.containsKey("signedDate")) { sets.add("signed_date=?"); params.add(dateOrNull(request.get("signedDate"), "签订日期")); }

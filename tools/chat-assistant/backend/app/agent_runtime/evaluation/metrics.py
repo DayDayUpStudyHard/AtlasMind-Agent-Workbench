@@ -54,9 +54,13 @@ def build_release_gate(
     if not summary.get("metricCaseCount", summary.get("caseCount", 0)):
         blocking_reasons.append("NO_SCORED_CASES")
 
-    if schema_v2:
-        provisional_count = int(summary.get("provisionalCaseCount") or 0)
-        approved_count = int(summary.get("approvedCaseCount") or 0)
+    # 标注门禁不能只挂在 schema v2 上：只要运行结果携带标注统计（所有真实
+    # 评测运行都会写 approvedCaseCount/provisionalCaseCount），就必须校验。
+    # 仅完全不含标注信息的冻结历史基线保留原 LEGACY 口径以维持可比性。
+    has_label_counts = "approvedCaseCount" in summary or "provisionalCaseCount" in summary
+    provisional_count = int(summary.get("provisionalCaseCount") or 0)
+    approved_count = int(summary.get("approvedCaseCount") or 0)
+    if schema_v2 or has_label_counts:
         if provisional_count:
             blocking_reasons.append("PROVISIONAL_GOLD_LABELS")
         if approved_count < spec.minimum_approved_cases:
@@ -147,12 +151,14 @@ def build_release_gate(
     quality_status = "NOT_EVALUATED" if not summary.get("metricCaseCount", summary.get("caseCount", 0)) else (
         "PASSED" if not failures else "FAILED"
     )
-    if schema_v2:
+    if schema_v2 or has_label_counts:
         gold_status = "APPROVED" if (
-            int(summary.get("provisionalCaseCount") or 0) == 0
-            and int(summary.get("approvedCaseCount") or 0) >= spec.minimum_approved_cases
-        ) else ("PARTIAL" if int(summary.get("approvedCaseCount") or 0) else "PROVISIONAL")
+            provisional_count == 0
+            and approved_count >= spec.minimum_approved_cases
+        ) else ("PARTIAL" if approved_count else "PROVISIONAL")
     else:
+        # No label information at all: frozen legacy baseline, keep gate v1
+        # semantics so historical comparisons stay meaningful.
         gold_status = "LEGACY"
     limited_impact = int(summary.get("limitedImpactCount") or 0)
     if limited_impact:

@@ -215,6 +215,8 @@ intakeFields/elements/timelineNodes/risks 都是数组；每项必须有 title�
 合同原文：
 {record['contractText'][:24000]}
 """
+    from openai import APIError
+
     try:
         service = LLMService()
         response = service.analysis_client.with_options(timeout=timeout_seconds).chat.completions.create(
@@ -225,10 +227,15 @@ intakeFields/elements/timelineNodes/risks 都是数组；每项必须有 title�
                 {"role": "user", "content": prompt},
             ],
         )
-        return _extract_json(str(response.choices[0].message.content or ""))
-    except Exception as exc:
+        labels = _extract_json(str(response.choices[0].message.content or ""))
+    except APIError as exc:
+        # Network/API failures are the only tolerated degradation; the caller
+        # records the case as a failed label rather than writing an empty gold.
         print(f"label candidate failed for source {record.get('sourceDocumentId')}: {exc}")
         return None
+    if labels is None:
+        print(f"label candidate was not valid JSON for source {record.get('sourceDocumentId')}")
+    return labels
 
 
 def _fallback_labels_from_text(record: dict[str, Any]) -> dict[str, Any]:
@@ -404,11 +411,18 @@ def build_corpus(
         sequence += 1
 
     label_sets: list[dict[str, Any]] = []
+    label_failures: list[str] = []
     for index, record in enumerate(chosen, 1):
         candidate = None
         if record["kind"] == "LOCAL_SOURCE" and generate_labels:
             candidate = _llm_candidate_labels(record, label_model, label_timeout_seconds)
         label_sets.append(_normalise_labels(record, candidate) if record["kind"] == "LOCAL_SOURCE" else _synthetic_labels(record))
+        if record["kind"] == "LOCAL_SOURCE" and generate_labels and candidate is None:
+            # Never silently fall back to an empty risk set for a local source:
+            # record the failure so the build exits non-zero for review.
+            label_failures.append(
+                str(record.get("sourceDocumentId") or record.get("title") or index)
+            )
         print(f"prepared {index}/{len(chosen)}: {record['kind']} {record['contractType']}", flush=True)
 
     for task_type, directory_name, label in TASKS:
@@ -433,6 +447,8 @@ def build_corpus(
         "syntheticExtensions": sum(1 for row in chosen if row["kind"] == "SYNTHETIC_EXTENSION"),
         "labelModel": label_model,
         "status": "CANDIDATE",
+        "labelFailureCount": len(label_failures),
+        "labelFailures": label_failures,
     }
     root.mkdir(parents=True, exist_ok=True)
     (root / "corpus-index.json").write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -454,6 +470,13 @@ def main() -> int:
         generate_labels=not args.skip_llm, label_timeout_seconds=max(5, args.label_timeout_seconds),
     )
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    failures = int(result.get("labelFailureCount") or 0)
+    if failures:
+        # Building succeeded structurally, but degraded labels must not pass
+        # silently: exit non-zero so CI/operators notice the missing gold.
+        print(f"ERROR: {failures} local-source label(s) fell back to empty gold; "
+              "rebuild with --skip-llm or fix the label model.", flush=True)
+        return 1
     return 0
 
 

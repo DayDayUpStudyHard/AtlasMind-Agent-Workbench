@@ -134,6 +134,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import { createAiSession, getAiSessionMessages, listContracts } from '../api/index.js'
+import { sanitizeHtml } from '../utils/sanitizeHtml.js'
 
 const panelOpen = ref(false)
 const route = useRoute()
@@ -307,7 +308,8 @@ async function ensureSession() {
 }
 
 function renderMd(text) {
-  return text ? marked.parse(text, { breaks: true }) : ''
+  // 模型输出属不可信输入，marked 结果必须消毒后再进 v-html。
+  return text ? sanitizeHtml(marked.parse(text, { breaks: true })) : ''
 }
 
 function formatScore(value) {

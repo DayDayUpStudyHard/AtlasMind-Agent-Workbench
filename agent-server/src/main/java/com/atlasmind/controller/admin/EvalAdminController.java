@@ -7,9 +7,13 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.support.GeneratedKeyHolder;
+import org.springframework.jdbc.support.KeyHolder;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.*;
 
+import java.sql.PreparedStatement;
+import java.sql.Statement;
 import java.util.*;
 
 /**
@@ -223,15 +227,26 @@ public class EvalAdminController {
             throw new IllegalArgumentException("该数据集已有评测在排队或运行中");
         }
 
-        jdbc.update("""
-                INSERT INTO agent_eval_run
-                (dataset_id, runtime_engine, features_json, status, started_at)
-                VALUES (?,?,?,'QUEUED',NOW())
-                """,
-                datasetId, runtime, featuresJson);
-
-        // Get the generated eval_run_id
-        Long evalRunId = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
+        // Read the generated id from the same statement/connection. A separate
+        // SELECT LAST_INSERT_ID() can borrow another pooled connection and
+        // return 0 or another thread's id under concurrency.
+        KeyHolder keyHolder = new GeneratedKeyHolder();
+        jdbc.update(connection -> {
+            PreparedStatement ps = connection.prepareStatement("""
+                    INSERT INTO agent_eval_run
+                    (dataset_id, runtime_engine, features_json, status, started_at)
+                    VALUES (?,?,?,'QUEUED',NOW())
+                    """, Statement.RETURN_GENERATED_KEYS);
+            ps.setObject(1, datasetId);
+            ps.setString(2, runtime);
+            ps.setString(3, featuresJson);
+            return ps;
+        }, keyHolder);
+        Number generatedId = keyHolder.getKey();
+        if (generatedId == null) {
+            throw new IllegalStateException("评测运行创建失败：未获取到自增主键");
+        }
+        Long evalRunId = generatedId.longValue();
 
         // Trigger async Python eval
         try {

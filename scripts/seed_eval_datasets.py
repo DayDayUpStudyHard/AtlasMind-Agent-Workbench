@@ -8,7 +8,8 @@ DB credentials are read from environment variables (with defaults for local dev)
   EVAL_DB_HOST, EVAL_DB_PORT, EVAL_DB_USER, EVAL_DB_PASSWORD, EVAL_DB_NAME
 
 Safety: set EVAL_SEED_CONFIRM=yes to actually run. Without it the script prints what it would
-do and exits. Set EVAL_SEED_CLEAR=no to skip the DELETE step (append-only mode).
+do and exits. Clearing is opt-in: set EVAL_SEED_CLEAR=yes to delete only the datasets defined
+by this script (matched by name + version) before re-seeding. Default is append-only.
 
 Usage:
   EVAL_SEED_CONFIRM=yes PYTHONIOENCODING=utf-8 python scripts/seed_eval_datasets.py
@@ -1596,25 +1597,50 @@ def main():
         print("SAFETY GATE: Set EVAL_SEED_CONFIRM=yes to actually seed the database.")
         print(f"  Would connect to {DB['host']}:{DB['port']}/{DB['database']} as {DB['user']}")
         print(f"  Would seed {len(DS)} datasets, {sum(len(dict(ALL)[ct]) for ct in dict(ALL))} cases")
-        print(f"  Clear mode: {'yes' if os.getenv('EVAL_SEED_CLEAR', 'yes') == 'yes' else 'no (append)'}")
+        print(f"  Clear mode: {'yes' if os.getenv('EVAL_SEED_CLEAR', 'no') == 'yes' else 'no (append)'}")
         print("\n  EVAL_SEED_CONFIRM=yes PYTHONIOENCODING=utf-8 python scripts/seed_eval_datasets.py")
         sys.exit(0)
 
     conn = pymysql.connect(**DB)
     c = conn.cursor()
     try:
-        if os.getenv("EVAL_SEED_CLEAR", "yes") == "yes":
-            print("Clearing existing eval data...")
-            c.execute("DELETE FROM agent_eval_result")
-            c.execute("DELETE FROM agent_eval_run")
-            c.execute("DELETE FROM agent_eval_case")
-            c.execute("DELETE FROM agent_eval_dataset")
-            conn.commit()
-            print("Cleared.\n")
+        all_data = dict(ALL)
+        # ── Optional, scoped cleanup ──────────────────────────────────
+        # Only datasets defined by this script (name + version) are touched;
+        # unrelated historical runs/datasets are never deleted wholesale.
+        if os.getenv("EVAL_SEED_CLEAR", "no") == "yes":
+            print("Clearing datasets owned by this seed script...")
+            for ds in DS:
+                c.execute(
+                    "SELECT id FROM agent_eval_dataset WHERE name=%s AND version=%s",
+                    (ds["name"], ds["version"]),
+                )
+                stale_ids = [row[0] for row in c.fetchall()]
+                for ds_id in stale_ids:
+                    c.execute("DELETE FROM agent_eval_result WHERE run_id IN "
+                              "(SELECT id FROM agent_eval_run WHERE dataset_id=%s)", (ds_id,))
+                    c.execute("DELETE FROM agent_eval_run WHERE dataset_id=%s", (ds_id,))
+                    c.execute("DELETE FROM agent_eval_case WHERE dataset_id=%s", (ds_id,))
+                    c.execute("DELETE FROM agent_eval_dataset WHERE id=%s", (ds_id,))
+                if stale_ids:
+                    print(f"  Removed {ds['name']} ({ds['version']}): {len(stale_ids)} dataset(s)")
+            print("Cleared scoped datasets.\n")
         else:
             print("Append mode — skipping CLEAR.\n")
 
-        all_data = dict(ALL)
+        # ── Reject duplicates in append mode ─────────────────────────
+        for ds in DS:
+            c.execute(
+                "SELECT COUNT(*) FROM agent_eval_dataset WHERE name=%s AND version=%s",
+                (ds["name"], ds["version"]),
+            )
+            if c.fetchone()[0]:
+                raise SystemExit(
+                    f"Dataset {ds['name']} ({ds['version']}) already exists; "
+                    "set EVAL_SEED_CLEAR=yes to replace it."
+                )
+
+        # ── Single transaction for all inserts ───────────────────────
         for ds in DS:
             ct = ds["contract_type"]
             cases = all_data[ct]
@@ -1623,7 +1649,6 @@ def main():
                          VALUES (%s,%s,%s,%s,%s,'ACTIVE')""",
                       (ds["name"],ds["version"],ds["desc"],ct,len(cases)))
             ds_id = c.lastrowid
-            conn.commit()
             print(f"  Dataset ID: {ds_id}")
 
             for (key,title,text,exp,nf,cite,sc,ind,diff,noise,cc,pc) in cases:
@@ -1634,10 +1659,13 @@ def main():
                      must_have_contract_citation,must_have_policy_citation,status)
                     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'ACTIVE')""",
                     (ds_id,key,title,ct,text,exp,nf,cite,sc,ind,diff,noise,cc,pc))
-            conn.commit()
             print(f"  ✓ {len(cases)} cases inserted\n")
 
+        conn.commit()
         print(f"Done — {len(DS)} datasets, {sum(len(all_data[ct]) for ct in all_data)} cases total.")
+    except BaseException:
+        conn.rollback()
+        raise
     finally:
         c.close(); conn.close()
 

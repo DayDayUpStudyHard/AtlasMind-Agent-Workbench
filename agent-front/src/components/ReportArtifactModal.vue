@@ -143,6 +143,7 @@
 <script setup>
 import { computed, onBeforeUnmount, onMounted, watch } from 'vue'
 import { marked } from 'marked'
+import { sanitizeHtml } from '../utils/sanitizeHtml.js'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -198,7 +199,10 @@ const hasStructuredContent = computed(() =>
 const modalTitleId = 'artifact-modal-title'
 
 function close() { emit('close') }
-function renderMarkdown(value) { return marked.parse(value || '', { breaks: true }) }
+function renderMarkdown(value) {
+  // 报告 Markdown 同样来自模型输出，进 v-html 前需消毒。
+  return value ? sanitizeHtml(marked.parse(value, { breaks: true })) : ''
+}
 function formatDate(value) { return value ? String(value).replace('T', ' ').slice(0, 16) : '' }
 
 function healthLabel(s) {

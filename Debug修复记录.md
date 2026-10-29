@@ -4934,3 +4934,79 @@ DeepSeek 余额恢复后，履约核验私有候选集首次真实运行（Run #
 | `api-tests/pytest.ini` | 修改 | 开启 `xfail_strict` |
 
 被评估为不属实的报告项（H8 后端忽略 id、H9 无触发路径、H14 产物带 CANDIDATE 标记、H6 影响程度、C4 生产侧已有防护）未在本次改动范围内。
+
+## 2026-10-29：全量 Review 批次 1 修复（H1/H7/H13/H15/H14/H10/H9）
+
+### 问题
+
+在 C1/C2/C3/H4/H5/H6/H16 修复之后，继续修复 Review 报告剩余高危项中的 7 项：
+
+1. 前台聊天与报告弹窗把 `marked.parse()` 输出直接写入 `v-html`，内容来自模型输出与报告 Markdown，属不可信输入，存在存储/反射型 XSS。
+2. 管理端知识库页 `onMounted` 串行 await，`fetchProjects` 无 try/catch、其余仅 finally，任一接口失败即中断后续加载，文档列表为空且解析进度轮询永不启动。
+3. 发布门禁把缺失的标注状态默认成 `APPROVED`，且标注门禁被 `if schema_v2:` 挡住；仓库唯一数据集是 schema v1，导致"未评审标签不得发布"的口径完全失效。
+4. 评测种子脚本 `EVAL_SEED_CLEAR` 缺省为 `yes`，对四张评测表执行无 `WHERE` 全表删除、无 rollback，append 模式还会重复插入同名同版本数据集。
+5. 私有语料构建在标注模型失败时退化成空金标（`risks: []`），仍以 0 退出，基准召回评估失真且不可察觉。
+6. 发起评测时 `INSERT` 与 `SELECT LAST_INSERT_ID()` 分属两次借还连接，连接池并发下可能取到他人 id 或 0，评测被派发到错误的 run。
+7. 更新合同时把 `ownerId` 直接当列名拼接，而表列名为 `owner_id`，请求体携带该字段即 `Unknown column` 500。
+
+### 根因与修复
+
+1. **富文本 XSS**
+   - 新增零依赖消毒工具 `agent-front/src/utils/sanitizeHtml.js`：`DOMParser` 解析为惰性文档，删除 `script/style/iframe/object/embed/svg/math/form` 等元素及子树，仅保留格式化标签白名单；属性保留 `href/title/class`，`href` 拒绝 `javascript:/vbscript:/data:/file:` 与控制字符混淆，`class` 仅保留语法高亮类；无 `DOMParser` 时退化为全量 HTML 转义。
+   - `ChatWindow.vue` 与 `ReportArtifactModal.vue` 的渲染函数改为 `sanitizeHtml(marked.parse(...))`。
+   - **与报告建议不同**：未引入 DOMPurify。CI 使用 `npm ci`，新增依赖须同步 `package-lock.json`，而当前环境无 Node 且 npm registry 不可达，加依赖会直接让前端 CI 失败。后续若统一改用 DOMPurify，需在有 Node 的环境执行 `npm install dompurify` 并提交 lockfile。
+
+2. **知识库页加载中断**
+   - `onMounted` 改为 `Promise.allSettled([fetchSpaces(), fetchProjects(), fetchRuntimeSettings()])` 后再执行 `fetchDocuments()` 与 `startDocumentPolling()`。
+   - `fetchSpaces`/`fetchProjects`/`fetchDocuments` 各自补 `catch` 并 `ElMessage.error` 提示。
+
+3. **发布门禁失效**
+   - `benchmark.py`：缺省标注状态改为 `PROVISIONAL`，`labelStatus` 校验与归一移出 `schema_v2` 分支，v1/v2 一致。
+   - `metrics.py`：门禁改为 `schema_v2 or 携带标注统计` 即校验；完全不含标注信息的冻结历史基线保留 `LEGACY` 口径以维持可比性。
+   - `cli.py`：数据集与用例导入缺省标注状态同步改为 `PROVISIONAL`。
+   - 未采用完全取消 schema 分支的写法，因为既有测试使用不带标注统计的 v1 summary 并断言 `PASSED/LEGACY`；当前实现既拦截真实 v1 运行，又不改变历史基线行为。
+
+4. **种子脚本全表删除**
+   - 默认值改为 `no`；清库改为按 `name + version` 定位本脚本数据集，再按 `dataset_id` 定向删除 result/run/case/dataset。
+   - 所有插入合并为单事务，末尾统一 `commit()`，异常 `rollback()` 后抛出。
+   - append 模式新增同名同版本存在性校验，冲突即 `SystemExit`。
+
+5. **空金标静默成功**
+   - 异常收窄为 `openai.APIError`，JSON 解析失败单独提示。
+   - `build_corpus` 记录 `labelFailures/labelFailureCount` 并写入 `corpus-index.json`。
+   - `main()` 在 `labelFailureCount > 0` 时返回 1。
+
+6. **评测主键回取**
+   - 改用 `GeneratedKeyHolder` + `Statement.RETURN_GENERATED_KEYS` 在同一 `PreparedStatement` 上取自增主键，主键为空抛 `IllegalStateException`。
+
+7. **合同更新列名**
+   - 删除通用数组拼接，显式映射 `amount → amount=?`、`ownerId → owner_id=?`。
+   - 核实当前前端无请求体传 `ownerId`，属潜伏缺陷，本次一并修正。
+
+### 验证结果
+
+- Python 修改文件 `py_compile`：`benchmark.py`、`metrics.py`、`cli.py`、`seed_eval_datasets.py`、`build_private_benchmark_corpus.py` 全部通过。
+- 门禁判定矩阵 6/6 通过：v1 无标注统计保持 `PASSED/LEGACY`；v1 12 条 PROVISIONAL、v1 仅 3 条 approved 均 `BLOCKED`；v1/v2 足量 approved 均 `PASSED/APPROVED`。
+- schema v1 加载回归：缺省 `labelStatus` 在 manifest/case/report 三处均为 `PROVISIONAL`，显式 `APPROVED` 仍保留。
+- H14：AST 校验确认仅捕获 `APIError`、`main` 失败返回 1、索引写入 `labelFailureCount`。
+- H15：安全边界 10 项全部通过（默认 `no`、四条删除均带条件、单次 commit、rollback、重复插入拒绝、无无条件全表删除）。
+- H10/H9/H1/H7：逐项静态核对通过（导入、`RETURN_GENERATED_KEYS`、`owner_id` 映射、消毒器与调用点、`allSettled` 与 catch）。
+- 当前环境无 pytest 与后端依赖、无 JDK/Maven、无 Node/npm，未执行 Python 测试、Java 编译、前端构建与 API 黑盒测试，需在 CI 或完整环境复跑。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `agent-front/src/utils/sanitizeHtml.js` | 新增 | 零依赖 HTML 白名单消毒器 |
+| `agent-front/src/components/ChatWindow.vue` | 修改 | 聊天 Markdown 渲染接入消毒 |
+| `agent-front/src/components/ReportArtifactModal.vue` | 修改 | 报告 Markdown 渲染接入消毒 |
+| `agent-admin/src/views/KnowledgeBase.vue` | 修改 | `onMounted` 容错，各加载函数补 catch |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/benchmark.py` | 修改 | 标注状态缺省改为 PROVISIONAL，校验移出 schema 分支 |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/metrics.py` | 修改 | 标注门禁按是否携带标注统计判定 |
+| `tools/chat-assistant/backend/app/agent_runtime/evaluation/cli.py` | 修改 | 导入缺省标注状态改为 PROVISIONAL |
+| `scripts/seed_eval_datasets.py` | 修改 | 默认不清库、定向删除、单事务、重复插入拒绝 |
+| `scripts/build_private_benchmark_corpus.py` | 修改 | 收窄异常、记录标注失败、失败非零退出 |
+| `agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java` | 修改 | `GeneratedKeyHolder` 回取自增主键 |
+| `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java` | 修改 | `ownerId` 映射为 `owner_id` |
+
+工作区中与本批次无关的改动（`agent-front/src/api/index.js`、`ContractCaseView.vue`、`ContractPortfolioView.vue`、`ContractWorkspaceController.java`、`ContractWorkflowService.java` 及两个新增前端组件）未纳入本批次提交。

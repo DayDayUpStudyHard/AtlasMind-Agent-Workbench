@@ -381,10 +381,9 @@ const qaHits = computed(() => qaResult.value?.hits || [])
 const hasActiveJobs = computed(() => documents.value.some(row => isActiveJob(row.latestJobStatus)))
 
 onMounted(async () => {
-  await fetchSpaces()
-  await fetchProjects()
+  // 各加载相互独立：任一接口失败不得中断后续加载与轮询启动。
+  await Promise.allSettled([fetchSpaces(), fetchProjects(), fetchRuntimeSettings()])
   await fetchDocuments()
-  await fetchRuntimeSettings()
   startDocumentPolling()
 })
 
@@ -403,8 +402,12 @@ async function fetchRuntimeSettings() {
 }
 
 async function fetchProjects() {
-  const res = await getContracts()
-  projects.value = res.data.data || []
+  try {
+    const res = await getContracts()
+    projects.value = res.data.data || []
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '加载合同列表失败'))
+  }
 }
 
 async function fetchSpaces() {
@@ -415,6 +418,8 @@ async function fetchSpaces() {
     if (!uploadForm.value.spaceId && spaces.value.length) {
       uploadForm.value.spaceId = spaces.value[0].id
     }
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '加载知识空间失败'))
   } finally {
     spaceLoading.value = false
   }
@@ -433,6 +438,8 @@ async function fetchDocuments() {
     const res = await getKbDocuments(params)
     documents.value = res.data.data?.records || []
     total.value = Number(res.data.data?.total) || 0
+  } catch (error) {
+    ElMessage.error(errorMessage(error, '加载文档列表失败'))
   } finally {
     documentLoading.value = false
   }

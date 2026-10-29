@@ -68,7 +68,7 @@ class BenchmarkDataset:
             "version": self.manifest["version"],
             "schemaVersion": self.manifest["schemaVersion"],
             "taskType": self.task_type,
-            "labelStatus": self.manifest.get("labelStatus", "APPROVED"),
+            "labelStatus": self.manifest.get("labelStatus", "PROVISIONAL"),
             "caseCount": len(self.cases),
             "datasetHash": self.dataset_hash,
             "cases": [case.case_id for case in self.cases],
@@ -94,7 +94,7 @@ def load_benchmark_dataset(path: str | Path) -> BenchmarkDataset:
         raw = _load_mapping(case_path, "case")
         raw.setdefault("schemaVersion", manifest["schemaVersion"])
         raw.setdefault("taskType", manifest["taskType"])
-        raw.setdefault("annotationStatus", manifest.get("labelStatus", "APPROVED"))
+        raw.setdefault("annotationStatus", manifest.get("labelStatus", "PROVISIONAL"))
         case_id = _validate_case(raw, case_path)
         if case_id in seen:
             raise BenchmarkDatasetError(f"duplicate caseId {case_id!r}")
@@ -146,12 +146,13 @@ def _validate_manifest(manifest: dict[str, Any]) -> None:
             get_benchmark_spec(task_type)
         except ValueError as exc:
             raise BenchmarkDatasetError(str(exc)) from exc
-        label_status = str(manifest.get("labelStatus") or "PROVISIONAL").upper()
-        if label_status not in {"PROVISIONAL", "CANDIDATE", "APPROVED"}:
-            raise BenchmarkDatasetError(
-                "manifest labelStatus must be PROVISIONAL, CANDIDATE, or APPROVED"
-            )
-        manifest["labelStatus"] = label_status
+    # 标注状态与 schema 版本无关：缺失一律按 PROVISIONAL，绝不默认为已批准。
+    label_status = str(manifest.get("labelStatus") or "PROVISIONAL").upper()
+    if label_status not in {"PROVISIONAL", "CANDIDATE", "APPROVED"}:
+        raise BenchmarkDatasetError(
+            "manifest labelStatus must be PROVISIONAL, CANDIDATE, or APPROVED"
+        )
+    manifest["labelStatus"] = label_status
 
 
 def _case_paths(root: Path, manifest: dict[str, Any]) -> list[Path]:
