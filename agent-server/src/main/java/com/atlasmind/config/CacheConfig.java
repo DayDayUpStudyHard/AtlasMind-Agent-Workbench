@@ -2,6 +2,8 @@ package com.atlasmind.config;
 
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.jsontype.BasicPolymorphicTypeValidator;
+import com.fasterxml.jackson.databind.jsontype.PolymorphicTypeValidator;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.springframework.cache.CacheManager;
 import org.springframework.cache.annotation.EnableCaching;
@@ -27,11 +29,19 @@ public class CacheConfig {
 
     @Bean
     public CacheManager cacheManager(RedisConnectionFactory connectionFactory) {
-        // 配置 ObjectMapper：注册 JavaTimeModule + 禁用类型信息（减小 value 体积）
+        // 配置 ObjectMapper：注册 JavaTimeModule + 多态类型白名单。
+        // activateDefaultTyping 必须搭配受限 PolymorphicTypeValidator；
+        // 默认的 getPolymorphicTypeValidator() 是 LaissezFaireSubTypeValidator
+        // （全放行），攻击者可控的 Redis value 可借 @class 实例化任意类（反序列化 RCE）。
+        PolymorphicTypeValidator validator = BasicPolymorphicTypeValidator.builder()
+                .allowIfSubType("com.atlasmind.")
+                .allowIfSubType("java.util.")
+                .allowIfSubType("java.time.")
+                .build();
         ObjectMapper mapper = new ObjectMapper();
         mapper.registerModule(new JavaTimeModule());
         mapper.activateDefaultTyping(
-                mapper.getPolymorphicTypeValidator(),
+                validator,
                 ObjectMapper.DefaultTyping.NON_FINAL,
                 JsonTypeInfo.As.PROPERTY
         );

@@ -1984,11 +1984,11 @@ def _fail_eval_run(eval_run_id: int, error: str) -> None:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE agent_eval_run SET status='FAILED', summary_json=%s, finished_at=NOW() WHERE id=%s",
-                    (f'{{"error": "{error}"}}', eval_run_id),
+                    (_json_safe({"error": error}), eval_run_id),
                 )
                 conn.commit()
     except Exception:
-        pass
+        logger.exception("Could not mark eval run %s as FAILED", eval_run_id)
 
 
 def _json_safe(value: Any) -> str:
@@ -4885,9 +4885,15 @@ async def _run_evaluation_background(eval_run_id: int):
                         case_run_ids.append(run_id)
                     except EvalCaseConfigurationError:
                         raise
-                    except ValueError as skip_exc:
-                        stage_outputs[task_type] = {"skipped": True, "reason": str(skip_exc)}
-                        continue
+                    except ValueError as exc:
+                        # 运行时 ValueError（pydantic 校验、JSON/数值解析失败等）
+                        # 属于崩溃，不得当作"跳过"继续用空产物计分；交给外层
+                        # 统一按失败用例收口，避免评测结论失真。
+                        logger.warning(
+                            "Eval run %s case %s stage %s crashed: %s",
+                            eval_run_id, case_key, task_type, exc,
+                        )
+                        raise
                     if task_type == "FULFILLMENT_CHECK" and result.status == "WAITING_HUMAN":
                         # Preserve the AI proposal before the controlled human
                         # decision.  A fulfillment graph is not considered a

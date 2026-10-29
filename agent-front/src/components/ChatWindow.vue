@@ -130,7 +130,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { marked } from 'marked'
 import { createAiSession, getAiSessionMessages, listContracts } from '../api/index.js'
@@ -350,7 +350,9 @@ async function send(msg) {
   messages.value.push({ role: 'user', content, sources: null })
   scrollBottom()
 
-  const assistantMsg = { role: 'assistant', content: '', sources: [] }
+  // 必须 reactive：push 进 ref 数组后流式片段仍写这个局部变量，
+  // 普通对象绕过 Proxy 不会触发渲染（打字机效果丢失）。
+  const assistantMsg = reactive({ role: 'assistant', content: '', sources: [] })
   messages.value.push(assistantMsg)
   streaming.value = true
   streamingStatus.value = hasContractScope.value ? '正在检索当前合同...' : '正在检索知识库...'

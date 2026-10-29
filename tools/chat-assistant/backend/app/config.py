@@ -108,6 +108,7 @@ class Settings:
     mineru_enabled: bool = _bool_env("MINERU_ENABLED", "false")
     mineru_command: str = os.getenv("MINERU_COMMAND", "magic-pdf -p {input} -o {output}")
     mineru_output_dir: str = os.getenv("MINERU_OUTPUT_DIR", ".mineru-output")
+    mineru_timeout_seconds: int = int(os.getenv("MINERU_TIMEOUT_SECONDS", "1800"))
 
     def validate(self) -> list[str]:
         """启动时校验必要配置，返回错误列表（空列表 = 全部 OK）。"""

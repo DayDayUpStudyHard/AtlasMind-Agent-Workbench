@@ -1331,7 +1331,7 @@ class RunDispatcher:
                     self.runner.execute(ctx), timeout=TIMEOUT_SECONDS,
                 )
             except asyncio.TimeoutError:
-                await self.trace_store.append_trace(
+                await self.runner.trace_store.append_trace(
                     run_id, "HARNESS_TIMEOUT",
                     f"Agent 执行超时（{TIMEOUT_SECONDS}s），可能因 LLM 不可达或任务过于复杂",
                 )

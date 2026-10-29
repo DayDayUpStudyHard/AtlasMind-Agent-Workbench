@@ -6,6 +6,7 @@ than pypdf/PaddleOCR and is best deployed as an optional worker capability.
 from __future__ import annotations
 
 import shutil
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -27,19 +28,27 @@ class MineruService:
         job_dir = output_root / f"{pdf_path.stem}-{int(time.time() * 1000)}"
         job_dir.mkdir(parents=True, exist_ok=True)
 
+        # MINERU_COMMAND 是 shell 命令模板；{input}/{output} 来自上传文件名与
+        # 拼接目录，必须 shlex.quote 防止文件名中的 ; | && $(...) 等改变命令语义。
         command = settings.mineru_command.format(
-            input=str(pdf_path),
-            output=str(job_dir),
+            input=shlex.quote(str(pdf_path)),
+            output=shlex.quote(str(job_dir)),
         )
         try:
-            result = subprocess.run(
-                command,
-                shell=True,
-                cwd=str(pdf_path.parent),
-                text=True,
-                capture_output=True,
-                timeout=None,
-            )
+            try:
+                result = subprocess.run(
+                    command,
+                    shell=True,
+                    cwd=str(pdf_path.parent),
+                    text=True,
+                    capture_output=True,
+                    timeout=settings.mineru_timeout_seconds,
+                )
+            except subprocess.TimeoutExpired:
+                raise RuntimeError(
+                    f"MinerU 解析超时（>{settings.mineru_timeout_seconds}s），"
+                    "请检查 MINERU_COMMAND 输出或调大 MINERU_TIMEOUT_SECONDS"
+                )
             if result.returncode != 0:
                 detail = (result.stderr or result.stdout or "").strip()
                 raise RuntimeError(f"MinerU 解析失败：{detail[:1000]}")

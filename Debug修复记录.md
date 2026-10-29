@@ -4871,3 +4871,66 @@ DeepSeek 余额恢复后，履约核验私有候选集首次真实运行（Run #
 | `tools/chat-assistant/backend/tests/test_timeline_v2.py` | 修改 | 未落地日期不得发布回归 |
 
 历史评测 Run 的错误产物不会自动改变；修复后需要重新运行履约日程评测，才能观察新生成结果。
+
+## 2026-10-29：全量 Review Critical/High 修复（C1/C2/C3/H4/H5/H6/H16）
+
+### 问题
+
+第二轮全量代码 Review 报告（`code-reviews/2026-10-29-atlasmind-agent-workbench/review.md`）确认 4 个 Critical 与 16 个 High 风险，本次按核实结论修复其中 7 项：
+
+1. MinerU 解析把上传文件名直接拼入 shell 命令串执行，且 `timeout=None`，存在命令注入与请求永久挂起风险。
+2. 评测循环把运行时 `ValueError`（pydantic 校验、JSON/数值解析失败等）当作"任务类型不支持"跳过，随后仍用空产物打分并计入通过，评测结论与发布门禁失真。
+3. Redis CacheManager 使用默认 `LaissezFaireSubTypeValidator` 开启多态类型信息，攻击者可控的 Redis value 可借 `@class` 实例化任意类，存在反序列化 RCE 风险。
+4. `RunDispatcher` 未设置 `trace_store`，超时分支必然抛 `AttributeError`，HARNESS_TIMEOUT 追踪无法落库。
+5. 评测失败落库用 f-string 拼 JSON，错误信息含引号或换行时写出非法 `summary_json`，且写库异常被 `pass` 吞掉，运行可能永久停留在 RUNNING/QUEUED。
+6. 前台聊天流式回复写入普通对象，绕过 Vue Proxy 不触发渲染，打字机效果失效、内容只能在流结束时一次性显示。
+7. 后台无鉴权用例整体 `xfail` 且断言允许 200，`pytest.ini` 未开 `xfail_strict`，鉴权缺陷永远不会让 CI 变红。
+
+### 根因与修复
+
+1. **MinerU 命令注入与超时**
+   - `{input}/{output}` 先经 `shlex.quote()` 再格式化进 `MINERU_COMMAND` 模板，保留既有 shell 模板配置方式；含空格或 `; | && $(...)` 的文件名不再改变命令语义。
+   - 新增 `MINERU_TIMEOUT_SECONDS`（默认 1800 秒），`subprocess.run` 传入该超时；`TimeoutExpired` 转为可读的 `RuntimeError`，并保证超时分支同样执行 `finally` 中的 `job_dir` 清理。
+
+2. **评测崩溃误计为通过**
+   - 删除 `except ValueError` 的跳过分支；运行时 `ValueError` 记录 warning 后 `raise`，由外层统一按失败用例收口（`success=False`、`analysisMode=FAILED`），不再用空 artifact 计分。
+   - `EvalCaseConfigurationError`（`ValueError` 子类）仍按原逻辑整单失败；legacy 引擎不支持的任务类型已在上游统一失败收口，不依赖该跳过分支。
+
+3. **Redis 反序列化白名单**
+   - `CacheConfig` 的 `activateDefaultTyping` 改用 `BasicPolymorphicTypeValidator` 白名单（`com.atlasmind.`、`java.util.`、`java.time.`），并修正与实现相反的注释。
+   - 核实项目实际缓存走 `CacheShieldAspect` + `RedisConfig` 的 `RedisTemplate`，后者未启用 default typing，不存在同款漏洞；当前无 `@Cacheable` 实际使用点，无存量缓存失效风险。
+
+4. **超时追踪写入**
+   - 超时分支改为 `await self.runner.trace_store.append_trace(...)`；`AgentRunner.__init__` 已持有 `trace_store`，`RunDispatcher` 均由真实 `AgentRunner` 构造。
+
+5. **失败落库 JSON**
+   - 复用同文件既有的 `_json_safe()` 生成 `summary_json`，替代 f-string 拼接；外层异常改为 `logger.exception` 留痕。
+
+6. **聊天流式响应式**
+   - `assistantMsg` 改为 `reactive({...})` 并补 `reactive` 导入，chunk、error、sources、traceId 的写入均经过响应式代理。
+
+7. **鉴权用例 xfail 粉饰**
+   - 移除 `@pytest.mark.xfail`，断言收紧为 `status_code in [401, 403]` 且响应体 `code != 200`；`pytest.ini` 增加 `xfail_strict = true`。
+   - 核实 `SaTokenConfig` 已对 `/api/admin/**` 注册拦截器，`GlobalExceptionHandler` 将未登录/无角色分别映射为 401/403，所述 BUG 当前已不存在，用例由 XPASS 转为正常 PASS。
+
+### 验证结果
+
+- 修改文件 `python -m py_compile`：`mineru_service.py`、`config.py`、`routes.py`、`runner.py`、`api-tests/test_admin.py` 全部通过。
+- 逐项交叉核对作用域变量、调用方与依赖：`case_key`/`eval_run_id`/`task_type` 均在作用域内；`_json_safe`/`logger` 可用；无其他代码依赖被删除的 `"skipped"` 标记；`ClientTimeout` 相关代码未改动。
+- `git diff` 全量审阅：8 个文件，+46/-18 行，无意外改动。
+- 当前环境缺少 pytest 与后端依赖、JDK/Maven、Node/npm，未能执行 Python 测试、Java 编译与前端构建；需在 CI 或完整环境复跑 `pytest tests`、`./mvnw compile`、`npm run build` 与 `api-tests` 黑盒测试确认。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `tools/chat-assistant/backend/app/services/mineru_service.py` | 修改 | `shlex.quote` 参数、可配置超时与超时异常转换 |
+| `tools/chat-assistant/backend/app/config.py` | 修改 | 新增 `MINERU_TIMEOUT_SECONDS`（默认 1800） |
+| `tools/chat-assistant/backend/app/api/routes.py` | 修改 | 评测崩溃按失败收口；`_fail_eval_run` 改用 `_json_safe` 并记录异常 |
+| `tools/chat-assistant/backend/app/agent_runtime/runner.py` | 修改 | 超时追踪改经 `runner.trace_store` 写入 |
+| `agent-server/src/main/java/com/atlasmind/config/CacheConfig.java` | 修改 | 多态类型白名单 `BasicPolymorphicTypeValidator` |
+| `agent-front/src/components/ChatWindow.vue` | 修改 | 流式消息改为 `reactive` 对象 |
+| `api-tests/test_admin.py` | 修改 | 移除 xfail、收紧 401/403 断言 |
+| `api-tests/pytest.ini` | 修改 | 开启 `xfail_strict` |
+
+被评估为不属实的报告项（H8 后端忽略 id、H9 无触发路径、H14 产物带 CANDIDATE 标记、H6 影响程度、C4 生产侧已有防护）未在本次改动范围内。

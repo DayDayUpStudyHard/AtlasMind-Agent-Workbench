@@ -293,11 +293,10 @@ class TestUnauthorized:
     ]
 
     @pytest.mark.parametrize("endpoint", ENDPOINTS)
-    @pytest.mark.xfail(reason="BUG: Sa-Token 未拦截 /api/admin/** 路由，后台接口无登录保护")
     def test_unauthorized(self, base_url, session, endpoint):
         """无 token 时后台接口应拒绝"""
         resp = session.get(f"{base_url}{endpoint}")
-        assert resp.status_code in [200, 401, 403]
-        if resp.status_code == 200:
-            body = resp.json()
-            assert body["code"] != 200, f"{endpoint} 未登录却允许访问: {body}"
+        assert resp.status_code in [401, 403], \
+            f"{endpoint} 未登录时应返回 401/403，实际 {resp.status_code}"
+        body = resp.json()
+        assert body["code"] != 200, f"{endpoint} 未登录却允许访问: {body}"
