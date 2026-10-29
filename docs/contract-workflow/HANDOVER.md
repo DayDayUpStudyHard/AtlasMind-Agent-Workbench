@@ -126,6 +126,8 @@ LLM、Embedding、Reranker 或 Elasticsearch 任一不可用时，系统会记�
 4. **`approvalMemo` 是 AI 生成的草案**，页面自己标了"不代表审批已完成"。不要把它当审批结果，也不要因为它存在就以为审批功能已实现。
 5. **docs 下有两套"六层"**：技术架构六层 ≠ 改造层次 0~6，见 README §9。
 6. **`contract_obligation` 目前几乎没数据**（只有一处手写 INSERT），看到履约 KPI 是 0 不是 bug，是已知缺口。
+7. **⑤ 的"待审批"状态目前不可达**（`PENDING_APPROVAL` 的唯一写入点要求先处于 `NEEDS_REVISION`，而后者只能从 `PENDING_APPROVAL` 退回）。一期只显示"审批功能建设中"，**不要顺手去修**，修复是二期的活。
+8. **`enteredAt` 一期只填 ①②**（案件创建、合同上传），③~⑦ 返回 `null` 且前端不显示"已停留"。不要为了方便去猜 run 开始时间——那是二期阶段事件的事。
 
 ## 8. 交付前自检
 

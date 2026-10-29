@@ -1,6 +1,6 @@
 # 合同案件工作流视图 设计定稿（一期：让流程看得见）
 
-> 版本：v1.0（定稿）
+> 版本：v1.1（定稿，2026-10-29 修订：⑤ 审批降级为文案、`enteredAt` 可空、删除 `NO_APPROVER`/`APPROVE`）
 > 日期：2026-10-29
 > 状态：**设计已定稿，尚未开工**
 > 上游依据：[合同案件生命周期业务主线 PRD](../prd-contract-case-lifecycle.md)
@@ -99,7 +99,7 @@
 | ② 解析就绪 | 文档 `parse_status` = PENDING/PARSING → `ACTIVE`；FAILED → `BLOCKED(PARSE_FAILED)`；READY 且诊断标记低质量 → `BLOCKED(QUALITY_LOW)`；READY → `DONE` |
 | ③ 要素确认 | 无快照 → `PENDING`；有提取 run 运行中 → `ACTIVE`；run FAILED → `BLOCKED(EXTRACTION_FAILED)`；快照 `READY_FOR_CONFIRMATION` → `WAITING_HUMAN`（业务负责人）；`CONFIRMED` → `DONE` |
 | ④ 日程确认 | 无日程 → `PENDING`；`timeline_status=RUNNING` → `ACTIVE`；FAILED → `BLOCKED(TIMELINE_FAILED)`；有节点且存在未复核 → `WAITING_HUMAN`（业务负责人）；全部复核 → `DONE` |
-| ⑤ 风险处置 | 无审查 run → `PENDING`；RUNNING → `ACTIVE`；FAILED → `BLOCKED(REVIEW_FAILED)`；有限报告 → `WAITING_HUMAN` 且带 `LIMITED` 标记；有 OPEN 发现 → `WAITING_HUMAN`（法务）；无 OPEN 且未审批 → `WAITING_HUMAN`（审批人）；已批准 → `DONE` |
+| ⑤ 风险处置 | 无审查 run → `PENDING`；RUNNING → `ACTIVE`；FAILED → `BLOCKED(REVIEW_FAILED)`；有限报告 → `WAITING_HUMAN` 且带 `LIMITED` 标记；有 OPEN 发现 → `WAITING_HUMAN`（法务）；无 OPEN 且案件状态为 `PENDING_APPROVAL` → `WAITING_HUMAN`，`nextAction.type=NONE`，文案"审批功能建设中，请线下处理"；已批准 → `DONE` |
 | ⑥ 履约跟踪 | 案件未到履约状态 → `PENDING`；`IN_FULFILLMENT` 且存在未完成义务 → `WAITING_HUMAN`（业务负责人）；全部完成 → `DONE` |
 | ⑦ 归档续签 | 存在未终态义务或未到期 → `PENDING`；`EXPIRED/TERMINATED` 或全部终态 → `DONE` |
 
@@ -108,6 +108,7 @@
 - 只推导到"第一个非 DONE 阶段"，其后一律 `PENDING`，避免出现"后面已完成、前面没完成"的矛盾展示。
 - 早期状态映射：`DRAFT/MATERIAL_PENDING/INTAKE_PARSING/INTAKE_CONFIRMING` 落在 ①②；`NEEDS_REVISION` 落在 ⑤（并在下一步提示"按驳回意见修改或补证"）。
 - 若多份文档，只看 `document_type=MAIN` 且 `deleted=0` 的最新版本。
+- **已知缺陷（不在本期修）**：`PENDING_APPROVAL` 在现状下不可达——唯一写入点要求先处于 `NEEDS_REVISION`，而后者只能从 `PENDING_APPROVAL` 经 `/request-revision` 退回，形成循环。因此一期只展示"审批功能建设中"文案，不提供任何审批操作；修复属二期 §5.5。
 
 ## 6. 阻塞原因码
 
@@ -119,8 +120,7 @@
 | `TIMELINE_FAILED` | 履约日程生成失败，可重试 | 发起人 |
 | `REVIEW_FAILED` | 风险审查失败，可重试 | 发起人 |
 | `CONFIG_MISSING` | 当前合同类型没有配置审查规则，请联系管理员 | 管理员 |
-| `NO_APPROVER` | 未找到审批人（金额或部门未配置），请联系管理员 | 管理员 |
-| `AWAITING_APPROVAL` | 等待 {角色} 审批 | 对应审批人 |
+| `AWAITING_APPROVAL` | 等待 {角色} 审批（**二期启用**；一期不产生此码） | 对应审批人 |
 
 ## 7. 接口契约（一期）
 
@@ -136,8 +136,8 @@
   "stages": [
     { "key": "INTAKE",           "label": "受理建档", "state": "DONE",           "ownerRole": null,     "enteredAt": "2026-10-20T09:12:00" },
     { "key": "PARSE",            "label": "解析就绪", "state": "DONE",           "ownerRole": null,     "enteredAt": "2026-10-20T09:15:00" },
-    { "key": "ELEMENT_CONFIRM",  "label": "要素确认", "state": "DONE",           "ownerRole": "业务负责人", "enteredAt": "2026-10-21T10:02:00" },
-    { "key": "TIMELINE_CONFIRM", "label": "日程确认", "state": "WAITING_HUMAN",  "ownerRole": "业务负责人", "enteredAt": "2026-10-29T14:02:00" },
+    { "key": "ELEMENT_CONFIRM",  "label": "要素确认", "state": "DONE",           "ownerRole": "业务负责人", "enteredAt": null },
+    { "key": "TIMELINE_CONFIRM", "label": "日程确认", "state": "WAITING_HUMAN",  "ownerRole": "业务负责人", "enteredAt": null },
     { "key": "RISK_DISPOSAL",    "label": "风险处置", "state": "PENDING",        "ownerRole": "法务",    "enteredAt": null },
     { "key": "FULFILLMENT",      "label": "履约跟踪", "state": "PENDING",        "ownerRole": "业务负责人", "enteredAt": null },
     { "key": "ARCHIVE",          "label": "归档续签", "state": "PENDING",        "ownerRole": "业务负责人", "enteredAt": null }
@@ -162,7 +162,8 @@
 
 - `stage` 与 `stages[].key` 使用固定枚举，前端不解析中文。
 - `ownerRole` 一期只给角色（业务负责人 / 法务 / 审批人 / 发起人 / 管理员），**不落到具体人**（二期再接）。
-- `nextAction.type` 限定枚举，前端按类型调用已有接口：`UPLOAD_DOCUMENT` / `RETRY_PARSE` / `CONFIRM_ELEMENTS` / `CONFIRM_TIMELINE` / `HANDLE_FINDINGS` / `APPROVE` / `UPLOAD_EVIDENCE` / `NONE`。
+- `nextAction.type` 限定枚举，前端按类型调用已有接口：`UPLOAD_DOCUMENT` / `RETRY_PARSE` / `CONFIRM_ELEMENTS` / `CONFIRM_TIMELINE` / `HANDLE_FINDINGS` / `UPLOAD_EVIDENCE` / `NONE`。`APPROVE` 属二期，一期不返回。
+- `enteredAt` **可空**。一期只填 ① 案件创建时间、② 主合同上传时间（来源确定）；③~⑦ 一律 `null`。`null` 时前端不渲染"已停留"。真实阶段进入时间由二期状态机写入阶段事件后填充，字段与前端均无需改动。
 - `blockedReason` 为 §6 的码；无阻塞为 `null`。
 - 接口只读，不产生副作用；同一请求 2 次结果一致（除非期间有 run 状态变化）。
 
@@ -213,21 +214,22 @@
 4. 快照待确认：③ 显示"3 个字段待确认"，按钮跳到确认区。
 5. 日程待确认：④ 显示节点计数（总数/已确认/待确认）。
 6. 审查完成且有 OPEN 发现：⑤ 显示"待法务处置 N 项"，不再显示"运行 Agent"。
-7. 审查完成无 OPEN 发现：⑤ 显示"等待审批"，并展示 `NO_APPROVER` 或审批角色。
-8. 已批准/履约中/已到期：⑥⑦ 状态正确推进，且不出现"后面完成、前面未完成"的矛盾。
+7. 审查完成无 OPEN 发现且状态为 `PENDING_APPROVAL`（用 `updateCase` 直接构造）：⑤ 显示"审批功能建设中，请线下处理"，且**不出现**审批按钮。正常流程到不了该状态，本项以构造验证为准。
+8. 已批准/履约中/已到期：⑥⑦ 状态正确推进，且不出现"后面完成、前面未完成"的矛盾。其中"已批准"同样需构造（`PENDING_APPROVAL` → `APPROVED`），正常流程不可达。
 9. 列表页：一屏 20 条合同，阶段与责任人正确，接口总耗时 < 300ms。
 10. 1280 / 768 / 375 三个宽度下 7 段条不换行、不重叠、主按钮可点。
 11. 「高级操作」默认折叠；展开后 8 个任务按钮行为与今天一致。
 12. 回归：现有确认、上传、运行任务、审批意见草案展示均不受影响。
+13. ③~⑦ 不显示"已停留"（`enteredAt` 为 `null`）；① ② 显示准确时间，且与案件创建/上传时间一致。
 
 ## 12. 开发前需核对的字段（实现时确认，不阻塞设计）
 
 | 待核对 | 用途 | 缺失时的兜底 |
 | --- | --- | --- |
-| `contract_document` 是否已有质量标记字段 | 判定 `QUALITY_LOW` | 无标记则不产生该阻塞，只按 `parse_status` 判定 |
+| ~~`contract_document` 是否已有质量标记字段~~ | 判定 `QUALITY_LOW` | **已验证存在**：`parse_quality`（`AgentWorkbenchSchemaInitializer` 中 `addColumnIfMissing`），无需兜底 |
 | `contract_extraction_snapshot.status` 取值全集 | ③ 的状态判定 | 按 `READY_FOR_CONFIRMATION` / `CONFIRMED` 两值先实现 |
 | `contract_timeline_node.review_status` 取值 | ④ 的"待确认"计数 | 无值时退化为"日程已生成即 DONE"，并在 tooltip 标注 |
-| 是否存在"待审批人"配置 | ⑤ 的 `NO_APPROVER` | 二期再算，一期展示"等待审批"即可 |
+| 是否存在"待审批人"配置 | 二期的审批人计算 | 一期不需要；⑤ 只显示"审批功能建设中" |
 
 ## 13. 二期接口预留（不实现，仅说明方向）
 
