@@ -17,9 +17,10 @@
         </div>
       </div>
       <div class="case-actions">
-        <details class="task-menu">
-          <summary class="primary-button">{{ running || hasActiveRun ? 'Agent 运行中' : '运行 Agent' }}</summary>
+        <details class="task-menu advanced-task-menu">
+          <summary class="quiet-button">{{ running || hasActiveRun ? 'Agent 运行中' : '高级操作（一般不需要）' }}</summary>
           <div class="task-menu-panel" role="menu">
+            <p class="task-menu-hint">实施与排障专用：手动重跑某个 Agent 任务。日常请按工作流条的“下一步”操作。</p>
             <button
               type="button"
               class="task-menu-item"
@@ -101,54 +102,40 @@
       </button>
     </section>
 
-    <section v-if="analysisWorkflow.id" class="analysis-workflow-panel" :class="{ compact: workflowIsComplete }">
-      <div class="analysis-workflow-head">
+    <section v-if="workflow" class="case-workflow-panel" data-section="workflow">
+      <div class="case-workflow-head">
         <div>
-          <span class="section-kicker">合同分析流程</span>
-          <h3>{{ workflowIsComplete ? '合同证据与审查结果已就绪' : '解析、确认、要素整理与风险审查' }}</h3>
-          <p v-if="!workflowIsComplete">后续 Agent 会复用已解析的合同证据和当前版本的事实快照，不会重复 OCR 或重新切分全文。</p>
+          <span class="section-kicker">合同工作流</span>
+          <h3>{{ workflow.stageLabel || '合同生命周期' }}</h3>
+          <p class="case-workflow-hint" title="阶段由系统根据当前进度推断">阶段由系统根据当前进度推断，不改变任何业务状态</p>
         </div>
-        <strong :class="'workflow-status ' + workflowStatusClass(analysisWorkflow.status)">
-          {{ workflowStatusLabel(analysisWorkflow.status) }}
-        </strong>
+        <span class="case-workflow-stage-tag">
+          第 {{ workflow.stageIndex || 1 }} / 8 步
+        </span>
       </div>
-      <div v-if="workflowIsComplete" class="workflow-complete-strip">
-        <div class="workflow-complete-stages" aria-label="已完成的合同分析步骤">
-          <span v-for="stage in analysisStages" :key="stage.key">
-            <i>✓</i>{{ stage.label }}
-          </span>
-        </div>
-        <div class="workflow-complete-meta">
-          <small v-if="analysisWorkflow.evidenceSnapshotHash">
-            证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
-          </small>
-          <small v-if="analysisWorkflow.extractionStatus">
-            要素快照：{{ extractionWorkflowStatusLabel(analysisWorkflow.extractionStatus) }}
-          </small>
-        </div>
-      </div>
-      <template v-else>
-      <div class="analysis-workflow-stages">
-        <div v-for="stage in analysisStages" :key="stage.key" class="analysis-workflow-stage" :class="stage.state">
-          <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
-          <div>
-            <strong>{{ stage.label }}</strong>
-            <small>{{ stage.state === 'active' && stage.currentStep ? stage.currentStep : stage.description }}</small>
-            <span v-if="stage.state === 'active'" class="workflow-stage-progress"><i :style="{ width: `${stage.progress || 0}%` }"></i></span>
+
+      <WorkflowStrip :stages="workflow.stages || []" :current-key="workflow.stage" />
+
+      <div class="case-workflow-body">
+        <div class="case-workflow-current">
+          <span class="case-workflow-current-kicker">当前阶段</span>
+          <strong>{{ currentStageLabel }}</strong>
+          <p v-if="workflowEnteredLabel" class="case-workflow-entered">{{ workflowEnteredLabel }}</p>
+          <p v-if="workflow.currentDetail?.summary">{{ workflow.currentDetail.summary }}</p>
+          <div v-if="workflow.currentDetail?.counters && workflow.currentDetail.counters.total" class="case-workflow-counters">
+            <span>总数 <strong>{{ workflow.currentDetail.counters.total }}</strong></span>
+            <span>已确认 <strong>{{ workflow.currentDetail.counters.confirmed }}</strong></span>
+            <span>待确认 <strong>{{ workflow.currentDetail.counters.pending }}</strong></span>
           </div>
+          <p v-if="workflow.limited" class="case-workflow-limited">本次结论范围受限，仅供参考</p>
         </div>
+        <WorkflowNextAction
+          :next-action="workflow.nextAction || {}"
+          :blocked-reason="workflow.blockedReason || ''"
+          :summary="workflow.currentDetail?.summary || ''"
+          @action="handleWorkflowAction"
+        />
       </div>
-      <div class="analysis-workflow-foot">
-        <div class="workflow-evidence-summary">
-          <small v-if="analysisWorkflow.evidenceSnapshotHash">
-            证据快照 v{{ analysisWorkflow.documentVersion || 1 }} · {{ String(analysisWorkflow.evidenceSnapshotHash).slice(0, 12) }}…
-          </small>
-          <small v-if="analysisWorkflow.extractionStatus" :class="`extraction-status ${String(analysisWorkflow.extractionStatus).toLowerCase()}`">
-            要素快照：{{ extractionWorkflowStatusLabel(analysisWorkflow.extractionStatus) }}
-          </small>
-        </div>
-      </div>
-      </template>
     </section>
 
     <section class="contract-workbench" data-section="workbench">
@@ -718,16 +705,6 @@
             </div>
             <strong>{{ Array.isArray(c.runs) ? c.runs.length : 0 }} 次运行</strong>
           </header>
-
-          <div class="analysis-workflow-stages run-workflow-stages">
-            <div v-for="stage in analysisStages" :key="stage.key" class="analysis-workflow-stage" :class="stage.state">
-              <span class="workflow-stage-mark">{{ stage.state === 'done' ? '✓' : stage.index }}</span>
-              <div>
-                <strong>{{ stage.label }}</strong>
-                <small>{{ stage.description }}</small>
-              </div>
-            </div>
-          </div>
 
           <div v-if="extractionRun" class="workbench-runtime run-workbench-runtime">
             <span>本页事实由 Agent 运行 #{{ extractionRun.id }} 生成</span>
@@ -1418,7 +1395,9 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useMessage } from 'naive-ui'
-import api, { getContractMembers, getUserInfo, updateContractCase } from '../api/index.js'
+import api, { getContractMembers, getContractWorkflow, getUserInfo, updateContractCase } from '../api/index.js'
+import WorkflowStrip from '../components/WorkflowStrip.vue'
+import WorkflowNextAction from '../components/WorkflowNextAction.vue'
 import {
   deriveTimelineAction,
   resolveTimelineDate,
@@ -1468,6 +1447,8 @@ const editForm = ref({
 })
 let caseRefreshTimer = null
 let caseRefreshInFlight = false
+let workflowPollTimer = null
+let workflowPollTicks = 0
 const members = ref([])
 const currentUser = ref(null)
 const loadCurrentUser = async () => {
@@ -1525,6 +1506,52 @@ const caseTimelineNodes = computed(() => Array.isArray(c.value.timelineNodes) ? 
 const availableKnowledge = computed(() => Array.isArray(c.value.availableKnowledge) ? c.value.availableKnowledge : [])
 const activeWorkbenchTab = ref('elements')
 const analysisWorkflow = computed(() => c.value.analysisWorkflow || {})
+// 合同工作流视图（一期）：阶段一律由后端推导，前端只渲染。
+const workflow = ref(null)
+const currentStageInfo = computed(() => {
+  const list = Array.isArray(workflow.value?.stages) ? workflow.value.stages : []
+  return list.find(stage => stage.key === workflow.value?.stage) || null
+})
+const currentStageLabel = computed(() => currentStageInfo.value?.label || '')
+const workflowEnteredLabel = computed(() => {
+  const value = currentStageInfo.value?.enteredAt
+  if (!value) return ''
+  const text = String(value).replace('T', ' ').slice(0, 16)
+  return `进入时间：${text}`
+})
+
+async function loadWorkflow() {
+  try {
+    const response = await getContractWorkflow(route.params.id)
+    workflow.value = response.data.data || null
+  } catch {
+    // 工作流视图是展示增强，失败时不阻断案件页面
+    workflow.value = null
+  }
+}
+
+function handleWorkflowAction(type) {
+  const action = String(type || '').toUpperCase()
+  if (action === 'UPLOAD_DOCUMENT' || action === 'RETRY_PARSE') {
+    openRevisionUpload()
+    return
+  }
+  if (action === 'CONFIRM_ELEMENTS') {
+    scrollToSection('elements')
+    return
+  }
+  if (action === 'CONFIRM_TIMELINE') {
+    scrollToSection('timeline')
+    return
+  }
+  if (action === 'HANDLE_FINDINGS') {
+    scrollToSection('risks')
+    return
+  }
+  if (action === 'UPLOAD_EVIDENCE') {
+    scrollToSection('evidence')
+  }
+}
 const extractionSnapshot = computed(() => c.value.extractionSnapshot || {})
 function profileObject(value) {
   if (value && typeof value === 'object' && !Array.isArray(value)) return value
@@ -1650,25 +1677,14 @@ const timelineExtractionRun = computed(() => (Array.isArray(c.value.runs) ? c.va
   .find(run => String(run?.runType || '').toUpperCase() === 'TIMELINE_EXTRACTION') || null)
 const extractionRunActive = computed(() => ACTIVE_RUN_STATUSES.has(String(extractionRun.value?.status || '').toUpperCase()))
 const timelineExtractionRunActive = computed(() => ACTIVE_RUN_STATUSES.has(String(timelineExtractionRun.value?.status || '').toUpperCase()))
-const extractionRunFailed = computed(() =>
-  String(extractionRun.value?.status || '').toUpperCase() === 'FAILED'
-  || String(analysisWorkflow.value?.extractionStatus || '').toUpperCase() === 'FAILED'
-)
 const extractionSnapshotModeLabel = computed(() => {
   if (hasDynamicContractProfile.value) return '动态合同画像'
   if (extractionSnapshot.value?.id) return '旧版结构化结果'
   return '尚未生成要素快照'
 })
-const workflowIsComplete = computed(() => {
-  // LIMITED is terminal too — a scoped report was delivered; the stages
-  // must not sit at "待处理" while the run already finished.
-  return ['COMPLETED', 'LIMITED'].includes(String(analysisWorkflow.value?.status || '').toUpperCase())
-})
 const riskReviewRunActive = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
   .some(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW'
     && ACTIVE_RUN_STATUSES.has(String(run?.status || '').toUpperCase())))
-const latestRiskReviewRun = computed(() => (Array.isArray(c.value.runs) ? c.value.runs : [])
-  .find(run => String(run?.runType || '').toUpperCase() === 'CONTRACT_REVIEW') || null)
 const timelineExtractionDone = computed(() =>
   String(analysisWorkflow.value?.timelineStatus || '').toUpperCase() === 'COMPLETED'
   || hasCompletedRun('TIMELINE_EXTRACTION')
@@ -2023,29 +2039,6 @@ const contractElementTaskLabel = computed(() => extractionSnapshot.value?.id ? '
 const versionReviewTaskLabel = computed(() => hasVersionReviewResult.value ? '重新版本差异复核' : '版本差异复核')
 const approvalDecisionTaskLabel = computed(() => hasApprovalDecisionResult.value ? '重新生成审批意见草案' : '生成审批意见草案')
 const obligationExtractionTaskLabel = computed(() => hasObligationExtractionResult.value ? '重新提取履约义务' : '提取履约义务')
-const analysisStages = computed(() => {
-  const workflow = analysisWorkflow.value || {}
-  const status = String(workflow.status || '').toUpperCase()
-  const current = String(workflow.currentStage || '').toUpperCase()
-  const parseDone = ['WAITING_CONFIRMATION', 'READY_FOR_REVIEW', 'REVIEWING', 'COMPLETED', 'LIMITED'].includes(status)
-    || ['HUMAN_CONFIRMATION', 'FACT_EXTRACTION', 'TIMELINE_EXTRACTION', 'RISK_REVIEW', 'REPORT_READY'].includes(current)
-  const extractionDone = Boolean(extractionSnapshot.value?.id)
-  const extractionActive = extractionRunActive.value
-  const extractionFailed = extractionRunFailed.value
-  const timelineDone = timelineExtractionDone.value
-  const timelineActive = timelineExtractionRunActive.value
-  const timelineFailed = String(workflow.timelineStatus || '').toUpperCase() === 'FAILED'
-  const reviewDone = ['COMPLETED', 'LIMITED'].includes(status) || current === 'REPORT_READY'
-  const reviewActive = riskReviewRunActive.value || status === 'REVIEWING'
-  const failedStage = status === 'FAILED' ? current : ''
-  return [
-    { index: '01', key: 'DOCUMENT_PARSE', label: '文档解析', description: '读取正文并建立条款证据', state: failedStage === 'DOCUMENT_PARSE' ? 'error' : parseDone ? 'done' : status === 'PARSING' ? 'active' : 'pending' },
-    { index: '02', key: 'FACT_EXTRACTION', label: '合同要素', description: extractionDone ? '可引用事实快照已生成' : '等待文档解析完成', state: extractionDone ? 'done' : extractionActive ? 'active' : extractionFailed ? 'error' : 'pending', progress: extractionRun.value?.progress, currentStep: extractionRun.value?.currentStep },
-    { index: '03', key: 'TIMELINE_EXTRACTION', label: '履约日程', description: timelineDone ? '正式履约日程已发布' : extractionDone ? '等待合同要素完成后生成' : '等待合同要素', state: timelineDone ? 'done' : timelineActive ? 'active' : timelineFailed ? 'error' : 'pending', progress: timelineExtractionRun.value?.progress, currentStep: timelineExtractionRun.value?.currentStep },
-    { index: '04', key: 'RISK_REVIEW', label: '风险审查', description: timelineDone ? '等待正式履约日程完成后审查' : '等待履约日程', state: failedStage === 'RISK_REVIEW' ? 'error' : reviewDone ? 'done' : reviewActive ? 'active' : 'pending', progress: latestRiskReviewRun.value?.progress, currentStep: latestRiskReviewRun.value?.currentStep },
-    { index: '05', key: 'REPORT_READY', label: '分析就绪', description: '保存风险发现与处理建议', state: reviewDone ? 'done' : 'pending' },
-  ]
-})
 
 const primaryLifecycleCondition = computed(() => {
   const values = Array.isArray(c.value.lifecycleConditions) ? c.value.lifecycleConditions : []
@@ -2107,9 +2100,15 @@ onMounted(() => {
   caseRefreshTimer = window.setInterval(() => {
     if ((documentPipelineActive.value || hasActiveRun.value) && !caseRefreshInFlight) refreshCase().catch(() => {})
   }, 3500)
+  // 运行中任务 5s 刷新；空闲时 30s 兜底刷新，避免整页抖动。
+  workflowPollTimer = window.setInterval(() => {
+    workflowPollTicks += 1
+    if (hasActiveRun.value || workflowPollTicks % 6 === 0) loadWorkflow()
+  }, 5000)
 })
 onBeforeUnmount(() => {
   if (caseRefreshTimer) window.clearInterval(caseRefreshTimer)
+  if (workflowPollTimer) window.clearInterval(workflowPollTimer)
 })
 
 async function loadCase() {
@@ -2121,6 +2120,7 @@ async function loadCase() {
     ensureSelectedContractElement()
     checkPendingIntake()
     loadMembers(r.data.data.id)
+    void loadWorkflow()
   } catch (e) {
     loadError.value = uploadErrorMessage(e, '加载合同失败')
     message.error(loadError.value)
@@ -2205,6 +2205,7 @@ async function refreshCase() {
       ) || selectedTimelineNode.value
     }
     checkPendingIntake()
+    void loadWorkflow()
     void ensureAutomaticAnalysisPipeline()
   } finally {
     caseRefreshInFlight = false
@@ -3455,8 +3456,6 @@ function runtimeLabel(run) {
   if (run?.model) parts.push(run.model)
   return parts.join(' · ')
 }
-function workflowStatusLabel(s) { return { PARSING:'文档处理中', WAITING_CONFIRMATION:'待人工确认', READY_FOR_REVIEW:'待风险审查', REVIEWING:'风险审查中', COMPLETED:'分析完成', LIMITED:'范围受限', FAILED:'需要处理' }[s] || '分析流程' }
-function workflowStatusClass(s) { return { PARSING:'active', WAITING_CONFIRMATION:'attention', READY_FOR_REVIEW:'ready', REVIEWING:'active', COMPLETED:'done', LIMITED:'warn', FAILED:'error' }[s] || '' }
 function findingStatusLabel(s) { return { OPEN:'未处理', REMEDIATED:'已修改', ACCEPTED_EXCEPTION:'已接受例外', DISMISSED:'已驳回' }[s] || s }
 function severityLabel(s) { return { HIGH:'高危', MEDIUM:'中危', LOW:'低危' }[s] || s || '中危' }
 function riskStatusLabel(s) { return { LOW_RISK:'低风险', MEDIUM_RISK:'中风险', HIGH_RISK:'高风险' }[s] || s || '未评分' }
@@ -3608,22 +3607,23 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .meta-item strong{display:block;overflow:hidden;margin-top:4px;color:var(--atlas-text);font-size:13px;text-overflow:ellipsis;white-space:nowrap}
 .meta-item em{display:inline-flex;margin-top:5px;padding:2px 5px;border-radius:3px;font-size:9px;font-style:normal;font-weight:900}
 .meta-item em.verified{color:#246744;background:#eaf6ef}.meta-item em.review{color:#8a5b14;background:#fff4db}.meta-item em.missing{color:#7b8794;background:#edf1f4}
-.analysis-workflow-panel{margin:0 0 18px;padding:15px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px}
-.analysis-workflow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
-.analysis-workflow-head .section-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
-.analysis-workflow-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:17px}
-.analysis-workflow-head p{margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
-.workflow-status{flex:0 0 auto;padding:5px 8px;border-radius:3px;font-size:10px;font-weight:900}
-.workflow-status.active{color:#315d8b;background:#edf4fa}.workflow-status.attention{color:#8a5b14;background:#fff4db}.workflow-status.ready{color:#246744;background:#eaf6ef}.workflow-status.done{color:#246744;background:#dceee3}.workflow-status.warn{color:#8a5b14;background:#fff4db}.workflow-status.error{color:#a33f39;background:#fff0ee}
-.analysis-workflow-stages{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin-top:15px}
-.analysis-workflow-stage{display:flex;align-items:flex-start;gap:8px;min-width:0;padding:10px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:3px}
-.workflow-stage-mark{display:inline-flex;align-items:center;justify-content:center;flex:0 0 22px;width:22px;height:22px;border-radius:3px;background:#e9edf0;color:var(--atlas-subtle);font-size:10px;font-weight:900}
-.analysis-workflow-stage strong{display:block;color:var(--atlas-text);font-size:11px;line-height:1.4}.analysis-workflow-stage small{display:block;margin-top:3px;color:var(--atlas-subtle);font-size:10px;line-height:1.45}
-.analysis-workflow-stage.done{border-color:#b9d8c5;background:#f4faf6}.analysis-workflow-stage.done .workflow-stage-mark{color:#fff;background:#347254}.analysis-workflow-stage.active{border-color:#b7cde0;background:#f5f9fc}.analysis-workflow-stage.active .workflow-stage-mark{color:#fff;background:var(--atlas-primary)}.analysis-workflow-stage.error{border-color:#e4b2ad;background:#fff7f6}.analysis-workflow-stage.error .workflow-stage-mark{color:#fff;background:#b35c56}
-.analysis-workflow-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px}.analysis-workflow-foot small{color:var(--atlas-subtle);font-size:10px;word-break:break-all}.analysis-workflow-foot .small{min-height:32px;padding:0 10px;font-size:11px}.workflow-evidence-summary{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-evidence-summary .extraction-status{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px}.workflow-evidence-summary .extraction-status.running{color:var(--atlas-primary);background:#f4f8fc}.workflow-evidence-summary .extraction-status.ready_for_confirmation{color:#8a5b14;background:#fff8e6}.workflow-evidence-summary .extraction-status.confirmed{color:#347254;background:#edf7f0}.workflow-evidence-summary .extraction-status.failed{color:#b35c56;background:#fff5f4}
-.workflow-stage-progress{display:block;width:100%;height:3px;margin-top:7px;overflow:hidden;background:var(--atlas-border)}.workflow-stage-progress i{display:block;height:100%;background:var(--atlas-primary);transition:width .3s ease}
-.analysis-workflow-panel.compact{padding:12px 16px}.analysis-workflow-panel.compact .analysis-workflow-head{align-items:center}.analysis-workflow-panel.compact .section-kicker{margin-bottom:2px}.analysis-workflow-panel.compact .analysis-workflow-head h3{font-size:16px}
-.workflow-complete-strip{display:flex;align-items:center;justify-content:space-between;gap:14px;margin-top:11px;padding-top:10px;border-top:1px solid var(--atlas-border)}.workflow-complete-stages{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-complete-stages span{display:inline-flex;align-items:center;gap:5px;color:var(--atlas-muted);font-size:10px;font-weight:800;white-space:nowrap}.workflow-complete-stages i{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;color:#fff;background:#347254;border-radius:2px;font-size:9px;font-style:normal}.workflow-complete-meta{display:flex;align-items:center;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}.workflow-complete-meta small{color:var(--atlas-subtle);font-size:9px;white-space:nowrap}
+.case-workflow-panel{margin:0 0 18px;padding:15px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-left:4px solid var(--atlas-primary);border-radius:4px}
+.case-workflow-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;margin-bottom:12px}
+.case-workflow-head .section-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:10px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+.case-workflow-head h3{margin:0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:17px}
+.case-workflow-hint{margin:4px 0 0;color:var(--atlas-subtle);font-size:10px;line-height:1.5;cursor:help}
+.case-workflow-stage-tag{flex:0 0 auto;padding:5px 9px;color:var(--atlas-muted);background:#eef2f6;border-radius:3px;font-size:10px;font-weight:900}
+.case-workflow-body{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:12px;margin-top:13px}
+.case-workflow-current{padding:12px 14px;background:var(--atlas-bg);border:1px solid var(--atlas-border);border-radius:3px}
+.case-workflow-current-kicker{display:block;margin-bottom:4px;color:var(--atlas-subtle);font-size:9px;font-weight:900;letter-spacing:.06em;text-transform:uppercase}
+.case-workflow-current strong{display:block;color:var(--atlas-text);font-size:13px}
+.case-workflow-current p{margin:5px 0 0;color:var(--atlas-muted);font-size:11px;line-height:1.5}
+.case-workflow-entered{color:var(--atlas-subtle)!important}
+.case-workflow-counters{display:flex;flex-wrap:wrap;gap:10px;margin-top:8px;color:var(--atlas-muted);font-size:10px}
+.case-workflow-counters strong{display:inline;color:var(--atlas-text);font-size:11px}
+.case-workflow-limited{margin-top:8px!important;padding:4px 7px;color:#8a5b14!important;background:#fff4db;border-radius:3px;font-size:10px!important}
+.workflow-evidence-summary{display:flex;align-items:center;gap:10px;min-width:0;flex-wrap:wrap}.workflow-evidence-summary .extraction-status{padding:3px 6px;border:1px solid var(--atlas-border);border-radius:3px}.workflow-evidence-summary .extraction-status.running{color:var(--atlas-primary);background:#f4f8fc}.workflow-evidence-summary .extraction-status.ready_for_confirmation{color:#8a5b14;background:#fff8e6}.workflow-evidence-summary .extraction-status.confirmed{color:#347254;background:#edf7f0}.workflow-evidence-summary .extraction-status.failed{color:#b35c56;background:#fff5f4}
+.task-menu-hint{margin:0 0 8px;padding:0 10px;color:var(--atlas-subtle);font-size:10px;line-height:1.5}
 .contract-workbench{margin:0 0 22px;border-top:3px solid #347254;border-bottom:1px solid var(--atlas-border);background:var(--atlas-surface)}
 .contract-workbench-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;padding:15px 20px;border-bottom:1px solid var(--atlas-border);background:#f7faf8}
 .contract-workbench-head>div{min-width:0}.contract-workbench-head h3{margin:3px 0;color:var(--atlas-text);font-family:var(--atlas-font-display);font-size:20px;line-height:1.25}.contract-workbench-head p{max-width:760px;margin:0;color:var(--atlas-muted);font-size:11px;line-height:1.55}
@@ -4029,7 +4029,6 @@ button:disabled{cursor:not-allowed;opacity:.55}
 .fact-decision-evidence{margin-top:9px;padding-top:8px;border-top:1px dashed var(--atlas-border)}
 .fact-decision-evidence summary{color:var(--atlas-primary);font-size:10px;font-weight:900;cursor:pointer}
 .fact-decision-evidence blockquote{margin:8px 0 0;padding:8px 10px;border-left:3px solid #8eb79c;background:#f5f9f6;color:var(--atlas-muted);font-size:11px;line-height:1.6}
-.run-workflow-stages{margin-top:0}
 .run-workbench-runtime{margin-top:12px}
 .run-list-panel{margin-top:14px;border-top:1px solid var(--atlas-border)}
 .run-list-panel .run-row{padding:8px 0}
@@ -4053,8 +4052,8 @@ button:disabled{cursor:not-allowed;opacity:.55}
   .evidence-doc-card{flex-direction:column}
   .tab-panel-head{flex-direction:column;align-items:flex-start}
   .run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
-  .workflow-complete-strip{align-items:flex-start;flex-direction:column}
-  .workflow-complete-meta{justify-content:flex-start}
+  .case-workflow-head{align-items:flex-start;flex-direction:column}
+  .case-workflow-body{grid-template-columns:1fr}
 }
 
 /* Fulfillment timeline detail */
@@ -4157,7 +4156,7 @@ button:disabled{cursor:not-allowed;opacity:.55}
 
 @media(max-width:700px){
   .approval-memo-panel{margin:0 14px 14px}.approval-memo-panel header{flex-direction:column}.approval-memo-detail{grid-template-columns:1fr}
-  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-item:nth-child(2n){border-right:0}.meta-item-wide{grid-column:span 2}.analysis-workflow-head{flex-direction:column}.analysis-workflow-stages{grid-template-columns:1fr 1fr}.analysis-workflow-foot{align-items:flex-start;flex-direction:column}.analysis-workflow-foot button{width:100%;justify-content:center}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}.workbench-tabs{padding:12px 14px 0}.workbench-tab{min-height:36px;padding:0 10px;font-size:11px}.workbench-tab strong{min-width:20px}.workbench-tab-panel{padding:0 14px 14px}.workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}.evidence-workbench-body{grid-template-columns:1fr}.evidence-browser-head{flex-direction:column}.evidence-doc-card{flex-direction:column}.contract-end-condition{grid-template-columns:1fr}.contract-end-condition li:before{margin-right:6px}.review-panel-flat{grid-template-columns:1fr}.run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
+  .case-page{padding:20px 14px 48px}.case-header{align-items:flex-start;flex-direction:column}.case-actions{justify-content:flex-start}.task-menu-panel{left:0;right:auto}.review-panel{grid-template-columns:1fr}.review-score{border-right:0;border-bottom:1px solid var(--atlas-border);padding:0 0 12px}.dimension-strip{grid-template-columns:repeat(2,1fr)}.citation-grid,.advice-grid{grid-template-columns:1fr}.meta-grid{grid-template-columns:repeat(2,1fr)}.meta-item:nth-child(2n){border-right:0}.meta-item-wide{grid-column:span 2}.document-progress-panel{grid-template-columns:1fr}.document-progress-value{align-items:flex-start;flex-direction:row}.document-progress-track{grid-column:auto}.workbench-tabs{padding:12px 14px 0}.workbench-tab{min-height:36px;padding:0 10px;font-size:11px}.workbench-tab strong{min-width:20px}.workbench-tab-panel{padding:0 14px 14px}.workbench-elements-lane{border-left:0;border-top:1px solid var(--atlas-border)}.evidence-workbench-body{grid-template-columns:1fr}.evidence-browser-head{flex-direction:column}.evidence-doc-card{flex-direction:column}.contract-end-condition{grid-template-columns:1fr}.contract-end-condition li:before{margin-right:6px}.review-panel-flat{grid-template-columns:1fr}.run-list-panel .run-current-step,.run-list-panel .run-error-message{margin-left:0}
   .contract-workbench-head{align-items:flex-start;flex-direction:column;padding:17px 15px}.workbench-snapshot{width:100%;padding:11px 0 0;border-top:1px solid var(--atlas-border);border-left:0}.contract-workbench-body{display:block}.fact-lane{padding:0 14px 14px}.fact-groups{grid-template-columns:1fr}.fact-row{grid-template-columns:92px minmax(0,1fr);gap:7px}.fact-row>em{grid-column:2;justify-self:start}.workbench-insight-section{padding:0 14px 14px;border-right:0;border-bottom:1px solid var(--atlas-border)}.workbench-insight-section:last-child{border-bottom:0}.workbench-timeline-main{grid-template-columns:74px minmax(0,1fr)}.workbench-node-action{margin-right:2px}.workbench-runtime{align-items:flex-start;flex-direction:column;padding:10px 15px}.workbench-runtime small{max-width:100%;white-space:normal}.text-button{margin-left:0}
   .risk-workbench-head{align-items:flex-start;flex-direction:column}.risk-workbench-head p,.finding-one-line,.finding-detail p{font-size:13px}.risk-counts{width:100%}.risk-counts>span{flex:1;min-width:0;justify-content:center}.finding-summary-row{grid-template-columns:1fr;padding:14px}.finding-rank{flex-direction:row;align-items:center}.finding-expand{width:100%;min-height:44px}.finding-detail{padding:15px 14px}.finding-evidence-grid,.finding-consequence-grid{grid-template-columns:1fr}.risk-domain-head{align-items:flex-start}.risk-domain-head div{align-items:flex-start;flex-direction:column;gap:2px}.finding-buttons .quiet-button.tiny{min-height:44px;padding:0 12px;margin-left:0}
   .intake-confirm{width:100vw;max-height:100vh;height:100vh;border:0;border-radius:0}.intake-review-hero{padding:18px;align-items:flex-start}.intake-review-hero h3{font-size:23px}.intake-review-hero p{font-size:12px}.intake-review-strip{grid-template-columns:1fr 1fr}.intake-review-strip div{padding:11px 14px}.intake-review-strip div:nth-child(2){border-right:0}.intake-review-strip div:last-child{grid-column:1/-1;border-top:1px solid var(--atlas-border)}.intake-body.intake-review-body{grid-template-columns:1fr;max-height:calc(100vh - 230px)}.intake-review-main{border-right:0}.intake-grid,.intake-grid.date-grid{grid-template-columns:1fr}.intake-review-main,.intake-side-panel,.intake-review-dates,.intake-review-business{padding:17px}.intake-actions{padding:12px 14px}.intake-actions .quiet-button,.intake-actions .primary-button{min-height:44px}

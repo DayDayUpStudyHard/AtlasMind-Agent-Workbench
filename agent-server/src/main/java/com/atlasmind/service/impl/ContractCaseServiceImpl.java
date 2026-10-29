@@ -6,6 +6,7 @@ import com.atlasmind.service.AgentActionExecutor;
 import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
 import com.atlasmind.service.ContractMemberService;
+import com.atlasmind.service.ContractWorkflowService;
 import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.KnowledgeBaseService;
 import com.atlasmind.service.PrivateUploadService;
@@ -74,6 +75,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
     private final UserService userService;
     private final PrivateUploadService privateUploadService;
     private final ContractMemberService memberService;
+    private final ContractWorkflowService contractWorkflowService;
 
     // ── Portfolio ──────────────────────────────────────────────────
 
@@ -339,6 +341,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         sql.append(" ORDER BY c.update_time DESC, c.id DESC LIMIT 50");
         List<Map<String, Object>> rows = jdbcTemplate.queryForList(sql.toString(), params.toArray());
         attachTimelineNodes(rows);
+        contractWorkflowService.attachStages(rows);
         return rows;
     }
 
@@ -948,6 +951,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         if (sets.isEmpty()) return getCase(caseId);
         params.add(caseId);
         jdbcTemplate.update("UPDATE contract_case SET " + String.join(",", sets) + " WHERE id=?", params.toArray());
+        contractWorkflowService.evict(caseId);
         return getCase(caseId);
     }
 
@@ -1002,6 +1006,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         Map<String, Object> result = getCase(caseId);
         result.put("uploadedDocumentId", documentId);
         result.put("documentPipelineJobId", latestDocumentPipelineJobId(documentId));
+        contractWorkflowService.evict(caseId);
         return result;
     }
 
@@ -1288,6 +1293,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
         }
 
         dispatchAfterCommit(runId, caseId, taskType);
+        contractWorkflowService.evict(caseId);
         return getRun(runId);
     }
 
@@ -1525,6 +1531,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     WHERE id=? AND status='NEEDS_REVISION' AND deleted=0
                     """, caseId);
         }
+        contractWorkflowService.evict(caseId);
         return getCase(caseId);
     }
 
@@ -1911,6 +1918,7 @@ public class ContractCaseServiceImpl implements ContractCaseService {
                     "当前状态 " + current + " 不允许变更为 " + toStatus + "（要求当前为 " + fromStatus + "）");
         }
         jdbcTemplate.update("UPDATE contract_case SET status=? WHERE id=?", toStatus, caseId);
+        contractWorkflowService.evict(caseId);
         // 记录状态变更审计
         try {
             jdbcTemplate.update(

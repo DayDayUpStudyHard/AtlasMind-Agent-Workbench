@@ -71,15 +71,24 @@
     <section class="case-list" v-if="cases.length">
       <div class="case-list-header">
         <h2>合同案件</h2>
-        <select v-model="statusFilter" @change="loadCases">
-          <option value="">全部状态</option>
-          <option v-for="s in statuses" :key="s.value" :value="s.value">{{ s.label }}</option>
-        </select>
+        <div class="case-list-filters">
+          <select v-model="stageFilter" @change="loadCases">
+            <option value="">全部阶段</option>
+            <option v-for="s in workflowStages" :key="s.key" :value="s.key">{{ s.label }}</option>
+          </select>
+          <select v-model="statusFilter" @change="loadCases">
+            <option value="">全部状态</option>
+            <option v-for="s in statuses" :key="s.value" :value="s.value">{{ s.label }}</option>
+          </select>
+        </div>
       </div>
       <article v-for="c in cases" :key="c.id" class="case-card" @click="$router.push(`/contracts/${c.id}`)">
         <div class="case-topline">
           <span class="case-key">{{ c.caseKey }}</span>
           <span class="case-status" :class="statusClass(c.status)">{{ statusLabel(c.status) }}</span>
+          <span v-if="c.stage" class="case-stage-tag" :class="stageClass(c.stage)">
+            {{ c.stageLabel || c.stage }}<template v-if="c.stageOwnerRole"> · {{ c.stageOwnerRole }}</template>
+          </span>
           <small>{{ formatDate(c.createTime) }}</small>
         </div>
         <h3>{{ c.title }}</h3>
@@ -138,8 +147,21 @@ const message = useMessage()
 const portfolio = ref({})
 const cases = ref([])
 const statusFilter = ref('')
+const stageFilter = ref('')
 const activeQueue = ref('')
 const queueItems = ref([])
+
+// 阶段枚举与 docs/contract-workflow/README.md §4 一致，由后端计算，前端只做筛选与展示。
+const workflowStages = [
+  { key: 'INTAKE', label: '受理建档' },
+  { key: 'PARSE', label: '解析就绪' },
+  { key: 'ELEMENT_CONFIRM', label: '要素确认' },
+  { key: 'TIMELINE_CONFIRM', label: '日程确认' },
+  { key: 'RISK_DISPOSAL', label: '风险处置' },
+  { key: 'SIGNING', label: '签署' },
+  { key: 'FULFILLMENT', label: '履约跟踪' },
+  { key: 'ARCHIVE', label: '归档续签' },
+]
 
 const statuses = [
   { value: 'DRAFT', label: '草稿' },
@@ -165,7 +187,11 @@ async function loadCases() {
   try {
     const params = statusFilter.value ? { status: statusFilter.value } : {}
     const r = await api.get('/api/workspace/contracts', { params })
-    cases.value = r.data.data || []
+    const list = r.data.data || []
+    // 阶段由后端批量推导；阶段筛选在前端完成，避免为筛阶段再打一次接口。
+    cases.value = stageFilter.value
+      ? list.filter(item => String(item.stage || '') === stageFilter.value)
+      : list
   } catch {}
 }
 
@@ -210,6 +236,9 @@ function statusClass(s) {
 function statusLabel(s) {
   const m = { DRAFT:'草稿', INTAKE_PARSING:'录入解析中', INTAKE_CONFIRMING:'待确认录入', MATERIAL_PENDING:'缺材料', READY_FOR_REVIEW:'待审查', REVIEWING:'审查中', NEEDS_REVISION:'需修改', PENDING_APPROVAL:'待审批', APPROVED:'已批准', READY_TO_SIGN:'待签署', SIGNED:'已签署', IN_FULFILLMENT:'履约中', EXPIRED:'已到期', TERMINATED:'已终止' }
   return m[s] || s || ''
+}
+function stageClass(stage) {
+  return String(stage || '').toLowerCase().replace(/_/g, '-')
 }
 function contractTypeLabel(t) { return { SERVICE_PROCUREMENT:'服务采购', GOODS_PURCHASE:'货物采购', NDA:'保密协议', LICENSE:'许可协议', EMPLOYMENT:'劳动合同' }[t] || t || '' }
 function severityLabel(s) { return { HIGH:'高危', MEDIUM:'中危', LOW:'低危' }[s] || s }
@@ -281,6 +310,14 @@ function timelineStatusClass(node) {
 .case-list-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
 .case-list-header h2{margin:0;font-family:var(--atlas-font-display);font-size:20px;color:var(--atlas-text)}
 .case-list-header select{min-height:32px;padding:4px 8px;border:1px solid var(--atlas-border);border-radius:4px;background:var(--atlas-bg);color:var(--atlas-text);font-size:12px}
+.case-list-filters{display:flex;gap:8px;align-items:center}
+.case-stage-tag{padding:2px 7px;border-radius:2px;font-size:10px;font-weight:800;color:var(--atlas-muted, #5b6470);background:#eef2f6;white-space:nowrap}
+.case-stage-tag.intake,.case-stage-tag.parse{color:#315d8b;background:#edf4fa}
+.case-stage-tag.element-confirm,.case-stage-tag.timeline-confirm{color:#8a5b14;background:#fff4db}
+.case-stage-tag.risk-disposal{color:#a33f39;background:#fff0ee}
+.case-stage-tag.signing{color:#246744;background:#eaf6ef}
+.case-stage-tag.fulfillment{color:#315d8b;background:#edf4fa}
+.case-stage-tag.archive{color:var(--atlas-subtle);background:var(--atlas-bg)}
 
 .case-card{padding:16px 18px;background:var(--atlas-surface);border:1px solid var(--atlas-border);border-radius:4px;cursor:pointer;margin-bottom:8px;transition:all .15s}
 .case-card:hover{border-color:var(--atlas-primary);border-left:3px solid var(--atlas-primary)}

@@ -8,6 +8,7 @@ import com.atlasmind.entity.User;
 import com.atlasmind.service.ContractAccessPolicy;
 import com.atlasmind.service.ContractCaseService;
 import com.atlasmind.service.ContractMemberService;
+import com.atlasmind.service.ContractWorkflowService;
 import com.atlasmind.service.FileStorageService;
 import com.atlasmind.service.PrivateUploadService;
 import com.atlasmind.service.UserService;
@@ -45,6 +46,7 @@ public class ContractWorkspaceController {
     private final ContractCaseService contractCaseService;
     private final ContractAccessPolicy accessPolicy;
     private final ContractMemberService contractMemberService;
+    private final ContractWorkflowService contractWorkflowService;
     private final FileStorageService fileStorageService;
     private final UserService userService;
     private final StringRedisTemplate redisTemplate;
@@ -125,6 +127,16 @@ public class ContractWorkspaceController {
     public Result<Map<String, Object>> getCase(@PathVariable Long caseId) {
         accessPolicy.checkAccess(caseId);
         return Result.ok(contractCaseService.getCase(caseId));
+    }
+
+    /**
+     * 合同案件工作流视图（一期）：8 阶段只读推导，供详情页工作流条与下一步卡片使用。
+     * 与案件详情同一套访问策略，不新增权限；接口只读。
+     */
+    @GetMapping("/{caseId}/workflow")
+    public Result<Map<String, Object>> workflow(@PathVariable Long caseId) {
+        accessPolicy.checkAccess(caseId);
+        return Result.ok(contractWorkflowService.workflow(caseId));
     }
 
     @PutMapping("/{caseId}")

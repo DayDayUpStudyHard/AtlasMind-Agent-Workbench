@@ -180,6 +180,7 @@ export function getContractWorkQueueSummary() { return api.get('/api/workspace/c
 export function getContractWorkQueue(type) { return api.get('/api/workspace/contracts/work-queues', { params: { type } }) }
 export function listContracts(params) { return api.get('/api/workspace/contracts', { params }) }
 export function getContractCase(id) { return api.get(`/api/workspace/contracts/${id}`) }
+export function getContractWorkflow(caseId) { return api.get(`/api/workspace/contracts/${caseId}/workflow`) }
 export function createContractCase(data) { return api.post('/api/workspace/contracts', data) }
 export function updateContractCase(id, data) { return api.put(`/api/workspace/contracts/${id}`, data) }
 export function startContractRun(caseId, data) { return api.post(`/api/workspace/contracts/${caseId}/runs`, data) }

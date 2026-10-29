@@ -5010,3 +5010,46 @@ DeepSeek 余额恢复后，履约核验私有候选集首次真实运行（Run #
 | `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java` | 修改 | `ownerId` 映射为 `owner_id` |
 
 工作区中与本批次无关的改动（`agent-front/src/api/index.js`、`ContractCaseView.vue`、`ContractPortfolioView.vue`、`ContractWorkspaceController.java`、`ContractWorkflowService.java` 及两个新增前端组件）未纳入本批次提交。
+
+## 2026-10-29：合同工作流视图一期实施（8 阶段只读推导，未编译、未做浏览器验收）
+
+### 问题
+
+合同案件详情页只能看到"合同分析流程"（解析 → 要素 → 日程 → 审查 → 分析就绪）这一条 Agent 任务进度，看不到合同业务本身走到哪一步：审批、签署、履约、归档在页面上完全没有位置；列表页也只有状态标签，而 `PENDING_APPROVAL` 在现状下几乎不可达。阶段判断还是前端自己算的一套 `analysisStages`，与后端状态、管理端展示互不相通，属于"四个 AI 能力都能跑，但没有一条被系统记住的主线"。
+
+### 根因与修复
+
+阶段推导分散在前端 `analysisStages`、后端状态枚举和列表字段三处，没有任何一处能回答"这份合同现在卡在哪一步、该谁动、下一步点哪里"。本轮按 `docs/contract-workflow/phase-1-workflow-view.md` v1.2 落地只读视图，不碰状态机、不改表、不动任务图。
+
+- 新增 `ContractWorkflowService`，作为 8 阶段推导的唯一实现：`INTAKE / PARSE / ELEMENT_CONFIRM / TIMELINE_CONFIRM / RISK_DISPOSAL / SIGNING / FULFILLMENT / ARCHIVE`。按顺序判定、命中即停，且只推导到第一个非 `DONE` 阶段，其后一律 `PENDING`，避免出现"后面完成、前面未完成"的矛盾展示。
+- `enteredAt` 只填 ①案件创建、②主合同上传两个来源确定的时间；③~⑧ 一律返回 `null`，前端不渲染"已停留"。不做"猜 run 开始时间"这类假数据。
+- ⑤ 审批降级为文案：`PENDING_APPROVAL` 返回 `WAITING_HUMAN` + `nextAction.type=NONE` + "审批功能建设中，请线下处理"，不提供任何审批动作（`PENDING_APPROVAL` 现状不可达，修复属二期）。
+- ⑥⑦⑧ 不读任何义务表：只看 `contract_case.status` 与 `expiry_date`，不显示义务条数/完成率/逾期数，避免把时间节点当履约结论、把空表当"没有义务"。
+- 已进入审批/签署/履约/归档的案件，⑤ 强制判定为 `DONE`，防止历史遗留 OPEN 发现把阶段条拉回⑤。
+- 新增 `GET /api/workspace/contracts/{caseId}/workflow`，沿用 `accessPolicy.checkAccess`，不新增权限；接口只读、无副作用。详情 2 秒进程内缓存（上限 2000 条），写操作后显式 `evict()`。
+- `listCases` 增补 `stage` / `stageLabel` / `stageOwnerRole`，用固定条数的批量查询推导（案件、主文档、快照、agent_run、时间节点、OPEN 发现各一条），不做逐条查库。旧库缺 V025/V026 表时降级为不输出阶段，不阻断列表。
+- 前端新增 `WorkflowStrip.vue`（8 段横向条，5 种状态视觉，窄屏横向滚动）与 `WorkflowNextAction.vue`（下一步卡片 + 阻塞原因）；`ContractCaseView.vue` 删除旧「合同分析流程」面板与 `analysisStages`，接入两个新组件，「运行 Agent」收进默认折叠的「高级操作（一般不需要）」；`ContractPortfolioView.vue` 增加阶段标签与阶段筛选；`api/index.js` 新增 `getContractWorkflow`。
+- 清理旧面板遗留的死代码与死样式：`analysisStages`、`workflowIsComplete`、`workflowStatusLabel/Class`、`latestRiskReviewRun`、`extractionRunFailed`、`.analysis-workflow-*`、`.workflow-complete-*`、`.workflow-stage-progress`。「Agent 运行」Tab 内重复的 5 阶段条一并移除，确保阶段判断只有后端一处实现。
+
+### 验证结果
+
+- Python 全量 `pytest -q`：`439 passed, 16 failed`。16 条失败全部为既有问题，与本期无关——11 条来自 `tests/test_llm_service.py`（`LLM_API_KEY 未设置`），5 条来自 golden 样本漂移（`create_domain_tasks output drifted from the frozen sample`）；本期未修改任何 Python 文件。
+- 静态检查：`ContractWorkflowService.java` 括号平衡（`{}` 117/117、`()` 480/480）、公开方法与依赖注入引用齐全；`ContractCaseView.vue` template 标签配对 0 处不匹配、script 括号平衡、模板标识符均可解析；两个新组件与 `api/index.js` 括号平衡；全仓库 grep 确认删除后无残留引用。
+- 新增 `ContractWorkflowServiceTest` 共 17 个用例，覆盖：无文档停①、解析中、解析失败、低质量、未提取、快照待确认、日程计数、全部节点已确认、OPEN 发现、LIMITED、`PENDING_APPROVAL` 文案且无审批动作、`APPROVED` 待线下签署、`SIGNED` 后⑦为 `PENDING`、履约中、已到期归档、首个非 DONE 单调性、8 段枚举顺序。
+- **当前环境无 JDK/Maven、无 Node/npm、无 Docker**：`mvnw test`、`npm run build`、接口黑盒测试与 13 条浏览器验收均**未执行**。本轮结论仅为"代码完成 + 静态检查通过"，不得视为已验收。
+- 13 条验收清单的逐项状态见 `docs/contract-workflow/implementation-phase-1.md` §6.2，全部标记为"未验"，下次开工需先补环境后复跑。
+
+### 影响范围
+
+| 文件 | 操作 | 说明 |
+|---|---|---|
+| `agent-server/src/main/java/com/atlasmind/service/ContractWorkflowService.java` | 新增 | 8 阶段推导唯一实现，2 秒缓存 + 批量推导 |
+| `agent-server/src/main/java/com/atlasmind/controller/ContractWorkspaceController.java` | 修改 | 新增 `GET /{caseId}/workflow` |
+| `agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java` | 修改 | `listCases` 增补阶段字段；5 处写操作后失效工作流缓存 |
+| `agent-server/src/test/java/com/atlasmind/service/ContractWorkflowServiceTest.java` | 新增 | 17 个推导规则单测 |
+| `agent-front/src/components/WorkflowStrip.vue` | 新增 | 8 段横向工作流条 |
+| `agent-front/src/components/WorkflowNextAction.vue` | 新增 | 下一步卡片 |
+| `agent-front/src/views/ContractCaseView.vue` | 修改 | 替换旧分析流程面板；新增 `loadWorkflow` 与轮询；「运行 Agent」收进高级操作 |
+| `agent-front/src/views/ContractPortfolioView.vue` | 修改 | 卡片增加阶段标签；筛选增加阶段维度 |
+| `agent-front/src/api/index.js` | 修改 | 新增 `getContractWorkflow` |
+| `docs/contract-workflow/implementation-phase-1.md` | 新增 | 一期实施情况与下次开工清单 |
