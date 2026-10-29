@@ -1,0 +1,1102 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Code Review — AtlasMind-Agent-Workbench.git</title>
+<!-- 本地化改造：移除 Google Fonts 外链，报告完全自包含，不发起任何外部请求 -->
+<style>
+:root {
+  --bg-base:#ffffff;--bg-card:#ffffff;--bg-card-solid:#f6f8fa;--bg-hover:rgba(0,0,0,0.03);
+  --border:#d0d7de;--border-light:#afb8c1;--text:#1f2328;--text-muted:#656d76;--text-dim:#8c959f;
+  --radius-lg:18px;--radius-md:12px;--radius-sm:8px;--radius:12px;
+  --blue:#0969da;--green:#1a7f37;--orange:#bf8700;--red:#cf222e;--purple:#8250df;--yellow:#9a6700;
+  --shadow-card:0 2px 12px rgba(0,0,0,0.08);--shadow-glow:0 0 24px rgba(9,105,218,0.06);
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'Inter',-apple-system,'PingFang SC','Microsoft YaHei',sans-serif;background:#fff;color:var(--text);min-height:100vh;line-height:1.6}
+.page{max-width:1400px;margin:0 auto;padding:40px 20px 80px}
+code{font-family:'SFMono-Regular',Consolas,'Liberation Mono',monospace;font-size:12px;background:#f6f8fa;padding:1px 5px;border-radius:4px;word-break:break-all}
+
+/* Hero */
+.hero{background:linear-gradient(135deg,rgba(88,166,255,0.12) 0%,rgba(63,185,80,0.06) 100%);border:1px solid var(--border-light);border-radius:24px;padding:40px 40px 32px;position:relative;overflow:hidden;box-shadow:var(--shadow-card),var(--shadow-glow);backdrop-filter:blur(12px);margin-bottom:24px}
+.hero::before{content:'';position:absolute;inset:0;background:linear-gradient(135deg,rgba(88,166,255,0.06) 0%,transparent 60%);pointer-events:none}
+.hero-badge{display:inline-flex;align-items:center;gap:6px;background:rgba(88,166,255,0.15);border:1px solid rgba(88,166,255,0.3);color:var(--blue);border-radius:999px;padding:4px 14px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;margin-bottom:18px}
+.hero-badge .dot{width:6px;height:6px;border-radius:50%;background:var(--blue);animation:pulse 2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
+.hero h1{font-size:30px;font-weight:700;letter-spacing:-.02em;color:#1f2328;margin-bottom:10px;word-break:break-all}
+.hero p{color:var(--text-muted);font-size:14px;max-width:900px}
+
+/* Grid layouts */
+.meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-top:28px}
+
+/* Cards */
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-lg);padding:24px;box-shadow:var(--shadow-card);transition:border-color .2s,box-shadow .2s}
+.card:hover{border-color:var(--border-light)}
+.card h2{font-size:18px;font-weight:600;color:var(--text);margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.section{margin-top:24px}
+
+/* Meta cards */
+.meta-card{background:#f6f8fa;border:1px solid var(--border);border-radius:var(--radius-md);padding:16px;transition:background .2s}
+.meta-card:hover{background:rgba(0,0,0,0.04)}
+.meta-card .mc-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);margin-bottom:6px}
+.meta-card .mc-value{font-size:14px;font-weight:600;color:var(--text);word-break:break-all}
+
+/* Badges */
+.badge{display:inline-flex;align-items:center;gap:4px;padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600}
+.badge-blue{background:rgba(88,166,255,0.15);color:var(--blue);border:1px solid rgba(88,166,255,0.25)}
+.badge-green{background:rgba(63,185,80,0.15);color:var(--green);border:1px solid rgba(63,185,80,0.25)}
+.badge-orange{background:rgba(240,136,62,0.15);color:var(--orange);border:1px solid rgba(240,136,62,0.25)}
+.badge-yellow{background:rgba(210,153,34,0.15);color:var(--yellow);border:1px solid rgba(210,153,34,0.25)}
+.badge-red{background:rgba(248,81,73,0.15);color:var(--red);border:1px solid rgba(248,81,73,0.25)}
+.badge-dim{background:rgba(0,0,0,0.05);color:var(--text-muted);border:1px solid var(--border)}
+
+/* Category chip */
+.cat-chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:rgba(0,0,0,0.04);color:var(--text-muted);border:1px solid var(--border)}
+
+/* Issue cards */
+.issue-group{margin-bottom:20px}
+.issue-group-title{font-size:14px;font-weight:700;color:var(--text);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.issue-card{border:1px solid var(--border);border-radius:var(--radius);padding:12px 14px;margin:6px 0}
+.issue-card-header{display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap}
+.issue-label{font-size:13px;font-weight:500;color:var(--text);flex:1}
+
+/* Item reason block */
+.item-reason{font-size:12px;color:var(--text-muted);margin-top:6px;margin-bottom:4px;padding:8px 12px;background:rgba(0,0,0,0.025);border-left:3px solid var(--border-light);border-radius:0 var(--radius-sm) var(--radius-sm) 0;line-height:1.7}
+.item-reason .reason-label{font-weight:600;color:var(--text-dim);display:inline-block;min-width:4em}
+.item-reason .reason-section{display:block;margin-bottom:2px}
+
+/* Fix suggestions */
+.fix-suggestion-item{display:flex;gap:10px;align-items:flex-start;padding:9px 12px;border-radius:var(--radius-sm);background:rgba(31,111,235,0.05);border:1px solid rgba(31,111,235,0.18);margin-top:8px;font-size:12.5px;line-height:1.65;color:var(--text)}
+.fix-suggestion-item.sev-p0{background:rgba(248,81,73,0.06);border-color:rgba(248,81,73,0.25)}
+.fix-suggestion-item.sev-p1{background:rgba(210,153,34,0.06);border-color:rgba(210,153,34,0.25)}
+.fix-suggestion-item.sev-p2{background:rgba(31,111,235,0.05);border-color:rgba(31,111,235,0.18)}
+.fix-badge{flex-shrink:0;margin-top:2px}
+.fix-text{flex:1}
+
+/* Code diff block */
+.code-diff{font-family:'SFMono-Regular',Consolas,monospace;font-size:12px;line-height:1.55;background:#0d1117;color:#e6edf3;padding:12px 14px;border-radius:var(--radius-sm);margin-top:8px;overflow-x:auto;white-space:pre}
+.diff-add{display:block;background:rgba(46,160,67,0.18);color:#aff5b4}
+.diff-del{display:block;background:rgba(248,81,73,0.18);color:#ffa198}
+.diff-hunk{display:block;color:#79c0ff;background:rgba(56,139,253,0.12)}
+.diff-ctx{display:block;color:#8b949e}
+
+/* Table */
+.e2e-table{width:100%;border-collapse:collapse;font-size:13px;margin-top:4px}
+.e2e-table th{background:#f6f8fa;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);padding:8px 12px;text-align:left;border-bottom:2px solid var(--border)}
+.e2e-table td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+.e2e-table tr:last-child td{border-bottom:none}
+.e2e-table tr:hover td{background:#f6f8fa}
+
+/* Footer */
+.report-footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--border);font-size:12px;color:var(--text-dim);display:flex;justify-content:space-between;align-items:center}
+
+/* Timeline (timerange mode) */
+.timeline{list-style:none;padding-left:0;margin:8px 0 0 0;position:relative}
+.timeline::before{content:"";position:absolute;left:6px;top:6px;bottom:6px;width:2px;background:var(--border)}
+.tl-row{position:relative;padding:6px 0 6px 28px;margin:0}
+.tl-hidden{display:none}
+.tl-dot{position:absolute;left:0;top:12px;width:14px;height:14px;border-radius:50%;border:2px solid #fff;background:var(--text-muted);box-shadow:0 0 0 1px var(--border)}
+.tl-dot-feat{background:var(--green)}
+.tl-dot-fix{background:var(--orange)}
+.tl-dot-perf{background:var(--yellow)}
+.tl-dot-security{background:var(--red)}
+.tl-dot-refactor,.tl-dot-test,.tl-dot-docs,.tl-dot-chore{background:var(--text-muted)}
+.tl-head{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.tl-subject{margin-top:4px;color:var(--text);font-weight:500;font-size:14px}
+</style>
+</head>
+<body>
+<div class="page">
+  
+<div class="hero">
+  <div class="hero-badge"><span class="dot"></span>📂 LOCAL REVIEW</div>
+  <h1>https://github.com/DayDayUpStudyHard/AtlasMind-Agent-Workbench.git</h1>
+  <p>
+    <code>snapshot</code> (82a434b)
+    &nbsp;→&nbsp;
+    <code>master</code> (82a434b)
+    
+</p>
+  <div class="meta-grid">
+    <div class="meta-card"><div class="mc-label">Verdict</div>
+      <div class="mc-value">
+        <span class="badge badge-red">⛔ Block</span>
+        <div style="font-size:11px;color:var(--text-muted);margin-top:6px;font-weight:400">存在阻塞性问题，必须修复</div>
+      </div>
+    </div>
+    <div class="meta-card"><div class="mc-label">Reviewer</div><div class="mc-value">DSH AI (DeepSeek-V4.1-Flash) + 5 module sub-reviews</div></div>
+    <div class="meta-card"><div class="mc-label">Files Changed</div><div class="mc-value">307</div></div>
+    <div class="meta-card"><div class="mc-label">+/-</div>
+      <div class="mc-value">
+        <span style="color:var(--green)">+0</span>
+        &nbsp;/&nbsp;
+        <span style="color:var(--red)">-0</span>
+      </div>
+    </div>
+    <div class="meta-card" style="grid-column:span 2"><div class="mc-label">Findings</div>
+      <div class="mc-value" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+        <a href="#issues" class="badge badge-red"    style="text-decoration:none">Critical 4</a>
+        <a href="#issues" class="badge badge-orange" style="text-decoration:none">Major 16</a>
+        <a href="#issues" class="badge badge-yellow" style="text-decoration:none">Minor 16</a>
+        <a href="#issues" class="badge badge-dim"    style="text-decoration:none">Nit 6</a>
+        <a href="#issues" class="badge badge-green"  style="text-decoration:none">Praise 2</a>
+      </div>
+    </div>
+  </div>
+</div>
+
+  
+  
+<section class="card section">
+  <h2>📝 总体结论</h2>
+  <p style="line-height:1.8;color:var(--text);white-space:pre-wrap">第二轮全仓评审（含测试与脚本）共 42 项：4 个 Critical —— MinerU 以 shell=True 拼接文件名执行且无超时、评测把运行时崩溃当跳过并计为通过、Redis 缓存启用全放行默认类型信息（可致反序列化 RCE）、测试配置内置明文管理员口令；另有 16 个 High 覆盖 Java 列名/主键/限流/上传与前端响应式/初始化链，以及业务规范缺口（发布门禁因 schemaVersion=1 + labelStatus 默认 APPROVED 而永不触发）。鉴权 fail-closed、SQL 值绑定、私有语料隔离、人工确认不可绕过均已核对合规。</p>
+</section>
+
+  
+  <section id="issues" class="card section"><h2>🔍 评审发现 <span style="font-size:13px;font-weight:400;color:var(--text-muted);margin-left:8px">Critical 4 / Major 16 / Minor 16 / Nit 6 / Praise 2</span></h2><div class="issue-group"><div class="issue-group-title">🔴 Critical (4)</div>
+<div class="issue-card" style="border-left:3px solid #cf222e;background:rgba(207,34,46,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-red">C1</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">命令注入 + 子进程无超时（MinerU 解析）</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/services/mineru_service.py:30-42</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> mineru_command.format(input=str(pdf_path)) 把上传文件名拼进 shell 串后 shell=True 执行；文件名含 ; &amp;&amp; | $(...) 或空格/引号即改变命令语义。同时显式 timeout=None，卡死会永久占用请求。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 可被上传文件名触发命令执行；解析卡死拖垮并发。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- command = settings.mineru_command.format(input=str(pdf_path), output=str(job_dir))</span>
+<span class="diff-del">- result = subprocess.run(command, shell=True, cwd=str(pdf_path.parent), text=True, capture_output=True, timeout=None)</span>
+<span class="diff-add">+ safe = re.sub(r&quot;[^\w\u4e00-\u9fff.-]&quot;, &quot;_&quot;, pdf_path.name)</span>
+<span class="diff-add">+ argv = [p.format(input=str(pdf_path.with_name(safe)), output=str(job_dir)) for p in settings.mineru_command_argv]</span>
+<span class="diff-add">+ result = subprocess.run(argv, shell=False, cwd=str(pdf_path.parent), text=True, capture_output=True, timeout=settings.mineru_timeout_seconds)</span></pre>
+  <div class="fix-suggestion-item sev-p0"><div class="fix-badge">💡</div><div class="fix-text">文件名白名单化后用参数数组 + shell=False；mineru_command 改为模板数组；设置明确 timeout。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #cf222e;background:rgba(207,34,46,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-red">C2</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">评测把运行时崩溃当「跳过」，失败用例计为通过</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:4886-4890</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> except ValueError 把 Agent 运行时 ValueError（pydantic 校验失败、JSONDecodeError、int() 解析失败）当作任务不支持跳过，写 {&quot;skipped&quot;: true} 后 continue；随后仍用空 artifact 打分并 success_count += 1。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 崩溃用例被统计为通过，highRecall 可达 1.0，release gate 与评测结论整体失真。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- except ValueError as skip_exc:</span>
+<span class="diff-del">-     stage_outputs[task_type] = {&quot;skipped&quot;: True, &quot;reason&quot;: str(skip_exc)}</span>
+<span class="diff-del">-     continue</span>
+<span class="diff-add">+ except ValueError as exc:</span>
+<span class="diff-add">+     logger.warning(&quot;Eval run %s case %s stage %s crashed: %s&quot;, eval_run_id, case_key, task_type, exc)</span>
+<span class="diff-add">+     raise</span></pre>
+  <div class="fix-suggestion-item sev-p0"><div class="fix-badge">💡</div><div class="fix-text">只允许 EvalCaseConfigurationError 跳过；其余 ValueError 记录并 raise，计入 failed_count。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #cf222e;background:rgba(207,34,46,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-red">C3</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">Redis 缓存启用全放行默认类型信息，可致反序列化 RCE</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/config/CacheConfig.java:33-37</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> activateDefaultTyping(mapper.getPolymorphicTypeValidator(), NON_FINAL, As.PROPERTY)；新建 ObjectMapper 的 validator 即 LaissezFaireSubTypeValidator（允许任意类型），JSON 中 @class 会被当作真实类名实例化，而第 30 行注释声称「禁用类型信息」。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> Redis 中攻击者可控 value 被 CacheManager 读取时触发任意类实例化，配合 gadget 链可达成 RCE。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- mapper.activateDefaultTyping(mapper.getPolymorphicTypeValidator(), ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);</span>
+<span class="diff-add">+ PolymorphicTypeValidator validator = BasicPolymorphicTypeValidator.builder()</span>
+<span class="diff-add">+         .allowIfSubType(&quot;com.atlasmind.&quot;).allowIfSubType(&quot;java.util.&quot;).build();</span>
+<span class="diff-add">+ mapper.activateDefaultTyping(validator, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);</span></pre>
+  <div class="fix-suggestion-item sev-p0"><div class="fix-badge">💡</div><div class="fix-text">改用 BasicPolymorphicTypeValidator 白名单业务包，或关闭 default typing 并为具体类型使用 Jackson2JsonRedisSerializer。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #cf222e;background:rgba(207,34,46,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-red">C4</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">明文管理员凭据硬编码进测试配置</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>api-tests/conftest.py:14-16</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> ADMIN_PASSWORD 默认 admin123，test_auth.py:22-23 又独立写死同一组凭据并绕过环境变量，改密后 test_change_and_restore 必然失败。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 拿到仓库即得后台口令，指向测试/预发环境可直接登录。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- ADMIN_PASSWORD = os.getenv(&quot;ATLASMIND_ADMIN_PASS&quot;, &quot;admin123&quot;)</span>
+<span class="diff-add">+ ADMIN_PASSWORD = os.environ[&quot;ATLASMIND_ADMIN_PASS&quot;]</span></pre>
+  <div class="fix-suggestion-item sev-p0"><div class="fix-badge">💡</div><div class="fix-text">凭据只从环境变量读取，缺失即 fail-fast。</div></div>
+  
+</div>
+</div><div class="issue-group"><div class="issue-group-title">🟠 Major (16)</div>
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H1</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">富文本 XSS：marked.parse 直接 v-html，无消毒</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-front/src/components/ChatWindow.vue:79, 309-310</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> ChatWindow.vue:79 与 ReportArtifactModal.vue:124/201 把 marked.parse() 输出直接塞进 v-html，内容为模型输出与报告 Markdown；全仓无 DOMPurify。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 提示注入或恶意报告可执行脚本，结合 M5 可窃取 localStorage 中的会话 token。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- function renderMd(text) { return text ? marked.parse(text, { breaks: true }) : &#x27;&#x27; }</span>
+<span class="diff-add">+ function renderMd(text) { return text ? DOMPurify.sanitize(marked.parse(text, { breaks: true }), { ALLOWED_TAGS: [&#x27;p&#x27;,&#x27;br&#x27;,&#x27;strong&#x27;,&#x27;em&#x27;,&#x27;code&#x27;,&#x27;pre&#x27;,&#x27;ul&#x27;,&#x27;ol&#x27;,&#x27;li&#x27;,&#x27;a&#x27;,&#x27;table&#x27;,&#x27;thead&#x27;,&#x27;tbody&#x27;,&#x27;tr&#x27;,&#x27;th&#x27;,&#x27;td&#x27;,&#x27;blockquote&#x27;], ALLOWED_ATTR: [&#x27;href&#x27;,&#x27;title&#x27;] }) : &#x27;&#x27; }</span></pre>
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">引入 DOMPurify sanitize 并限制 ALLOWED_TAGS/ATTR，两处 render 函数都改。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H2</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">配额回调无超时无重试，额度可能永久不结算</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/runner.py:1393-1410</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> aiohttp.ClientSession() 默认超时且无重试，异常被吞只留日志；confirm/refund 既未成功也无补偿记录。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> Java 抖动时 run 收尾长时间阻塞，额度结算漂移无法对账。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- async with aiohttp.ClientSession() as session:</span>
+<span class="diff-del">-     async with session.post(url, headers={&quot;X-Internal-Token&quot;: settings.java_internal_token}) as resp: ...</span>
+<span class="diff-add">+ timeout = aiohttp.ClientTimeout(total=5)</span>
+<span class="diff-add">+ for attempt in range(3):</span>
+<span class="diff-add">+     try:</span>
+<span class="diff-add">+         async with aiohttp.ClientSession(timeout=timeout) as session:</span>
+<span class="diff-add">+             async with session.post(url, headers={&quot;X-Internal-Token&quot;: settings.java_internal_token}) as resp:</span>
+<span class="diff-add">+                 if resp.status == 200: return</span>
+<span class="diff-add">+     except (aiohttp.ClientError, asyncio.TimeoutError): pass</span>
+<span class="diff-add">+     await asyncio.sleep(2 ** attempt)</span>
+<span class="diff-add">+ await self.run_store.mark_quota_pending(run_id, status)</span></pre>
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">ClientTimeout(total=5) + 指数退避 3 次；最终失败写 mark_quota_pending 由定时任务重放。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H3</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">Java 13 处 catch (Exception ignored){}，DDL 失败被静默吞掉</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java:539-644, 745</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 建表/加列/建索引逐条包在 catch (Exception ignored) {}，无日志无计数；ContractCaseServiceImpl.java:1220 同型。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 结构性变更失败也启动成功，MySQL 非事务 DDL 会留下半成品 schema 且无排查线索。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- try { jdbcTemplate.execute(&quot;ALTER TABLE contract_case ADD COLUMN is_evaluation TINYINT NOT NULL DEFAULT 0&quot;); } catch (Exception ignored) { }</span>
+<span class="diff-add">+ try {</span>
+<span class="diff-add">+     jdbcTemplate.execute(&quot;ALTER TABLE contract_case ADD COLUMN is_evaluation TINYINT NOT NULL DEFAULT 0&quot;);</span>
+<span class="diff-add">+ } catch (DataAccessException e) {</span>
+<span class="diff-add">+     if (isDuplicateColumn(e)) { log.debug(&quot;column already present: is_evaluation&quot;); }</span>
+<span class="diff-add">+     else { log.error(&quot;schema migration failed: is_evaluation&quot;, e); throw e; }</span>
+<span class="diff-add">+ }</span></pre>
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">仅对 ER_DUP_FIELDNAME/ER_DUP_KEYNAME 忽略并记 debug，其余 log.error 后抛出。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H4</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">超时分支引用不存在的 self.trace_store，唯一事故路径必抛 AttributeError</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/runner.py:1334</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> RunDispatcher.__init__ 只存 runner/run_store/report_store，从不设置 self.trace_store；HARNESS_TIMEOUT trace 永不落库，用户看到内部属性错误而非超时提示。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 300s 超时这条唯一事故路径每次以误导性错误收场，排障线索丢失。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- await self.trace_store.append_trace(run_id, &quot;HARNESS_TIMEOUT&quot;, ...)</span>
+<span class="diff-add">+ await self.runner.trace_store.append_trace(run_id, &quot;HARNESS_TIMEOUT&quot;, ...)</span></pre>
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">改为 self.runner.trace_store，并在 __init__ 显式注入 trace_store + 补单测。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H5</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">失败落库用 f-string 拼 JSON 且异常被 pass 吞掉</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:1979-1991</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _fail_eval_run 用 f&#x27;{{&quot;error&quot;: &quot;{error}&quot;}}&#x27; 拼 JSON，error 含引号/反斜杠即写出非法 summary_json；外层 except Exception: pass 让写库失败完全无声。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 失败原因丢失，eval_run 永远停在 RUNNING/QUEUED，前端无限轮询。</span>
+  </div>
+  <pre class="code-diff"><span class="diff-del">- (f&#x27;{{&quot;error&quot;: &quot;{error}&quot;}}&#x27;, eval_run_id),</span>
+<span class="diff-del">- except Exception:</span>
+<span class="diff-del">-     pass</span>
+<span class="diff-add">+ (json.dumps({&quot;error&quot;: error}, ensure_ascii=False), eval_run_id),</span>
+<span class="diff-add">+ except Exception:</span>
+<span class="diff-add">+     logger.exception(&quot;Could not mark eval run %s as FAILED&quot;, eval_run_id)</span></pre>
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">json.dumps({&quot;error&quot;: error}, ensure_ascii=False)；except 分支至少 logger.exception。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H6</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">SSE 流式写入非响应式对象，增量内容不渲染</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-front/src/components/ChatWindow.vue:353-410</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> assistantMsg 为普通对象，push 进 ref 数组后写入原始对象（assistantMsg.content += ...）不经过 Proxy，模板仅在 streamingStatus 变化时重绘。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 流式输出看不到增量，用户长时间面对空气泡。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">用 reactive() 包裹消息对象，或写 messages.value[i].content。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H7</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">知识库页 onMounted 串行 await 无 catch，单接口失败即整页空白</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-admin/src/views/KnowledgeBase.vue:383-408</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> fetchProjects 无 try/catch、fetchSpaces 只有 finally；任一接口失败中断 await 序列，fetchDocuments 与 startDocumentPolling 永不执行。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 知识库管理页永久空白且不再轮询解析进度，无错误提示。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">改用 Promise.allSettled，各加载函数自带 catch + ElMessage.error。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H8</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">编辑后新增规则仍带旧 id，POST 冲突或误覆盖</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-admin/src/views/RuleManage.vue:67-74</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> openEdit 用 Object.assign(form, r) 灌入整行含 id；openCreate 不清 id。先编辑再新增时 doSave 走 POST 但请求体带旧 id。ClauseLibrary.vue:68-79 同款。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 新增失败（主键冲突）或按 id 覆盖被编辑的规则。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">doSave 中解构剔除 id/审计字段后再 POST。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H9</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">更新合同时把 ownerId 直接当列名，SQL 必然 Unknown column</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java:939-941</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> numFields = {&quot;amount&quot;, &quot;ownerId&quot;} 直接拼成 sets.add(f + &quot;=?&quot;)，而 contract_case 实际列名是 owner_id（同文件 321/355 行 c.owner_id AS ownerId、901 行 owner_id=? 可证）。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 请求体带 ownerId（前端编辑表单回传 GET 结果即带）时更新直接 500，负责人无法变更。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">字段名与列名显式分离，ownerId 写 owner_id。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H10</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">LAST_INSERT_ID() 与 INSERT 不在同一连接，评测派发到错误的 run</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java:226-234</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 方法无 @Transactional，INSERT 与 SELECT LAST_INSERT_ID() 各自借还连接；LAST_INSERT_ID() 是连接级状态，连接池下可能取到其它线程的 id 或 0。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 错误 run 被派发评测；新建 run 永远 QUEUED，因 217-224 行拦截该数据集此后无法再发起评测。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">用 GeneratedKeyHolder + RETURN_GENERATED_KEYS，或给方法加 @Transactional。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H11</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">限流 key 取可伪造的 X-Forwarded-For，登录暴破防护失效</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/aspect/RateLimitAspect.java:71-78</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 取 XFF 且只取逗号前第一段，无可信代理校验；每请求换一个 XFF 即换一个计数桶，AuthController:41 的 5 次/分钟限制失效。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 登录接口可无限暴破，审计日志 IP 可伪造。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">以 request.getRemoteAddr() 为准；仅受信代理 CIDR 才采信 XFF 且取最后一跳。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H12</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">上传文件整体读入堆（上限 300MB），可被图片炸弹打到 OOM</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/service/impl/LocalFileStorageService.java:49-54</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> file.getBytes() 一次性读全量进堆，multipart 上限 300MB；图片分支随后 ImageIO.read 解码整幅图，像素总量不受字节数约束。S3FileStorageService.java:59 同。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 单个大文件或超大像素图片即可吃数百 MB 至 GB 堆，2-3 并发上传打崩服务。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">改 getInputStream() + Files.copy 流式落盘；解码前校验像素上限。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H13</span>
+    <span class="cat-chip">🏗️ Design</span>
+    <span class="issue-label">发布门禁失效：labelStatus 缺省即 APPROVED，且唯一数据集是 schema v1</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/evaluation/benchmark.py:71, 97</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> manifest.get(&quot;labelStatus&quot;, &quot;APPROVED&quot;) 把缺失标注状态默认已批准；metrics.py:57-65 的 approved/provisional 门禁包在 if schema_v2 内，而 benchmarks/contract-review-v1/manifest.yaml 仍是 schemaVersion=1 且无 labelStatus，两个 gate 永不触发。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 违反 docs/benchmark-labeling-spec-v1.md「只有 APPROVED 计入发布门禁」的口径，未评审标签可当金标参与发布决策且无告警。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">缺省改 PROVISIONAL；门禁移出 schema_v2 分支；该数据集升级 schema v2 并补 labelStatus。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H14</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">标注生成失败后写空金标，基准集期望风险集被静默清空</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>scripts/build_private_benchmark_corpus.py:218-231</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 标注调用被 except Exception 包住，失败只 print 后 return None；调用方退化为 _fallback_labels_from_text（risks: []），LOCAL_SOURCE 合同被写成 expected {risks: []} 的金标，构建仍 0 退出。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 召回评估在空金标上恒满分或无意义，基准结论失真且不可察觉。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">收窄异常并抛出（构建失败优于写空金标）；必须容忍时标 labelStatus: FAILED 且不写盘。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H15</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">种子脚本默认开启全表 DELETE 且非幂等</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>scripts/seed_eval_datasets.py:1604-1612</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> EVAL_SEED_CLEAR 缺省 yes，对 agent_eval_result/run/case/dataset 四表执行无 WHERE 全表删除并立即 commit；随后每数据集各自 commit、无 rollback；append 模式重复插入同名同版本数据集。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 一次误跑不可恢复地清空全部评测历史（含金标基线），中途失败留下半初始化数据。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">默认改 no；只清本次 seed 的数据集（按 name 查 ID）；单事务 + rollback；append 前校验存在性。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #bf8700;background:rgba(191,135,0,0.06)">
+  <div class="issue-card-header">
+    <span class="badge badge-orange">H16</span>
+    <span class="cat-chip">✅ Tests</span>
+    <span class="issue-label">后台接口无鉴权的缺陷被 xfail 永久粉饰</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>api-tests/test_admin.py:295-303</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 唯一验证「未登录不得访问 /api/admin/**」的用例整体 xfail，断言还写成 in [200, 401, 403]（200 也算通过）；pytest.ini 未开 xfail_strict，修好时是 XPASS 也非失败。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 后台 7 个管理接口的无鉴权风险永远不会让 CI 变红。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p1"><div class="fix-badge">💡</div><div class="fix-text">去掉 xfail，严格断言 (401, 403)；修复前用 skip + issue 编号，或开 xfail_strict。</div></div>
+  
+</div>
+</div><div class="issue-group"><div class="issue-group-title">🟡 Minor (16)</div>
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M1</span>
+    <span class="cat-chip">🏗️ Design</span>
+    <span class="issue-label">461 行 legacy 评测编排函数无调用方</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:2152</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _run_evaluation_background_legacy 全库仅定义处出现一次，与 4757 行新实现并存。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 改评测口径易改错文件，抬高阅读成本。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">确认无调用后删除，或移入 scripts/legacy/ 标注废弃日期。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M2</span>
+    <span class="cat-chip">🏗️ Design</span>
+    <span class="issue-label">超长函数：441 / 509 / 299 行</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:750, 4757</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> chat_send 441 行、_run_evaluation_background 509 行；persistence.py:1102-1400 的 _save_sync 299 行混合 5 类写操作。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 分支组合难测，报告写入回归风险高。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">按阶段/写域拆分，主函数只做编排。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M3</span>
+    <span class="cat-chip">📖 Readability</span>
+    <span class="issue-label">宽泛/静默异常聚合：routes.py 30 处、es_service、worker</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:多处</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> es_service.py:280-283 失败直接 return [] 无日志；worker.py:186-188 用 except Exception: pass 吞掉 XAUTOCLAIM 全部失败，崩溃 worker 的 PEL 不再被领取。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> ES 故障与崩溃恢复失效均无迹可循，表现为随机失败。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">收窄异常类型并至少 logger.warning 留痕。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M4</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">弱默认凭据：MySQL 123456 与 dev profile 内置口令</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/config.py:45</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> mysql_password 默认 123456 且 validate() 不校验；application-dev.yml:9/35/37 内置 123456、admin123、atlasmind-internal-dev-token。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 漏注入环境变量时静默用弱口令连库；dev profile 被误启用即得可预测管理员口令与内部 token。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">默认值留空 + 启动校验；dev 凭据走 .env。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M5</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">会话 token 存 localStorage，可被 XSS 窃取</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-front/src/components/ChatWindow.vue:270, 282-283, 300-301</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> token 明文写 localStorage（变量名却是 sessionStorageKey），无 HttpOnly 保护。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 结合 H1 的 v-html 注入可直接外带会话。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">改 HttpOnly + SameSite Cookie；短期至少换 sessionStorage。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M6</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">temp_case_ids 从不 append，评测临时案件清理分支恒不执行</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:5249, 5254</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _create_eval_temp_case（2951-2957）收了 temp_case_ids 却只 append reuse_stats，工作线程 5249 行 if temp_case_ids 恒假。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 评测 fixture 的 case/document/clause/chunk 与 ES 向量永久留在生产库与索引。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">新建分支单独登记「本次新建且未复用」的 id 再清理。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M7</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">裸 except: pass 吞掉 semantic_elements 解码失败，产出假阳性风险发现</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/contract_store.py:866-868, 1296-1298, 1505-1508</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 三处 try: json.loads ... except: pass，解析失败后 _semantic_elements 返回 {}，规则引擎据此判字段未约定。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 审查报告基于解析失败而非合同事实下结论，不可复现定位。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">捕获 json.JSONDecodeError 并记录 clause id，失败时标 NEEDS_REVIEW。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M8</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">根组件 setup 裸用 localStorage，禁存储环境整站白屏</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-front/src/App.vue:35, 47</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> setup 期间直接 localStorage.getItem/ setItem 且无 try/catch，隐私模式抛 SecurityError，异常发生在根组件导致挂载失败。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 特定浏览器配置下完全无法进入工作台。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">包安全读写函数，异常回退 &#x27;light&#x27;。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M9</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">筛选不重置页码，翻页后筛选出现假空列表</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-admin/src/views/AiObservability.vue:15-32</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 关键字回车/清空/下拉 change 直接 fetchAgentRuns 而不重置 agentPage，pipeline、chat 三个 tab 同样。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 第 3 页改筛选请求 page=3 新条件，返回空页显示「无数据」。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">统一 searchXxx(){ page=1; fetch() }。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M10</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">审计 JSON 用字符串拼用户输入，含引号即写入失败</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java:1915-1922</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> new_value_json 拼 reason（来自 request-revision 的用户输入），含双引号/反斜杠生成非法 JSON，异常随后被吞。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 状态变更审计静默丢失。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">用 objectMapper.writeValueAsString(Map.of(...)) 并记录异常。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M11</span>
+    <span class="cat-chip">🐛 Bug</span>
+    <span class="issue-label">caseKey 键空间仅 10 万，撞唯一索引后创建随机失败</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java:655</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> &quot;SRV-&quot; + System.currentTimeMillis() % 100000 无日期/随机段，case_key 有唯一索引。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 几百个合同后按生日问题必然撞键，返回约束冲突/500。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">复用同文件 743/867 的 CTR-年-8位UUID 写法。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M12</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">合同列表 1+2N 查询</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java:2461-2469</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> attachTimelineNodes 对每行再调 buildTimelineNodes 与 attachFulfillmentChecks（各 1 次关联查询）。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 50 条列表约 101 条 SQL，连接池被快速占满。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">按 case_id IN (...) 批量查后内存分组。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M13</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">规则匹配重复 json.loads 全量条款</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/contract_store.py:88-96</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _field_is_present 对每条规则每字段遍历全量 clauses 并重复解析 semantic_elements，R×F×C 次。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 数百条款时明显变慢，压缩 300s 执行预算。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">每案解析一次，按索引复用。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M14</span>
+    <span class="cat-chip">✅ Tests</span>
+    <span class="issue-label">测试有效性缺陷：恒真断言、静默 skip、写死自增 ID</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/tests/test_fulfillment_check_v2.py:253, 539</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> assert durationMs &gt;= 0 恒真；test_evaluation.py:17-35 数据集缺失即 skip；rescore_eval_high_recall.py:40-43 与 check_baseline_runs.py:26 写死自增 ID（9/20/23、25-29），清库重灌后静默空转并以 0 退出。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 观测字段回归无人发现，合规脚本空转被当成功。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">换语义断言、缺失即失败、按 name+version 解析 ID 并缺失即 SystemExit。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M15</span>
+    <span class="cat-chip">🏗️ Design</span>
+    <span class="issue-label">图调度分支先创建后判幂等，同 requestId 会重复派发</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:1748-1766</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 创建并返回 task 在幂等检查（1775-1786）之前。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 前端重试或双击时重复派发 graph run，双倍成本。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">把幂等检查前移到创建之前。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #9a6700;background:rgba(154,103,0,0.04)">
+  <div class="issue-card-header">
+    <span class="badge badge-yellow">M16</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">async 工作线程内直接调用同步 MySQL/ES 函数</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:4864, 4504-4507</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _create_eval_temp_case 与 _seed_eval_fulfillment_evidence 在 async 上下文同步阻塞。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 阻塞事件循环，评测期间其它请求延迟升高。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">改用 asyncio.to_thread 或线程池执行。</div></div>
+  
+</div>
+</div><div class="issue-group"><div class="issue-group-title">⚪ Nit (6)</div>
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L1</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">动态 SQL 列名/子句拼接（当前不可注入，建议白名单）</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/services/kb_store.py:282</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> UPDATE ... SET {&#x27;, &#x27;.join(fields)} / {column} LIKE %s / {assignments} 用 f-string 拼列名；值已全部参数化，列名来源为代码常量。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 若后续让字段名来自请求参数即变成注入面。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">加列名白名单断言或 sql.Identifier。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L2</span>
+    <span class="cat-chip">📖 Readability</span>
+    <span class="issue-label">未使用导入与函数内重复导入</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/evaluation/metrics.py:8</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> normalize_task_type、EvaluationDataset/EvaluationMetrics、asyncio、BaseGraphState 未使用；routes.py:126/171-178 的 AgentExecutionPolicy 未用且 RunRecovery/settings 重复导入。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 误导读者以为已启用执行策略，增加维护噪音。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">删除；CI 加 ruff --select F401。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L3</span>
+    <span class="cat-chip">📖 Readability</span>
+    <span class="issue-label">RRF 平滑常数 60 在两条融合路径各写一遍</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/contract_store.py:633, 701</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 1/(60+rank+1) 无命名常量与注释，改一处即两类证据 fusionScore 不可比。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 排序权重隐性耦合。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">提为模块级 RRF_K = 60。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L4</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">用 len([...]) 做计数</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/agent_runtime/graph/timeline_extraction.py:419-426</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 两处为计数各建临时列表。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 无功能影响，纯开销。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">改 sum(1 for ...)。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L5</span>
+    <span class="cat-chip">⚡ Perf</span>
+    <span class="issue-label">_risk_dimension 在同一集合推导内调用两次</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:2943-2947</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 取维度值与判空过滤各调用一次，每次 upper + 两层字典查表。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 300+ findings 时打分开销翻倍。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">用海象运算符只算一次。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #afb8c1;background:rgba(0,0,0,0.02)">
+  <div class="issue-card-header">
+    <span class="badge badge-dim">L6</span>
+    <span class="cat-chip">📖 Readability</span>
+    <span class="issue-label">可 splice 列表用 index 作 key</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>agent-admin/src/views/MyAccount.vue:49-53</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> 社交链接用 :key=&quot;i&quot; 且删除用 splice，删中间行后 Vue 按位置复用输入框。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 编辑多条链接时数据错行。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">为每项生成稳定 uid。</div></div>
+  
+</div>
+</div><div class="issue-group"><div class="issue-group-title">🎉 Praise (2)</div>
+<div class="issue-card" style="border-left:3px solid #1a7f37;background:rgba(26,127,55,0.05)">
+  <div class="issue-card-header">
+    <span class="badge badge-green">P1</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">内部接口鉴权 fail-closed + compose 强制注入</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>tools/chat-assistant/backend/app/api/routes.py:74-80</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> _check_internal_token 在未配置时直接 500 拒绝并用 secrets.compare_digest；compose 用 ${VAR:?} 强制注入 CHAT_ASSISTANT_TOKEN / INTERNAL_SERVICE_TOKEN / BOOTSTRAP_ADMIN_PASSWORD。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 避免「忘配密钥=无鉴权」这一常见事故。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">保持该模式，并沿用 fail-fast 修复 H3/M4。</div></div>
+  
+</div>
+
+<div class="issue-card" style="border-left:3px solid #1a7f37;background:rgba(26,127,55,0.05)">
+  <div class="issue-card-header">
+    <span class="badge badge-green">P2</span>
+    <span class="cat-chip">🔒 Security</span>
+    <span class="issue-label">私有语料隔离与人工确认不可绕过</span>
+  </div>
+  <div class="item-reason">
+    <span class="reason-section"><span class="reason-label">位置:</span> <code>docs/benchmark-labeling-spec-v1.md:13-23</code></span>
+    <span class="reason-section"><span class="reason-label">问题:</span> benchmark-private/ 已在 .gitignore:65；入库数据集用 XX/YY 占位；human_confirm.py:95-145 的 manualResult 只来自人工响应，persistence.py:1258 对 PENDING/NEEDS_MORE_EVIDENCE 单独处理。</span>
+    <span class="reason-section"><span class="reason-label">影响:</span> 符合 spec 的「不得入库真实合同」与「模型不得自动确认履约」。</span>
+  </div>
+  
+  <div class="fix-suggestion-item sev-p2"><div class="fix-badge">💡</div><div class="fix-text">保持；建议对 ticket 层面的 approval 留痕再加一条审计校验。</div></div>
+  
+</div>
+</div></section>
+  
+  
+<section class="card section">
+  <h2>📁 变更文件 (24)</h2>
+  <table class="e2e-table">
+    <thead><tr><th>文件</th><th>状态</th><th>+/-</th><th>关联 Issue</th></tr></thead>
+    <tbody><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/services/mineru_service.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">C1</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/api/routes.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">C2</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H5</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M1</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M2</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M3</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M6</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M15</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M16</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">L2</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">L5</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">P1</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/config/CacheConfig.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">C3</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">api-tests/conftest.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">C4</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-front/src/components/ChatWindow.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H1</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H6</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M5</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-front/src/components/ReportArtifactModal.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H1</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/agent_runtime/runner.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H2</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H4</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H3</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-admin/src/views/KnowledgeBase.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H7</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-admin/src/views/RuleManage.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H8</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H9</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M10</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M11</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M12</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H10</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/aspect/RateLimitAspect.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H11</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-server/src/main/java/com/atlasmind/service/impl/LocalFileStorageService.java</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H12</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/agent_runtime/evaluation/benchmark.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H13</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">scripts/build_private_benchmark_corpus.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H14</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">scripts/seed_eval_datasets.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H15</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">api-tests/test_admin.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">H16</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/agent_runtime/contract_store.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M7</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M13</a> <a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">L3</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-front/src/App.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M8</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-admin/src/views/AiObservability.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M9</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/app/config.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M4</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">tools/chat-assistant/backend/tests/test_fulfillment_check_v2.py</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">M14</a> </td>
+</tr><tr>
+  <td><code style="font-size:12px">agent-admin/src/views/MyAccount.vue</code></td>
+  <td><span class="badge badge-blue">Modified</span></td>
+  <td style="font-family:monospace;font-size:12px">
+    <span style="color:var(--green)">+0</span> / <span style="color:var(--red)">-0</span>
+  </td>
+  <td><a href="#issues" class="badge badge-dim" style="text-decoration:none;font-size:10px;padding:1px 7px">L6</a> </td>
+</tr></tbody>
+  </table>
+</section>
+
+  
+<section class="card section">
+  <h2>📜 Commits (1)</h2>
+  <table class="e2e-table">
+    <thead><tr><th>SHA</th><th>Subject</th><th>Author</th></tr></thead>
+    <tbody><tr>
+  <td><code style="font-size:11px">82a434b</code></td>
+  <td>feat: unify benchmark contracts and harden timeline dates</td>
+  <td style="color:var(--text-muted);font-size:12px">HEAD (snapshot baseline)</td>
+</tr></tbody>
+  </table>
+</section>
+
+  
+<section class="card section">
+  <h2>⚠️ 评审局限</h2>
+  <ul style="margin-left:20px;line-height:1.9;color:var(--text-muted);font-size:13px"><li>全仓快照静态评审（非 diff）：未执行构建、测试或依赖漏洞扫描，未连库验证 DDL 实际执行</li><li>Python 151 文件（app/ 全量 + tests + scripts）、Java 108 类 + 3 个 profile、前端 48 个 .vue/.js/.ts 均在范围内</li><li>部分结论依赖静态阅读与 AST 交叉验证，并发/真实 LLM 输出等动态行为未验证</li><li>报告仅写入本地磁盘并随 review 分支推送，未上传任何第三方平台</li></ul>
+</section>
+
+  <div class="report-footer">
+    <span>🤖 由 local-code-review Skill 自动生成</span>
+    <span>生成时间: 2026-10-29 13:51:01</span>
+  </div>
+</div>
+</body>
+</html>

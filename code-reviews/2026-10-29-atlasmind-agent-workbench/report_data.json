@@ -1,0 +1,243 @@
+{
+  "repo": "https://github.com/DayDayUpStudyHard/AtlasMind-Agent-Workbench.git",
+  "base_ref": "snapshot",
+  "head_ref": "master",
+  "base_sha": "82a434b",
+  "head_sha": "82a434b",
+  "mode": "range",
+  "source": "local",
+  "reviewer": "DSH AI (DeepSeek-V4.1-Flash) + 5 module sub-reviews",
+  "review_time": "2026-10-29 13:40:00",
+  "language": "Python",
+  "verdict": "block",
+  "summary": "第二轮全仓评审（含测试与脚本）共 42 项：4 个 Critical —— MinerU 以 shell=True 拼接文件名执行且无超时、评测把运行时崩溃当跳过并计为通过、Redis 缓存启用全放行默认类型信息（可致反序列化 RCE）、测试配置内置明文管理员口令；另有 16 个 High 覆盖 Java 列名/主键/限流/上传与前端响应式/初始化链，以及业务规范缺口（发布门禁因 schemaVersion=1 + labelStatus 默认 APPROVED 而永不触发）。鉴权 fail-closed、SQL 值绑定、私有语料隔离、人工确认不可绕过均已核对合规。",
+  "stats": { "files_changed": 307, "additions": 0, "deletions": 0, "commits": 0 },
+  "issues": [
+    {
+      "id": "C1", "severity": "critical", "category": "security",
+      "title": "命令注入 + 子进程无超时（MinerU 解析）",
+      "file": "tools/chat-assistant/backend/app/services/mineru_service.py", "line": "30-42",
+      "problem": "mineru_command.format(input=str(pdf_path)) 把上传文件名拼进 shell 串后 shell=True 执行；文件名含 ; && | $(...) 或空格/引号即改变命令语义。同时显式 timeout=None，卡死会永久占用请求。",
+      "impact": "可被上传文件名触发命令执行；解析卡死拖垮并发。",
+      "suggestion": "文件名白名单化后用参数数组 + shell=False；mineru_command 改为模板数组；设置明确 timeout。",
+      "code_diff": "- command = settings.mineru_command.format(input=str(pdf_path), output=str(job_dir))\n- result = subprocess.run(command, shell=True, cwd=str(pdf_path.parent), text=True, capture_output=True, timeout=None)\n+ safe = re.sub(r\"[^\\w\\u4e00-\\u9fff.-]\", \"_\", pdf_path.name)\n+ argv = [p.format(input=str(pdf_path.with_name(safe)), output=str(job_dir)) for p in settings.mineru_command_argv]\n+ result = subprocess.run(argv, shell=False, cwd=str(pdf_path.parent), text=True, capture_output=True, timeout=settings.mineru_timeout_seconds)"
+    },
+    {
+      "id": "C2", "severity": "critical", "category": "bug",
+      "title": "评测把运行时崩溃当「跳过」，失败用例计为通过",
+      "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "4886-4890",
+      "problem": "except ValueError 把 Agent 运行时 ValueError（pydantic 校验失败、JSONDecodeError、int() 解析失败）当作任务不支持跳过，写 {\"skipped\": true} 后 continue；随后仍用空 artifact 打分并 success_count += 1。",
+      "impact": "崩溃用例被统计为通过，highRecall 可达 1.0，release gate 与评测结论整体失真。",
+      "suggestion": "只允许 EvalCaseConfigurationError 跳过；其余 ValueError 记录并 raise，计入 failed_count。",
+      "code_diff": "- except ValueError as skip_exc:\n-     stage_outputs[task_type] = {\"skipped\": True, \"reason\": str(skip_exc)}\n-     continue\n+ except ValueError as exc:\n+     logger.warning(\"Eval run %s case %s stage %s crashed: %s\", eval_run_id, case_key, task_type, exc)\n+     raise"
+    },
+    {
+      "id": "C3", "severity": "critical", "category": "security",
+      "title": "Redis 缓存启用全放行默认类型信息，可致反序列化 RCE",
+      "file": "agent-server/src/main/java/com/atlasmind/config/CacheConfig.java", "line": "33-37",
+      "problem": "activateDefaultTyping(mapper.getPolymorphicTypeValidator(), NON_FINAL, As.PROPERTY)；新建 ObjectMapper 的 validator 即 LaissezFaireSubTypeValidator（允许任意类型），JSON 中 @class 会被当作真实类名实例化，而第 30 行注释声称「禁用类型信息」。",
+      "impact": "Redis 中攻击者可控 value 被 CacheManager 读取时触发任意类实例化，配合 gadget 链可达成 RCE。",
+      "suggestion": "改用 BasicPolymorphicTypeValidator 白名单业务包，或关闭 default typing 并为具体类型使用 Jackson2JsonRedisSerializer。",
+      "code_diff": "- mapper.activateDefaultTyping(mapper.getPolymorphicTypeValidator(), ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);\n+ PolymorphicTypeValidator validator = BasicPolymorphicTypeValidator.builder()\n+         .allowIfSubType(\"com.atlasmind.\").allowIfSubType(\"java.util.\").build();\n+ mapper.activateDefaultTyping(validator, ObjectMapper.DefaultTyping.NON_FINAL, JsonTypeInfo.As.PROPERTY);"
+    },
+    {
+      "id": "C4", "severity": "critical", "category": "security",
+      "title": "明文管理员凭据硬编码进测试配置",
+      "file": "api-tests/conftest.py", "line": "14-16",
+      "problem": "ADMIN_PASSWORD 默认 admin123，test_auth.py:22-23 又独立写死同一组凭据并绕过环境变量，改密后 test_change_and_restore 必然失败。",
+      "impact": "拿到仓库即得后台口令，指向测试/预发环境可直接登录。",
+      "suggestion": "凭据只从环境变量读取，缺失即 fail-fast。",
+      "code_diff": "- ADMIN_PASSWORD = os.getenv(\"ATLASMIND_ADMIN_PASS\", \"admin123\")\n+ ADMIN_PASSWORD = os.environ[\"ATLASMIND_ADMIN_PASS\"]"
+    },
+    {
+      "id": "H1", "severity": "major", "category": "security",
+      "title": "富文本 XSS：marked.parse 直接 v-html，无消毒",
+      "file": "agent-front/src/components/ChatWindow.vue", "line": "79, 309-310",
+      "problem": "ChatWindow.vue:79 与 ReportArtifactModal.vue:124/201 把 marked.parse() 输出直接塞进 v-html，内容为模型输出与报告 Markdown；全仓无 DOMPurify。",
+      "impact": "提示注入或恶意报告可执行脚本，结合 M5 可窃取 localStorage 中的会话 token。",
+      "suggestion": "引入 DOMPurify sanitize 并限制 ALLOWED_TAGS/ATTR，两处 render 函数都改。",
+      "code_diff": "- function renderMd(text) { return text ? marked.parse(text, { breaks: true }) : '' }\n+ function renderMd(text) { return text ? DOMPurify.sanitize(marked.parse(text, { breaks: true }), { ALLOWED_TAGS: ['p','br','strong','em','code','pre','ul','ol','li','a','table','thead','tbody','tr','th','td','blockquote'], ALLOWED_ATTR: ['href','title'] }) : '' }"
+    },
+    {
+      "id": "H2", "severity": "major", "category": "bug",
+      "title": "配额回调无超时无重试，额度可能永久不结算",
+      "file": "tools/chat-assistant/backend/app/agent_runtime/runner.py", "line": "1393-1410",
+      "problem": "aiohttp.ClientSession() 默认超时且无重试，异常被吞只留日志；confirm/refund 既未成功也无补偿记录。",
+      "impact": "Java 抖动时 run 收尾长时间阻塞，额度结算漂移无法对账。",
+      "suggestion": "ClientTimeout(total=5) + 指数退避 3 次；最终失败写 mark_quota_pending 由定时任务重放。",
+      "code_diff": "- async with aiohttp.ClientSession() as session:\n-     async with session.post(url, headers={\"X-Internal-Token\": settings.java_internal_token}) as resp: ...\n+ timeout = aiohttp.ClientTimeout(total=5)\n+ for attempt in range(3):\n+     try:\n+         async with aiohttp.ClientSession(timeout=timeout) as session:\n+             async with session.post(url, headers={\"X-Internal-Token\": settings.java_internal_token}) as resp:\n+                 if resp.status == 200: return\n+     except (aiohttp.ClientError, asyncio.TimeoutError): pass\n+     await asyncio.sleep(2 ** attempt)\n+ await self.run_store.mark_quota_pending(run_id, status)"
+    },
+    {
+      "id": "H3", "severity": "major", "category": "bug",
+      "title": "Java 13 处 catch (Exception ignored){}，DDL 失败被静默吞掉",
+      "file": "agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java", "line": "539-644, 745",
+      "problem": "建表/加列/建索引逐条包在 catch (Exception ignored) {}，无日志无计数；ContractCaseServiceImpl.java:1220 同型。",
+      "impact": "结构性变更失败也启动成功，MySQL 非事务 DDL 会留下半成品 schema 且无排查线索。",
+      "suggestion": "仅对 ER_DUP_FIELDNAME/ER_DUP_KEYNAME 忽略并记 debug，其余 log.error 后抛出。",
+      "code_diff": "- try { jdbcTemplate.execute(\"ALTER TABLE contract_case ADD COLUMN is_evaluation TINYINT NOT NULL DEFAULT 0\"); } catch (Exception ignored) { }\n+ try {\n+     jdbcTemplate.execute(\"ALTER TABLE contract_case ADD COLUMN is_evaluation TINYINT NOT NULL DEFAULT 0\");\n+ } catch (DataAccessException e) {\n+     if (isDuplicateColumn(e)) { log.debug(\"column already present: is_evaluation\"); }\n+     else { log.error(\"schema migration failed: is_evaluation\", e); throw e; }\n+ }"
+    },
+    {
+      "id": "H4", "severity": "major", "category": "bug",
+      "title": "超时分支引用不存在的 self.trace_store，唯一事故路径必抛 AttributeError",
+      "file": "tools/chat-assistant/backend/app/agent_runtime/runner.py", "line": "1334",
+      "problem": "RunDispatcher.__init__ 只存 runner/run_store/report_store，从不设置 self.trace_store；HARNESS_TIMEOUT trace 永不落库，用户看到内部属性错误而非超时提示。",
+      "impact": "300s 超时这条唯一事故路径每次以误导性错误收场，排障线索丢失。",
+      "suggestion": "改为 self.runner.trace_store，并在 __init__ 显式注入 trace_store + 补单测。",
+      "code_diff": "- await self.trace_store.append_trace(run_id, \"HARNESS_TIMEOUT\", ...)\n+ await self.runner.trace_store.append_trace(run_id, \"HARNESS_TIMEOUT\", ...)"
+    },
+    {
+      "id": "H5", "severity": "major", "category": "bug",
+      "title": "失败落库用 f-string 拼 JSON 且异常被 pass 吞掉",
+      "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "1979-1991",
+      "problem": "_fail_eval_run 用 f'{{\"error\": \"{error}\"}}' 拼 JSON，error 含引号/反斜杠即写出非法 summary_json；外层 except Exception: pass 让写库失败完全无声。",
+      "impact": "失败原因丢失，eval_run 永远停在 RUNNING/QUEUED，前端无限轮询。",
+      "suggestion": "json.dumps({\"error\": error}, ensure_ascii=False)；except 分支至少 logger.exception。",
+      "code_diff": "- (f'{{\"error\": \"{error}\"}}', eval_run_id),\n- except Exception:\n-     pass\n+ (json.dumps({\"error\": error}, ensure_ascii=False), eval_run_id),\n+ except Exception:\n+     logger.exception(\"Could not mark eval run %s as FAILED\", eval_run_id)"
+    },
+    {
+      "id": "H6", "severity": "major", "category": "bug",
+      "title": "SSE 流式写入非响应式对象，增量内容不渲染",
+      "file": "agent-front/src/components/ChatWindow.vue", "line": "353-410",
+      "problem": "assistantMsg 为普通对象，push 进 ref 数组后写入原始对象（assistantMsg.content += ...）不经过 Proxy，模板仅在 streamingStatus 变化时重绘。",
+      "impact": "流式输出看不到增量，用户长时间面对空气泡。",
+      "suggestion": "用 reactive() 包裹消息对象，或写 messages.value[i].content。"
+    },
+    {
+      "id": "H7", "severity": "major", "category": "bug",
+      "title": "知识库页 onMounted 串行 await 无 catch，单接口失败即整页空白",
+      "file": "agent-admin/src/views/KnowledgeBase.vue", "line": "383-408",
+      "problem": "fetchProjects 无 try/catch、fetchSpaces 只有 finally；任一接口失败中断 await 序列，fetchDocuments 与 startDocumentPolling 永不执行。",
+      "impact": "知识库管理页永久空白且不再轮询解析进度，无错误提示。",
+      "suggestion": "改用 Promise.allSettled，各加载函数自带 catch + ElMessage.error。"
+    },
+    {
+      "id": "H8", "severity": "major", "category": "bug",
+      "title": "编辑后新增规则仍带旧 id，POST 冲突或误覆盖",
+      "file": "agent-admin/src/views/RuleManage.vue", "line": "67-74",
+      "problem": "openEdit 用 Object.assign(form, r) 灌入整行含 id；openCreate 不清 id。先编辑再新增时 doSave 走 POST 但请求体带旧 id。ClauseLibrary.vue:68-79 同款。",
+      "impact": "新增失败（主键冲突）或按 id 覆盖被编辑的规则。",
+      "suggestion": "doSave 中解构剔除 id/审计字段后再 POST。"
+    },
+    {
+      "id": "H9", "severity": "major", "category": "bug",
+      "title": "更新合同时把 ownerId 直接当列名，SQL 必然 Unknown column",
+      "file": "agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java", "line": "939-941",
+      "problem": "numFields = {\"amount\", \"ownerId\"} 直接拼成 sets.add(f + \"=?\")，而 contract_case 实际列名是 owner_id（同文件 321/355 行 c.owner_id AS ownerId、901 行 owner_id=? 可证）。",
+      "impact": "请求体带 ownerId（前端编辑表单回传 GET 结果即带）时更新直接 500，负责人无法变更。",
+      "suggestion": "字段名与列名显式分离，ownerId 写 owner_id。"
+    },
+    {
+      "id": "H10", "severity": "major", "category": "bug",
+      "title": "LAST_INSERT_ID() 与 INSERT 不在同一连接，评测派发到错误的 run",
+      "file": "agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java", "line": "226-234",
+      "problem": "方法无 @Transactional，INSERT 与 SELECT LAST_INSERT_ID() 各自借还连接；LAST_INSERT_ID() 是连接级状态，连接池下可能取到其它线程的 id 或 0。",
+      "impact": "错误 run 被派发评测；新建 run 永远 QUEUED，因 217-224 行拦截该数据集此后无法再发起评测。",
+      "suggestion": "用 GeneratedKeyHolder + RETURN_GENERATED_KEYS，或给方法加 @Transactional。"
+    },
+    {
+      "id": "H11", "severity": "major", "category": "security",
+      "title": "限流 key 取可伪造的 X-Forwarded-For，登录暴破防护失效",
+      "file": "agent-server/src/main/java/com/atlasmind/aspect/RateLimitAspect.java", "line": "71-78",
+      "problem": "取 XFF 且只取逗号前第一段，无可信代理校验；每请求换一个 XFF 即换一个计数桶，AuthController:41 的 5 次/分钟限制失效。",
+      "impact": "登录接口可无限暴破，审计日志 IP 可伪造。",
+      "suggestion": "以 request.getRemoteAddr() 为准；仅受信代理 CIDR 才采信 XFF 且取最后一跳。"
+    },
+    {
+      "id": "H12", "severity": "major", "category": "perf",
+      "title": "上传文件整体读入堆（上限 300MB），可被图片炸弹打到 OOM",
+      "file": "agent-server/src/main/java/com/atlasmind/service/impl/LocalFileStorageService.java", "line": "49-54",
+      "problem": "file.getBytes() 一次性读全量进堆，multipart 上限 300MB；图片分支随后 ImageIO.read 解码整幅图，像素总量不受字节数约束。S3FileStorageService.java:59 同。",
+      "impact": "单个大文件或超大像素图片即可吃数百 MB 至 GB 堆，2-3 并发上传打崩服务。",
+      "suggestion": "改 getInputStream() + Files.copy 流式落盘；解码前校验像素上限。"
+    },
+    {
+      "id": "H13", "severity": "major", "category": "design",
+      "title": "发布门禁失效：labelStatus 缺省即 APPROVED，且唯一数据集是 schema v1",
+      "file": "tools/chat-assistant/backend/app/agent_runtime/evaluation/benchmark.py", "line": "71, 97",
+      "problem": "manifest.get(\"labelStatus\", \"APPROVED\") 把缺失标注状态默认已批准；metrics.py:57-65 的 approved/provisional 门禁包在 if schema_v2 内，而 benchmarks/contract-review-v1/manifest.yaml 仍是 schemaVersion=1 且无 labelStatus，两个 gate 永不触发。",
+      "impact": "违反 docs/benchmark-labeling-spec-v1.md「只有 APPROVED 计入发布门禁」的口径，未评审标签可当金标参与发布决策且无告警。",
+      "suggestion": "缺省改 PROVISIONAL；门禁移出 schema_v2 分支；该数据集升级 schema v2 并补 labelStatus。"
+    },
+    {
+      "id": "H14", "severity": "major", "category": "bug",
+      "title": "标注生成失败后写空金标，基准集期望风险集被静默清空",
+      "file": "scripts/build_private_benchmark_corpus.py", "line": "218-231",
+      "problem": "标注调用被 except Exception 包住，失败只 print 后 return None；调用方退化为 _fallback_labels_from_text（risks: []），LOCAL_SOURCE 合同被写成 expected {risks: []} 的金标，构建仍 0 退出。",
+      "impact": "召回评估在空金标上恒满分或无意义，基准结论失真且不可察觉。",
+      "suggestion": "收窄异常并抛出（构建失败优于写空金标）；必须容忍时标 labelStatus: FAILED 且不写盘。"
+    },
+    {
+      "id": "H15", "severity": "major", "category": "bug",
+      "title": "种子脚本默认开启全表 DELETE 且非幂等",
+      "file": "scripts/seed_eval_datasets.py", "line": "1604-1612",
+      "problem": "EVAL_SEED_CLEAR 缺省 yes，对 agent_eval_result/run/case/dataset 四表执行无 WHERE 全表删除并立即 commit；随后每数据集各自 commit、无 rollback；append 模式重复插入同名同版本数据集。",
+      "impact": "一次误跑不可恢复地清空全部评测历史（含金标基线），中途失败留下半初始化数据。",
+      "suggestion": "默认改 no；只清本次 seed 的数据集（按 name 查 ID）；单事务 + rollback；append 前校验存在性。"
+    },
+    {
+      "id": "H16", "severity": "major", "category": "tests",
+      "title": "后台接口无鉴权的缺陷被 xfail 永久粉饰",
+      "file": "api-tests/test_admin.py", "line": "295-303",
+      "problem": "唯一验证「未登录不得访问 /api/admin/**」的用例整体 xfail，断言还写成 in [200, 401, 403]（200 也算通过）；pytest.ini 未开 xfail_strict，修好时是 XPASS 也非失败。",
+      "impact": "后台 7 个管理接口的无鉴权风险永远不会让 CI 变红。",
+      "suggestion": "去掉 xfail，严格断言 (401, 403)；修复前用 skip + issue 编号，或开 xfail_strict。"
+    },
+    { "id": "M1", "severity": "minor", "category": "design", "title": "461 行 legacy 评测编排函数无调用方", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "2152", "problem": "_run_evaluation_background_legacy 全库仅定义处出现一次，与 4757 行新实现并存。", "impact": "改评测口径易改错文件，抬高阅读成本。", "suggestion": "确认无调用后删除，或移入 scripts/legacy/ 标注废弃日期。" },
+    { "id": "M2", "severity": "minor", "category": "design", "title": "超长函数：441 / 509 / 299 行", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "750, 4757", "problem": "chat_send 441 行、_run_evaluation_background 509 行；persistence.py:1102-1400 的 _save_sync 299 行混合 5 类写操作。", "impact": "分支组合难测，报告写入回归风险高。", "suggestion": "按阶段/写域拆分，主函数只做编排。" },
+    { "id": "M3", "severity": "minor", "category": "readability", "title": "宽泛/静默异常聚合：routes.py 30 处、es_service、worker", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "多处", "problem": "es_service.py:280-283 失败直接 return [] 无日志；worker.py:186-188 用 except Exception: pass 吞掉 XAUTOCLAIM 全部失败，崩溃 worker 的 PEL 不再被领取。", "impact": "ES 故障与崩溃恢复失效均无迹可循，表现为随机失败。", "suggestion": "收窄异常类型并至少 logger.warning 留痕。" },
+    { "id": "M4", "severity": "minor", "category": "security", "title": "弱默认凭据：MySQL 123456 与 dev profile 内置口令", "file": "tools/chat-assistant/backend/app/config.py", "line": "45", "problem": "mysql_password 默认 123456 且 validate() 不校验；application-dev.yml:9/35/37 内置 123456、admin123、atlasmind-internal-dev-token。", "impact": "漏注入环境变量时静默用弱口令连库；dev profile 被误启用即得可预测管理员口令与内部 token。", "suggestion": "默认值留空 + 启动校验；dev 凭据走 .env。" },
+    { "id": "M5", "severity": "minor", "category": "security", "title": "会话 token 存 localStorage，可被 XSS 窃取", "file": "agent-front/src/components/ChatWindow.vue", "line": "270, 282-283, 300-301", "problem": "token 明文写 localStorage（变量名却是 sessionStorageKey），无 HttpOnly 保护。", "impact": "结合 H1 的 v-html 注入可直接外带会话。", "suggestion": "改 HttpOnly + SameSite Cookie；短期至少换 sessionStorage。" },
+    { "id": "M6", "severity": "minor", "category": "bug", "title": "temp_case_ids 从不 append，评测临时案件清理分支恒不执行", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "5249, 5254", "problem": "_create_eval_temp_case（2951-2957）收了 temp_case_ids 却只 append reuse_stats，工作线程 5249 行 if temp_case_ids 恒假。", "impact": "评测 fixture 的 case/document/clause/chunk 与 ES 向量永久留在生产库与索引。", "suggestion": "新建分支单独登记「本次新建且未复用」的 id 再清理。" },
+    { "id": "M7", "severity": "minor", "category": "bug", "title": "裸 except: pass 吞掉 semantic_elements 解码失败，产出假阳性风险发现", "file": "tools/chat-assistant/backend/app/agent_runtime/contract_store.py", "line": "866-868, 1296-1298, 1505-1508", "problem": "三处 try: json.loads ... except: pass，解析失败后 _semantic_elements 返回 {}，规则引擎据此判字段未约定。", "impact": "审查报告基于解析失败而非合同事实下结论，不可复现定位。", "suggestion": "捕获 json.JSONDecodeError 并记录 clause id，失败时标 NEEDS_REVIEW。" },
+    { "id": "M8", "severity": "minor", "category": "bug", "title": "根组件 setup 裸用 localStorage，禁存储环境整站白屏", "file": "agent-front/src/App.vue", "line": "35, 47", "problem": "setup 期间直接 localStorage.getItem/ setItem 且无 try/catch，隐私模式抛 SecurityError，异常发生在根组件导致挂载失败。", "impact": "特定浏览器配置下完全无法进入工作台。", "suggestion": "包安全读写函数，异常回退 'light'。" },
+    { "id": "M9", "severity": "minor", "category": "bug", "title": "筛选不重置页码，翻页后筛选出现假空列表", "file": "agent-admin/src/views/AiObservability.vue", "line": "15-32", "problem": "关键字回车/清空/下拉 change 直接 fetchAgentRuns 而不重置 agentPage，pipeline、chat 三个 tab 同样。", "impact": "第 3 页改筛选请求 page=3 新条件，返回空页显示「无数据」。", "suggestion": "统一 searchXxx(){ page=1; fetch() }。" },
+    { "id": "M10", "severity": "minor", "category": "bug", "title": "审计 JSON 用字符串拼用户输入，含引号即写入失败", "file": "agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java", "line": "1915-1922", "problem": "new_value_json 拼 reason（来自 request-revision 的用户输入），含双引号/反斜杠生成非法 JSON，异常随后被吞。", "impact": "状态变更审计静默丢失。", "suggestion": "用 objectMapper.writeValueAsString(Map.of(...)) 并记录异常。" },
+    { "id": "M11", "severity": "minor", "category": "bug", "title": "caseKey 键空间仅 10 万，撞唯一索引后创建随机失败", "file": "agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java", "line": "655", "problem": "\"SRV-\" + System.currentTimeMillis() % 100000 无日期/随机段，case_key 有唯一索引。", "impact": "几百个合同后按生日问题必然撞键，返回约束冲突/500。", "suggestion": "复用同文件 743/867 的 CTR-年-8位UUID 写法。" },
+    { "id": "M12", "severity": "minor", "category": "perf", "title": "合同列表 1+2N 查询", "file": "agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java", "line": "2461-2469", "problem": "attachTimelineNodes 对每行再调 buildTimelineNodes 与 attachFulfillmentChecks（各 1 次关联查询）。", "impact": "50 条列表约 101 条 SQL，连接池被快速占满。", "suggestion": "按 case_id IN (...) 批量查后内存分组。" },
+    { "id": "M13", "severity": "minor", "category": "perf", "title": "规则匹配重复 json.loads 全量条款", "file": "tools/chat-assistant/backend/app/agent_runtime/contract_store.py", "line": "88-96", "problem": "_field_is_present 对每条规则每字段遍历全量 clauses 并重复解析 semantic_elements，R×F×C 次。", "impact": "数百条款时明显变慢，压缩 300s 执行预算。", "suggestion": "每案解析一次，按索引复用。" },
+    { "id": "M14", "severity": "minor", "category": "tests", "title": "测试有效性缺陷：恒真断言、静默 skip、写死自增 ID", "file": "tools/chat-assistant/backend/tests/test_fulfillment_check_v2.py", "line": "253, 539", "problem": "assert durationMs >= 0 恒真；test_evaluation.py:17-35 数据集缺失即 skip；rescore_eval_high_recall.py:40-43 与 check_baseline_runs.py:26 写死自增 ID（9/20/23、25-29），清库重灌后静默空转并以 0 退出。", "impact": "观测字段回归无人发现，合规脚本空转被当成功。", "suggestion": "换语义断言、缺失即失败、按 name+version 解析 ID 并缺失即 SystemExit。" },
+    { "id": "M15", "severity": "minor", "category": "design", "title": "图调度分支先创建后判幂等，同 requestId 会重复派发", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "1748-1766", "problem": "创建并返回 task 在幂等检查（1775-1786）之前。", "impact": "前端重试或双击时重复派发 graph run，双倍成本。", "suggestion": "把幂等检查前移到创建之前。" },
+    { "id": "M16", "severity": "minor", "category": "perf", "title": "async 工作线程内直接调用同步 MySQL/ES 函数", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "4864, 4504-4507", "problem": "_create_eval_temp_case 与 _seed_eval_fulfillment_evidence 在 async 上下文同步阻塞。", "impact": "阻塞事件循环，评测期间其它请求延迟升高。", "suggestion": "改用 asyncio.to_thread 或线程池执行。" },
+    { "id": "L1", "severity": "nit", "category": "security", "title": "动态 SQL 列名/子句拼接（当前不可注入，建议白名单）", "file": "tools/chat-assistant/backend/app/services/kb_store.py", "line": "282", "problem": "UPDATE ... SET {', '.join(fields)} / {column} LIKE %s / {assignments} 用 f-string 拼列名；值已全部参数化，列名来源为代码常量。", "impact": "若后续让字段名来自请求参数即变成注入面。", "suggestion": "加列名白名单断言或 sql.Identifier。" },
+    { "id": "L2", "severity": "nit", "category": "readability", "title": "未使用导入与函数内重复导入", "file": "tools/chat-assistant/backend/app/agent_runtime/evaluation/metrics.py", "line": "8", "problem": "normalize_task_type、EvaluationDataset/EvaluationMetrics、asyncio、BaseGraphState 未使用；routes.py:126/171-178 的 AgentExecutionPolicy 未用且 RunRecovery/settings 重复导入。", "impact": "误导读者以为已启用执行策略，增加维护噪音。", "suggestion": "删除；CI 加 ruff --select F401。" },
+    { "id": "L3", "severity": "nit", "category": "readability", "title": "RRF 平滑常数 60 在两条融合路径各写一遍", "file": "tools/chat-assistant/backend/app/agent_runtime/contract_store.py", "line": "633, 701", "problem": "1/(60+rank+1) 无命名常量与注释，改一处即两类证据 fusionScore 不可比。", "impact": "排序权重隐性耦合。", "suggestion": "提为模块级 RRF_K = 60。" },
+    { "id": "L4", "severity": "nit", "category": "perf", "title": "用 len([...]) 做计数", "file": "tools/chat-assistant/backend/app/agent_runtime/graph/timeline_extraction.py", "line": "419-426", "problem": "两处为计数各建临时列表。", "impact": "无功能影响，纯开销。", "suggestion": "改 sum(1 for ...)。" },
+    { "id": "L5", "severity": "nit", "category": "perf", "title": "_risk_dimension 在同一集合推导内调用两次", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "2943-2947", "problem": "取维度值与判空过滤各调用一次，每次 upper + 两层字典查表。", "impact": "300+ findings 时打分开销翻倍。", "suggestion": "用海象运算符只算一次。" },
+    { "id": "L6", "severity": "nit", "category": "readability", "title": "可 splice 列表用 index 作 key", "file": "agent-admin/src/views/MyAccount.vue", "line": "49-53", "problem": "社交链接用 :key=\"i\" 且删除用 splice，删中间行后 Vue 按位置复用输入框。", "impact": "编辑多条链接时数据错行。", "suggestion": "为每项生成稳定 uid。" },
+    { "id": "P1", "severity": "praise", "category": "security", "title": "内部接口鉴权 fail-closed + compose 强制注入", "file": "tools/chat-assistant/backend/app/api/routes.py", "line": "74-80", "problem": "_check_internal_token 在未配置时直接 500 拒绝并用 secrets.compare_digest；compose 用 ${VAR:?} 强制注入 CHAT_ASSISTANT_TOKEN / INTERNAL_SERVICE_TOKEN / BOOTSTRAP_ADMIN_PASSWORD。", "impact": "避免「忘配密钥=无鉴权」这一常见事故。", "suggestion": "保持该模式，并沿用 fail-fast 修复 H3/M4。" },
+    { "id": "P2", "severity": "praise", "category": "security", "title": "私有语料隔离与人工确认不可绕过", "file": "docs/benchmark-labeling-spec-v1.md", "line": "13-23", "problem": "benchmark-private/ 已在 .gitignore:65；入库数据集用 XX/YY 占位；human_confirm.py:95-145 的 manualResult 只来自人工响应，persistence.py:1258 对 PENDING/NEEDS_MORE_EVIDENCE 单独处理。", "impact": "符合 spec 的「不得入库真实合同」与「模型不得自动确认履约」。", "suggestion": "保持；建议对 ticket 层面的 approval 留痕再加一条审计校验。" }
+  ],
+  "files": [
+    { "path": "tools/chat-assistant/backend/app/services/mineru_service.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["C1"] },
+    { "path": "tools/chat-assistant/backend/app/api/routes.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["C2", "H5", "M1", "M2", "M3", "M6", "M15", "M16", "L2", "L5", "P1"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/config/CacheConfig.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["C3"] },
+    { "path": "api-tests/conftest.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["C4"] },
+    { "path": "agent-front/src/components/ChatWindow.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H1", "H6", "M5"] },
+    { "path": "agent-front/src/components/ReportArtifactModal.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H1"] },
+    { "path": "tools/chat-assistant/backend/app/agent_runtime/runner.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H2", "H4"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/config/AgentWorkbenchSchemaInitializer.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H3"] },
+    { "path": "agent-admin/src/views/KnowledgeBase.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H7"] },
+    { "path": "agent-admin/src/views/RuleManage.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H8"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/service/impl/ContractCaseServiceImpl.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H9", "M10", "M11", "M12"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/controller/admin/EvalAdminController.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H10"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/aspect/RateLimitAspect.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H11"] },
+    { "path": "agent-server/src/main/java/com/atlasmind/service/impl/LocalFileStorageService.java", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H12"] },
+    { "path": "tools/chat-assistant/backend/app/agent_runtime/evaluation/benchmark.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H13"] },
+    { "path": "scripts/build_private_benchmark_corpus.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H14"] },
+    { "path": "scripts/seed_eval_datasets.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H15"] },
+    { "path": "api-tests/test_admin.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["H16"] },
+    { "path": "tools/chat-assistant/backend/app/agent_runtime/contract_store.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["M7", "M13", "L3"] },
+    { "path": "agent-front/src/App.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["M8"] },
+    { "path": "agent-admin/src/views/AiObservability.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["M9"] },
+    { "path": "tools/chat-assistant/backend/app/config.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["M4"] },
+    { "path": "tools/chat-assistant/backend/tests/test_fulfillment_check_v2.py", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["M14"] },
+    { "path": "agent-admin/src/views/MyAccount.vue", "status": "M", "additions": 0, "deletions": 0, "issue_ids": ["L6"] }
+  ],
+  "commits": [ { "sha": "82a434b", "subject": "feat: unify benchmark contracts and harden timeline dates", "author": "HEAD (snapshot baseline)" } ],
+  "limitations": [
+    "全仓快照静态评审（非 diff）：未执行构建、测试或依赖漏洞扫描，未连库验证 DDL 实际执行",
+    "Python 151 文件（app/ 全量 + tests + scripts）、Java 108 类 + 3 个 profile、前端 48 个 .vue/.js/.ts 均在范围内",
+    "部分结论依赖静态阅读与 AST 交叉验证，并发/真实 LLM 输出等动态行为未验证",
+    "报告仅写入本地磁盘并随 review 分支推送，未上传任何第三方平台"
+  ]
+}
