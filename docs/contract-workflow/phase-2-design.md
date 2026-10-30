@@ -1,7 +1,7 @@
-# 二期技术设计（v0.3）
+# 二期技术设计（v0.4）
 
 > 日期：2026-10-30
-> 状态：**可开工**（12 项技术与产品决策已定，含撤回竞态、agent 推进、事务与并发约束）
+> 状态：**可开工**（19 项决策已定；第 1~2 步已实现，v0.4 回应实现自查的 8 项差异）
 > 上游：业务模型见 [phase-2-approval.md](./phase-2-approval.md) §3；本文只解决"怎么落地"
 > 前提：金额阈值已废弃——**所有合同都必须经法务**；老案件不迁移；节点链线性无分支
 
@@ -42,11 +42,12 @@ CREATE TABLE contract_flow_node (
   flow_id           BIGINT      NOT NULL,
   node_key          VARCHAR(32) NOT NULL,  -- UPLOADER/AGENT/DEPT_APPROVAL/LEGAL_APPROVAL/SIGNING
   seq               INT         NOT NULL,
-  state             VARCHAR(16) NOT NULL,  -- PENDING/CLAIMED/DONE/BLOCKED/VOID
+  state             VARCHAR(16) NOT NULL,  -- WAITING/PENDING/CLAIMED/DONE/BLOCKED/VOID
   assignee_id       BIGINT      NULL,
   claimed_at        DATETIME    NULL,
   claim_expires_at  DATETIME    NULL,
   candidate_group   VARCHAR(64) NULL,      -- OWNER / DEPT:<deptId> / LEGAL
+  pending_rerun     TINYINT     NOT NULL DEFAULT 0,  -- agent 运行中再次触发，标 1 待补跑
   entered_at        DATETIME    NOT NULL,
   done_at           DATETIME    NULL,
   UNIQUE KEY uk_flow_node (flow_id, node_key, seq),
@@ -54,7 +55,18 @@ CREATE TABLE contract_flow_node (
 );
 ```
 
-`VOID` 表示"被打回后作废"，事件保留，节点不删除。
+节点状态语义（**不变量：`PENDING` 的节点在任何时刻最多一个**）：
+
+| 状态 | 含义 |
+| --- | --- |
+| `WAITING` | 还没轮到（建链时除 `start_node` 外全部是这个） |
+| `PENDING` | 当前待认领 |
+| `CLAIMED` | 有人认领，处理中 |
+| `DONE` | 已完成 |
+| `BLOCKED` | agent 失败等，需人介入 |
+| `VOID` | 被打回作废，事件保留 |
+
+推进规则：前一节点变 `DONE` 时，把下一个 `WAITING` 翻成 `PENDING`。
 
 ### 1.3 `contract_flow_event`（事件流，只增不改）
 
@@ -62,17 +74,22 @@ CREATE TABLE contract_flow_node (
 CREATE TABLE contract_flow_event (
   id           BIGINT AUTO_INCREMENT PRIMARY KEY,
   flow_id      BIGINT      NOT NULL,
-  node_id      BIGINT      NULL,
+  node_id      BIGINT      NOT NULL,   -- 所有事件必须挂节点，否则 uk_event 对 NULL 不生效
   event_type   VARCHAR(32) NOT NULL,
   actor_id     BIGINT      NULL,
   actor_type   VARCHAR(8)  NOT NULL,  -- USER / AGENT / SYSTEM
   from_node    VARCHAR(32) NULL,
   to_node      VARCHAR(32) NULL,
+  ref_id       BIGINT      NULL,      -- agent_run_id / withdraw_id / sign_check_id
   payload_json JSON        NULL,
   created_at   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_flow_time (flow_id, created_at)
+  UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id),
+  KEY idx_flow_time (flow_id, created_at),
+  KEY idx_flow_type (flow_id, event_type, id)
 );
 ```
+
+`node_id` 挂载规则：`FLOW_START` → `start_node`；`WITHDRAW_*` → 当前活跃节点；`SIGN_*` → `SIGNING` 节点。**MySQL 唯一索引忽略 NULL，所以这一列必须非空，否则重试会重复写入。**
 
 `event_type` 取值：
 
@@ -143,10 +160,12 @@ CREATE TABLE contract_sign_check (
 ### 2.1 当前节点
 
 ```
-当前节点 = flow 内按 seq 升序，第一个 state ∈ {PENDING, CLAIMED, BLOCKED} 的节点
+当前节点 = flow 内 state ∈ {PENDING, CLAIMED, BLOCKED} 的节点（不变量：最多一个）
 若全部 DONE → 流程待 COMPLETE
 若无 RUNNING 的 flow → 案件无进行中流程
 ```
+
+**不需要"取最小 seq 兜底"**——`WAITING` 只表示未到达，`PENDING` 只表示当前待办，两者的语义不重叠。若查询出现多个 `PENDING`，那是数据坏了，应当报警而不是容错。
 
 ### 2.2 当前持有者
 
@@ -157,7 +176,7 @@ holder 为空 → 待认领，展示候选组
 
 ### 2.3 时间轴（替换一期阶段条）
 
-**节点链是线性的，没有并行分支**：任何时刻只有一个活跃节点（`PENDING`/`CLAIMED`/`BLOCKED`），其余是 `DONE` 或 `VOID`。打回是回退，不是分支——它把当前节点及中间节点标 `VOID`，把目标节点重新置为 `PENDING`。
+**节点链是线性的，没有并行分支**：任何时刻只有一个活跃节点（`PENDING`/`CLAIMED`/`BLOCKED`），其余是 `DONE`、`WAITING` 或 `VOID`。打回是回退，不是分支——它把当前节点及中间节点标 `VOID`，把目标节点重新置为 `PENDING`。
 
 时间轴由两类数据合成，**统一按时间排序**：
 
@@ -233,7 +252,7 @@ WITHDRAW_REQUEST(by=user, target_node):
 当前持有者 APPROVE(withdraw_id):
   1. withdraw.state='APPROVED', decided_by, decided_at
   2. 当前 flow.state='CANCELLED', end_reason='WITHDRAWN'
-  3. 新建 flow: round_no+1、parent_flow_id=旧 flow.id、start_node=申请人所在节点、
+  3. 新建 flow: round_no+1、parent_flow_id=旧 flow.id、**start_node = 撤回申请中指定的 target_node**、
      version_id=当前最新版本、baseline_json=当前要素快照
   4. 从 start_node 起建节点链，start_node 之前的节点直接置 DONE（不重复劳动）
   5. 写事件 WITHDRAW_APPROVE（记在旧 flow）与 FLOW_START（记在新 flow）
@@ -349,7 +368,7 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | POST | `/api/flows/cases/{caseId}/start` | 开启一轮流程（校验同版本未取消） |
 | GET | `/api/flows/cases/{caseId}/current` | 当前轮 + 当前节点 + 持有者 |
 | GET | `/api/flows/cases/{caseId}/timeline` | 时间轴，`?cursor=&limit=50` 游标分页；返回里程碑 + 事件 |
-| POST | `/api/flows/nodes/{nodeId}/claim` | 认领 |
+| POST | `/api/flows/nodes/{nodeId}/claim` | 认领（`?force=true` 仅 ADMIN，写 `ADMIN_OVERRIDE`） |
 | POST | `/api/flows/nodes/{nodeId}/release` | 放回（含超时放回） |
 | POST | `/api/flows/nodes/{nodeId}/approve` | 通过 |
 | POST | `/api/flows/nodes/{nodeId}/return` | 打回，body: `{toNodeKey, reason}` |
@@ -359,8 +378,23 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | POST | `/api/flows/{flowId}/agent-rerun` | 手动触发重跑（自动触发见 §2.8） |
 | POST | `/api/flows/cases/{caseId}/sign-doc` | 上传签署件 |
 | POST | `/api/flows/sign-checks/{id}/decide` | 签署核对结论，body: `{decision}` |
+| POST | `/api/flows/cases/{caseId}/confirm-elements` | 上传人确认要素，写 `CONFIRM_ELEMENTS` |
+| POST | `/api/flows/cases/{caseId}/confirm-timeline` | 上传人确认日程，写 `CONFIRM_TIMELINE` |
+| POST | `/api/flows/cases/{caseId}/edit` | 修改实质字段，写 `EDIT`，触发 `AGENT_RERUN` |
+| POST | `/api/flows/cases/{caseId}/version` | 上传新版本 / 切换版本，写 `UPLOAD` / `VERSION_SWITCH` |
 
 **兼容**：一期 `GET /contracts/{caseId}/workflow` 保留，内部改为读 flow 派生，字段不变。
+
+### 3.1 接口 → 实施步骤（防止漏做）
+
+| 步骤 | 接口 |
+| --- | --- |
+| 第 1~2 步 | `start`（服务层已有，控制器待建） |
+| **第 3 步** | `current`、`timeline`、`confirm-elements`、`confirm-timeline`、`edit`、`version` |
+| **第 4 步** | `sign-doc`、`sign-checks/{id}/decide` |
+| **第 5 步** | `claim`（含 force）、`release`、`approve`、`return`、`withdraw`、`withdraws/{id}/decide`、`cancel`、`agent-rerun` |
+
+第 3 步之所以要带 `confirm-*` / `edit` / `version`：**没有它们，时间轴里 `CONFIRM_*`、`EDIT`、`UPLOAD` 三类事件在真实环境永远是空的**，页面做出来是个空壳。
 
 ## 4. 签署件比对规则
 
@@ -395,8 +429,10 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | LEGAL_APPROVAL | 法务组成员（新增 `flow_role_member`：`role_code='LEGAL'`） | 新表 |
 
 - 成员角色 `OWNER/EDITOR/REVIEWER/VIEWER` 与流程角色是**两套**，不互相推导
-- `ADMIN` 永远是兜底候选人（候选组为空时由管理员处理）
-- 候选组为空 → 提交被阻断，接口返回 `NO_APPROVER`，页面提示"请管理员配置该部门审批人"
+- **候选组为空 → 提交被阻断**，接口返回 `NO_APPROVER`，页面提示"请管理员配置该部门审批人"
+- **`ADMIN` 不是默认候选人**，不参与候选组回落。它只有"**强制认领**"能力：`POST /nodes/{id}/claim?force=true`，仅 ADMIN 可调，必须写 `ADMIN_OVERRIDE` 事件，时间轴上可见
+
+> 早期版本写的是"ADMIN 永远是兜底候选人"，与"候选组为空即阻断"互相矛盾，已废弃。原因是：一旦回落，管理员会变成所有部门的默认审批人，等于取消部门审批。宁可卡住，也不要静默降级。
 
 ## 6. 迁移
 
@@ -445,6 +481,11 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | 10 | 通知 | **新建 `flow_notification`**（带 `user_id`、`event_id`） | `kb_notification` 无收件人；`kb_` 是知识库语义 |
 | 11 | 相似度阈值 | **98%，只标记不阻断** | 跑 20 单后按真实分布回调 |
 | 12 | 测试 | **flow 相关用 Testcontainers 真 MySQL** | `pending_flag` 生成列 + JSON 在 H2 下不保证兼容，而它正是并发保障的核心 |
+| 13 | 节点状态 | **新增 `WAITING`**，`PENDING` 任何时刻最多一个 | 否则建链时多个 `PENDING` 并存，靠"取最小 seq"兜底，时间轴推导会错 |
+| 14 | 候选组为空 | **阻断（`NO_APPROVER`），不回落 ADMIN** | 回落等于让管理员成为所有部门默认审批人；ADMIN 只有"强制认领"并有 `ADMIN_OVERRIDE` 留痕 |
+| 15 | `event.node_id` | **`NOT NULL`** + `uk_event` 真生效 | MySQL 唯一索引忽略 NULL，否则 `SIGN_CHECK` 等重试会重复写入 |
+| 16 | 撤回新轮起点 | **以撤回申请的 `target_node` 为准** | 与代码一致，比"申请人所在节点"更直接 |
+| 17 | 第 3 步范围 | **追加 `confirm-*` / `edit` / `version` 四个接口** | 否则时间轴里三类事件永远无数据 |
 
 ### 遗留待定
 

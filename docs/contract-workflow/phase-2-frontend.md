@@ -327,7 +327,7 @@ Agent 提示（仅提示，不判定）
 | `agent-front/src/components/flow/FlowTimeline.vue` | 时间轴（含里程碑、过滤、加载更多） |
 | `agent-front/src/components/flow/SignCheckPanel.vue` | 签署件核对 |
 | `agent-front/src/components/flow/FlowStatusBanner.vue` | 撤回待批 / agent 失败 / 已取消 横幅 |
-| `agent-front/src/api/flow.js` | design §3 的 13 个接口封装 |
+| `agent-front/src/api/flow.js` | design §3 的 flow 接口封装 |
 | `agent-admin/src/views/flow/ApproversView.vue` | 部门审批人配置 |
 | `agent-admin/src/views/flow/LegalMembersView.vue` | 法务组成员配置 |
 | 改造 | `ContractCaseView.vue` 引入以上组件，保留原有 `v-if` 开关 |
