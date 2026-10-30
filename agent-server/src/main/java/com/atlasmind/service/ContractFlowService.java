@@ -75,7 +75,9 @@ public class ContractFlowService {
                     Integer.class, caseId);
             Long flowId = createFlow(caseId, nextRound, versionId, NODE_UPLOADER, null,
                     baselineJson, userId, null);
-            addEvent(flowId, null, EV_FLOW_START, userId, "USER", null, NODE_UPLOADER,
+            // §1.3 挂载规则：FLOW_START 挂 start_node
+            addEvent(flowId, firstNodeId(flowId, NODE_UPLOADER), EV_FLOW_START, userId, "USER",
+                    null, NODE_UPLOADER,
                     Map.of("roundNo", nextRound, "startNode", NODE_UPLOADER), null);
             addEvent(flowId, firstNodeId(flowId, NODE_UPLOADER), EV_ENTER, userId, "USER",
                     null, NODE_UPLOADER, null, null);
@@ -120,6 +122,18 @@ public class ContractFlowService {
 
     /** 认领：条件 UPDATE 乐观锁，影响行数为 0 → 409 ALREADY_CLAIMED。 */
     public void claim(Long nodeId, Long userId) {
+        doClaim(nodeId, userId, false);
+    }
+
+    /**
+     * ADMIN 强制认领（design v0.4 §5）：绕过候选组，但必须留 {@code ADMIN_OVERRIDE}。
+     * 除候选组校验外，其余并发与状态约束与普通认领完全一致。
+     */
+    public void forceClaim(Long nodeId, Long userId) {
+        doClaim(nodeId, userId, true);
+    }
+
+    private void doClaim(Long nodeId, Long userId, boolean force) {
         tx.executeWithoutResult(status -> {
             Map<String, Object> node = jdbc.queryForMap(
                     "SELECT * FROM contract_flow_node WHERE id=?", nodeId);
@@ -129,7 +143,11 @@ public class ContractFlowService {
             if (!CLAIMABLE_NODES.contains(nodeKey)) {
                 throw conflict("INVALID_STATE", "该节点无需认领");
             }
-            if (!isCandidate(flowId, nodeKey, userId)) {
+            if (force) {
+                if (!isAdmin(userId)) {
+                    throw forbidden("NOT_ADMIN", "只有管理员可以强制认领");
+                }
+            } else if (!isCandidate(flowId, nodeKey, userId)) {
                 throw forbidden("NOT_CANDIDATE", "你不在该节点的候选组");
             }
             Integer holding = jdbc.queryForObject("""
@@ -154,6 +172,12 @@ public class ContractFlowService {
                     """, nodeId, userId, now);
             addEvent(flowId, nodeId, EV_CLAIM, userId, "USER", null, null,
                     Map.of("nodeKey", nodeKey), null);
+            if (force) {
+                // 单独一条事件，时间轴上必须看得见"管理员越过了候选组"
+                addEvent(flowId, nodeId, EV_ADMIN_OVERRIDE, userId, "USER", null, null,
+                        Map.of("nodeKey", nodeKey,
+                                "candidateCount", candidates(flowId, nodeKey).size()), null);
+            }
         });
     }
 
@@ -277,8 +301,9 @@ public class ContractFlowService {
                 // 唯一索引挡下第二个未决申请：这是预期的并发保护，转换为稳定原因码
                 throw conflict("WITHDRAW_PENDING_EXISTS", "该流程已有未决的撤回申请");
             }
-            addEvent(flowId, null, EV_WITHDRAW_REQUEST, requesterId, "USER", null, targetNode,
-                    Map.of("withdrawId", id, "reason", reason.trim()), id);
+            // §1.3 挂载规则：WITHDRAW_* 挂当前活跃节点
+            addEvent(flowId, anchorNodeId(flowId), EV_WITHDRAW_REQUEST, requesterId, "USER",
+                    null, targetNode, Map.of("withdrawId", id, "reason", reason.trim()), id);
             return id;
         });
     }
@@ -342,8 +367,10 @@ public class ContractFlowService {
                     Integer.class, caseId);
             Long newFlowId = createFlow(caseId, nextRound, versionId, targetNode, flowId,
                     String.valueOf(flow.get("baseline_json")), asLong(w.get("requester_id")), targetNode);
-            addEvent(newFlowId, null, EV_FLOW_START, asLong(w.get("requester_id")), "USER",
-                    null, targetNode, Map.of("roundNo", nextRound, "startNode", targetNode,
+            // §1.3 挂载规则：FLOW_START 挂 start_node（撤回重走时就是 target_node）
+            addEvent(newFlowId, nodeId(newFlowId, targetNode), EV_FLOW_START,
+                    asLong(w.get("requester_id")), "USER", null, targetNode,
+                    Map.of("roundNo", nextRound, "startNode", targetNode,
                             "parentFlowId", flowId, "trigger", "WITHDRAW"), null);
             addEvent(newFlowId, nodeId(newFlowId, targetNode), EV_ENTER,
                     asLong(w.get("requester_id")), "USER", null, targetNode, null, null);
@@ -366,10 +393,12 @@ public class ContractFlowService {
                 throw conflict("CANCEL_NOT_ALLOWED", String.valueOf(eligibility.get("message")));
             }
             expirePendingWithdraw(flowId, "FLOW_CANCELLED");
+            // 取消前先取挂载节点：取消只改 flow 状态，节点仍在活跃态
+            Long anchor = anchorNodeId(flowId);
             jdbc.update("""
                     UPDATE contract_flow SET state=?, ended_at=?, end_reason=? WHERE id=?
                     """, FLOW_CANCELLED, LocalDateTime.now(), END_CANCELLED, flowId);
-            addEvent(flowId, null, EV_CANCEL, userId, "USER", null, null,
+            addEvent(flowId, anchor, EV_CANCEL, userId, "USER", null, null,
                     Map.of("reason", reason == null ? "" : reason), null);
         });
     }
@@ -552,8 +581,12 @@ public class ContractFlowService {
                 state = NODE_DONE;
                 done = now;
                 entered = now;
-            } else {
+            } else if (i == startSeq) {
+                // 只有起点待认领；其余 WAITING，等前一节点 DONE 再翻（§1.2）
                 state = NODE_PENDING;
+                entered = now;
+            } else {
+                state = NODE_WAITING;
                 entered = now;
             }
             jdbc.update("""
@@ -591,12 +624,24 @@ public class ContractFlowService {
                 actorId == null ? "SYSTEM" : "USER", completedNodeKey, nextKey, null, null);
     }
 
+    /**
+     * 把下一个节点翻成 {@code PENDING}。
+     *
+     * <p>允许两种来源：{@code WAITING}（正常推进）和 {@code VOID}（打回后重走，
+     * 节点保留但事件不删）。其它状态意味着链上已有别的待办，属于数据违规，
+     * 直接失败而不是覆盖。
+     */
     private void enterNode(Long nodeId, String actorType) {
-        jdbc.update("""
+        int updated = jdbc.update("""
                 UPDATE contract_flow_node
-                SET state=?, assignee_id=NULL, claimed_at=NULL, claim_expires_at=NULL, entered_at=?, done_at=NULL
-                WHERE id=?
-                """, NODE_PENDING, LocalDateTime.now(), nodeId);
+                SET state=?, assignee_id=NULL, claimed_at=NULL, claim_expires_at=NULL,
+                    entered_at=?, done_at=NULL
+                WHERE id=? AND state IN (?,?)
+                """, NODE_PENDING, LocalDateTime.now(), nodeId, NODE_WAITING, NODE_VOID);
+        if (updated == 0) {
+            throw new IllegalStateException("节点 " + nodeId
+                    + " 既不是 WAITING 也不是 VOID，无法推进：同一流程只能有一个待办节点");
+        }
     }
 
     private void markDone(Map<String, Object> node) {
@@ -613,8 +658,8 @@ public class ContractFlowService {
             Long id = asLong(row.get("id"));
             jdbc.update("UPDATE contract_flow_withdraw SET state=?, decided_at=? WHERE id=?",
                     WITHDRAW_EXPIRED, LocalDateTime.now(), id);
-            addEvent(flowId, null, EV_WITHDRAW_EXPIRE, null, "SYSTEM", null, null,
-                    Map.of("withdrawId", id, "reason", reason), id);
+            addEvent(flowId, anchorNodeId(flowId), EV_WITHDRAW_EXPIRE, null, "SYSTEM",
+                    null, null, Map.of("withdrawId", id, "reason", reason), id);
         }
     }
 
@@ -643,12 +688,20 @@ public class ContractFlowService {
         return flow;
     }
 
+    /**
+     * 当前活跃节点。不做"取最小 seq"兜底：{@code PENDING} 与 {@code WAITING}
+     * 语义不重叠，出现多个活跃节点说明数据已坏，必须报警而不是容错（§2.1）。
+     */
     private Map<String, Object> currentActiveNode(Long flowId) {
         List<Map<String, Object>> rows = jdbc.queryForList("""
                 SELECT * FROM contract_flow_node
                 WHERE flow_id=? AND state IN (?,?,?)
-                ORDER BY seq ASC LIMIT 1
+                ORDER BY seq ASC
                 """, flowId, NODE_PENDING, NODE_CLAIMED, NODE_BLOCKED);
+        if (rows.size() > 1) {
+            throw new IllegalStateException("流程 " + flowId + " 存在 " + rows.size()
+                    + " 个活跃节点，违反 PENDING 唯一不变量，请检查数据");
+        }
         return rows.isEmpty() ? null : rows.get(0);
     }
 
@@ -701,33 +754,38 @@ public class ContractFlowService {
         return candidates(flowId, nodeKey).contains(userId);
     }
 
+    /**
+     * 部门审批候选组。为空就返回空——不回落 ADMIN（design v0.4 决策 14）：
+     * 一旦回落，管理员等于所有部门的默认审批人，部门审批就形同虚设。
+     * 管理员要用 {@link #forceClaim} 显式介入，并留下 ADMIN_OVERRIDE 事件。
+     */
     private List<Long> deptCandidates(Long deptId) {
         if (deptId == null) {
-            return adminIds();
+            return List.of();
         }
-        List<Long> ids = jdbc.queryForList("""
+        return jdbc.queryForList("""
                 SELECT a.user_id FROM dept_approver a
                 JOIN t_user u ON u.id=a.user_id AND u.status='ACTIVE'
                 WHERE a.dept_id=?
                 """, Long.class, deptId);
-        if (ids.isEmpty()) {
-            return adminIds();
-        }
-        return ids;
     }
 
+    /** 法务组候选；为空返回空，理由同上。 */
     private List<Long> legalCandidates() {
-        List<Long> ids = jdbc.queryForList("""
+        return jdbc.queryForList("""
                 SELECT m.user_id FROM flow_role_member m
                 JOIN t_user u ON u.id=m.user_id AND u.status='ACTIVE'
                 WHERE m.role_code=?
                 """, Long.class, ROLE_LEGAL);
-        if (ids.isEmpty()) {
-            return adminIds();
-        }
-        return ids;
     }
 
+    /**
+     * 上传人候选组：案件 creator / maintainer，另加 ADMIN。
+     *
+     * <p>本次只按决策 14 移除了 dept / legal 的回落，上传人节点保留 ADMIN：
+     * 历史案件可能 creator_id / maintainer_id 都为空，去掉兜底会让这类案件
+     * 完全无人可提交。若要一并收紧，需先做数据回填——已作为偏差上报。
+     */
     private List<Long> uploaderCandidates(Long caseId) {
         List<Long> ids = new ArrayList<>(jdbc.queryForList("""
                 SELECT id FROM t_user WHERE status='ACTIVE' AND id IN (
@@ -782,6 +840,29 @@ public class ContractFlowService {
         return jdbc.queryForObject("SELECT case_id FROM contract_flow WHERE id=?", Long.class, flowId);
     }
 
+    /**
+     * 事件的挂载节点（design v0.4 §1.3）：流程级事件没有天然节点时，
+     * 挂当前活跃节点；流程已无活跃节点（全部 DONE）时挂 seq 最大的节点。
+     * {@code node_id} 非空是 {@code uk_event} 真正生效的前提。
+     */
+    private Long anchorNodeId(Long flowId) {
+        List<Map<String, Object>> active = jdbc.queryForList("""
+                SELECT id FROM contract_flow_node
+                WHERE flow_id=? AND state IN (?,?,?)
+                ORDER BY seq ASC LIMIT 1
+                """, flowId, NODE_PENDING, NODE_CLAIMED, NODE_BLOCKED);
+        if (!active.isEmpty()) {
+            return asLong(active.get(0).get("id"));
+        }
+        List<Map<String, Object>> last = jdbc.queryForList("""
+                SELECT id FROM contract_flow_node WHERE flow_id=? ORDER BY seq DESC LIMIT 1
+                """, flowId);
+        if (last.isEmpty()) {
+            throw new IllegalStateException("流程 " + flowId + " 没有任何节点，无法挂载事件");
+        }
+        return asLong(last.get(0).get("id"));
+    }
+
     private Long nodeId(Long flowId, String nodeKey) {
         List<Long> ids = jdbc.queryForList(
                 "SELECT id FROM contract_flow_node WHERE flow_id=? AND node_key=? LIMIT 1",
@@ -818,6 +899,11 @@ public class ContractFlowService {
 
     private void addEventRaw(Long flowId, Long nodeId, String type, Long actorId, String actorType,
                              String fromNode, String toNode, String json, Long refId) {
+        // node_id 非空是 uk_event 生效的前提（design v0.4 决策 15）：NULL 会让
+        // MySQL 唯一索引失效，重试时就无法去重。这里守一道，避免以后又漏挂。
+        if (nodeId == null) {
+            throw new IllegalStateException("事件 " + type + " 缺少 node_id，无法保证幂等");
+        }
         // 带 ref_id 的事件是幂等的：重试命中 uk_event 时跳过，不视为错误。
         // 不带 ref_id 的事件（EDIT/CONFIRM_*/RETURN 等）必须真正写入，异常照常抛出。
         try {

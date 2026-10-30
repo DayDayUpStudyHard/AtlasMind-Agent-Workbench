@@ -17,6 +17,29 @@
 
 ---
 
+## 第 2.5 步：design v0.4 决策 13~17 落地（已完成）
+
+| 决策 | 改动 |
+| --- | --- |
+| 13 节点状态 | 新增 `WAITING`；建链只有 `start_node` 是 `PENDING`；`advanceAfter` 把下一个 `WAITING`（或打回后的 `VOID`）翻成 `PENDING`；`currentActiveNode` 去掉最小 seq 兜底，出现多个活跃节点直接抛异常 |
+| 14 候选组 | 删除 `deptCandidates` / `legalCandidates` 的 `adminIds()` 回落，为空即 `NO_APPROVER`；新增 `forceClaim`（`POST /nodes/{id}/claim?force=true`，仅 ADMIN），写 `ADMIN_OVERRIDE` |
+| 15 事件挂载 | `contract_flow_event.node_id` 改 `NOT NULL`；`FLOW_START` 挂 `start_node`，`WITHDRAW_*` / `CANCEL` 挂当前活跃节点；`addEventRaw` 对空 `node_id` 直接抛异常 |
+| 16 撤回起点 | 维持以 `target_node` 为准（原实现已如此，v0.4 确认） |
+| 17 第 3 步范围 | 记录到 design §3.1，实现待第 3 步 |
+
+`pending_rerun` 列（§1.2）第 1 步已建好，本次仅补文档。
+
+**对已有库的收紧**：`AgentWorkbenchSchemaInitializer.tightenEventNodeIdToNotNull()`
+在 `node_id` 仍可空时执行一次 `ALTER ... NOT NULL`；若存在 NULL 行则抛异常，
+不静默删除审计数据。
+
+测试：`ContractFlowServiceTest` 36 个用例通过；后端全量 107 个测试、0 失败。
+
+> 沿用决策：`uploaderCandidates` 仍保留 ADMIN 兜底（历史案件 creator/maintainer 可能为空），
+> 决策 14 只针对"部门审批 / 法务"两类节点。
+
+---
+
 ## 第 2 步：实体 / Mapper / 流程核心服务（已完成）
 
 ### 2.1 交付文件

@@ -96,11 +96,25 @@ class ContractFlowServiceTest {
                 "SELECT node_key,seq,state FROM contract_flow_node WHERE flow_id=? ORDER BY seq", flowId);
         assertThat(nodes).extracting(n -> n.get("node_key"))
                 .containsExactly("UPLOADER", "AGENT", "DEPT_APPROVAL", "LEGAL_APPROVAL", "SIGNING");
-        assertThat(nodes.get(0).get("state")).isEqualTo(NODE_PENDING);
-        assertThat(nodes.get(1).get("state")).isEqualTo(NODE_PENDING);
+        // 不变量：只有 start_node 是 PENDING，其余 WAITING（design v0.4 §1.2）
+        assertThat(nodes).extracting(n -> n.get("state"))
+                .containsExactly(NODE_PENDING, NODE_WAITING, NODE_WAITING, NODE_WAITING, NODE_WAITING);
+        assertThat(countPending(flowId)).isEqualTo(1);
         assertThat(db.jdbc().queryForObject(
                 "SELECT baseline_hash FROM contract_flow WHERE id=?", String.class, flowId))
                 .hasSize(64);
+    }
+
+    @Test
+    @DisplayName("节点链推进过程中 PENDING 始终只有一个")
+    void exactlyOnePendingThroughout() {
+        Long flowId = reachDeptApproval();
+        assertThat(countPending(flowId)).isEqualTo(1);
+        claimAndApprove(flowId, NODE_DEPT_APPROVAL, approverA);
+        assertThat(countPending(flowId)).isEqualTo(1);
+        claimAndApprove(flowId, NODE_LEGAL_APPROVAL, legalUser);
+        assertThat(countPending(flowId)).isEqualTo(1);
+        assertThat(nodeState(flowId, NODE_SIGNING)).isEqualTo(NODE_PENDING);
     }
 
     @Test
@@ -127,14 +141,41 @@ class ContractFlowServiceTest {
     }
 
     @Test
-    @DisplayName("候选组为空时提交返回 NO_APPROVER")
+    @DisplayName("候选组为空时提交返回 NO_APPROVER，即使存在 ADMIN 也不回落")
     void submitBlockedWhenNoApprover() {
+        // 关键：ADMIN 仍然存在且活跃。v0.4 决策 14 要求不回落 ADMIN。
         db.jdbc().update("DELETE FROM dept_approver");
-        db.jdbc().update("UPDATE t_user SET role='USER' WHERE role='ADMIN'");
         Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
         confirm(flowId, EV_CONFIRM_ELEMENTS, uploaderId);
         confirm(flowId, EV_CONFIRM_TIMELINE, uploaderId);
         assertReason(() -> service.submit(nodeId(flowId, NODE_UPLOADER), uploaderId), "NO_APPROVER");
+    }
+
+    @Test
+    @DisplayName("法务组为空时提交同样返回 NO_APPROVER")
+    void submitBlockedWhenNoLegalMember() {
+        db.jdbc().update("DELETE FROM flow_role_member");
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        confirm(flowId, EV_CONFIRM_ELEMENTS, uploaderId);
+        confirm(flowId, EV_CONFIRM_TIMELINE, uploaderId);
+        assertReason(() -> service.submit(nodeId(flowId, NODE_UPLOADER), uploaderId), "NO_APPROVER");
+    }
+
+    @Test
+    @DisplayName("ADMIN 可强制认领并留下 ADMIN_OVERRIDE；非管理员不行")
+    void forceClaimRequiresAdminAndLeavesTrace() {
+        // 先走到部门审批，再把白名单清空：模拟"部门没配审批人"的真实场景
+        Long flowId = reachDeptApproval();
+        db.jdbc().update("DELETE FROM dept_approver");
+        Long deptNode = nodeId(flowId, NODE_DEPT_APPROVAL);
+
+        assertReason(() -> service.forceClaim(deptNode, approverA), "NOT_ADMIN");
+        service.forceClaim(deptNode, adminId);
+
+        assertThat(nodeField(flowId, NODE_DEPT_APPROVAL, "assignee_id")).isEqualTo(adminId);
+        assertThat(countEvents(flowId, EV_ADMIN_OVERRIDE)).isEqualTo(1);
+        // 候选组仍为空：强制认领不会把 ADMIN 写进白名单
+        assertThat(service.candidates(flowId, NODE_DEPT_APPROVAL)).isEmpty();
     }
 
     @Test
@@ -143,7 +184,7 @@ class ContractFlowServiceTest {
         Long flowId = reachDeptApproval();
         Long agentNode = nodeId(flowId, NODE_AGENT);
         // 模拟 agent 正在运行（节点回到 PENDING），此时收到内容变更
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        rewindTo(flowId, NODE_AGENT);
         service.requestAgentRerun(flowId, "CONTENT_CHANGED");
 
         // 本次运行结束后因 pending_rerun 合并不推进，节点回到待跑
@@ -151,7 +192,7 @@ class ContractFlowServiceTest {
         assertThat(nodeState(flowId, NODE_AGENT)).isEqualTo(NODE_PENDING);
 
         // 回到上传人节点，旧的 CONFIRM_* 在 AGENT_RERUN 之前，不能被复用
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE flow_id=? AND node_key='UPLOADER'", flowId);
+        rewindTo(flowId, NODE_UPLOADER);
         assertReason(() -> service.submit(nodeId(flowId, NODE_UPLOADER), uploaderId), "CONFIRMATION_REQUIRED");
     }
 
@@ -240,6 +281,22 @@ class ContractFlowServiceTest {
     }
 
     @Test
+    @DisplayName("打回后重新走链：VOID 节点可被复活为 PENDING，且全程只有一个 PENDING")
+    void returnThenReplayRevivesVoidNodes() {
+        Long flowId = reachDeptApproval();
+        claimAndApprove(flowId, NODE_DEPT_APPROVAL, approverA);
+        Long legalNode = nodeId(flowId, NODE_LEGAL_APPROVAL);
+        service.claim(legalNode, legalUser);
+        service.returnTo(legalNode, legalUser, NODE_DEPT_APPROVAL, "部门再确认一下");
+        assertThat(countPending(flowId)).isEqualTo(1);
+
+        // 部门重新通过后，法务节点由 VOID 复活为 PENDING
+        claimAndApprove(flowId, NODE_DEPT_APPROVAL, approverB);
+        assertThat(nodeState(flowId, NODE_LEGAL_APPROVAL)).isEqualTo(NODE_PENDING);
+        assertThat(countPending(flowId)).isEqualTo(1);
+    }
+
+    @Test
     @DisplayName("只能打回前序节点")
     void returnTargetMustBeEarlier() {
         Long flowId = reachDeptApproval();
@@ -277,9 +334,9 @@ class ContractFlowServiceTest {
         assertThat(newFlow.get("parent_flow_id")).isEqualTo(flowId);
         assertThat(newFlow.get("start_node")).isEqualTo(NODE_UPLOADER);
         Long newFlowId = ((Number) newFlow.get("id")).longValue();
-        // 从上传人重走，因此没有前置节点需要直接置 DONE
+        // 从上传人重走：起点 PENDING，其余 WAITING
         assertThat(nodeState(newFlowId, NODE_UPLOADER)).isEqualTo(NODE_PENDING);
-        assertThat(nodeState(newFlowId, NODE_DEPT_APPROVAL)).isEqualTo(NODE_PENDING);
+        assertThat(nodeState(newFlowId, NODE_DEPT_APPROVAL)).isEqualTo(NODE_WAITING);
         // 旧轮节点不被改写
         assertThat(nodeState(flowId, NODE_LEGAL_APPROVAL)).isEqualTo(NODE_CLAIMED);
     }
@@ -301,6 +358,8 @@ class ContractFlowServiceTest {
         assertThat(nodeState(newFlowId, NODE_AGENT)).isEqualTo(NODE_DONE);
         assertThat(nodeState(newFlowId, NODE_DEPT_APPROVAL)).isEqualTo(NODE_DONE);
         assertThat(nodeState(newFlowId, NODE_LEGAL_APPROVAL)).isEqualTo(NODE_PENDING);
+        assertThat(nodeState(newFlowId, NODE_SIGNING)).isEqualTo(NODE_WAITING);
+        assertThat(countPending(newFlowId)).isEqualTo(1);
     }
 
     @Test
@@ -520,8 +579,8 @@ class ContractFlowServiceTest {
     void agentSuccessAdvancesOnce() {
         Long flowId = reachDeptApproval();
         Long agentNode = nodeId(flowId, NODE_AGENT);
-        // 恢复 agent 节点为活跃，模拟运行中
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        // 恢复 agent 节点为活跃，模拟运行中（后续节点回到 WAITING）
+        rewindTo(flowId, NODE_AGENT);
 
         service.onAgentFinished(flowId, 501L, agentNode, true, "{\"status\":\"SUCCEEDED\"}");
         assertThat(nodeState(flowId, NODE_AGENT)).isEqualTo(NODE_DONE);
@@ -538,7 +597,7 @@ class ContractFlowServiceTest {
     void agentFailureBlocksNode() {
         Long flowId = reachDeptApproval();
         Long agentNode = nodeId(flowId, NODE_AGENT);
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        rewindTo(flowId, NODE_AGENT);
         service.onAgentFinished(flowId, 502L, agentNode, false, "{\"reason\":\"TIMEOUT\"}");
         assertThat(nodeState(flowId, NODE_AGENT)).isEqualTo(NODE_BLOCKED);
         assertThat(countEvents(flowId, EV_AGENT_FAIL)).isEqualTo(1);
@@ -549,7 +608,7 @@ class ContractFlowServiceTest {
     void rerunMergesWhileRunning() {
         Long flowId = reachDeptApproval();
         Long agentNode = nodeId(flowId, NODE_AGENT);
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        rewindTo(flowId, NODE_AGENT);
         service.requestAgentRerun(flowId, "CONTENT_CHANGED");
         service.onAgentFinished(flowId, 503L, agentNode, true, "{}");
         assertThat(nodeState(flowId, NODE_AGENT)).isEqualTo(NODE_PENDING);
@@ -607,9 +666,9 @@ class ContractFlowServiceTest {
     void eventUniqueKeyPreventsDuplicate() {
         Long flowId = reachDeptApproval();
         Long agentNode = nodeId(flowId, NODE_AGENT);
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        rewindTo(flowId, NODE_AGENT);
         service.onAgentFinished(flowId, 900L, agentNode, false, "{}");
-        db.jdbc().update("UPDATE contract_flow_node SET state='PENDING' WHERE id=?", agentNode);
+        rewindTo(flowId, NODE_AGENT);
         service.onAgentFinished(flowId, 900L, agentNode, false, "{}");
         assertThat(db.jdbc().queryForObject("""
                 SELECT COUNT(*) FROM contract_flow_event
@@ -630,6 +689,22 @@ class ContractFlowServiceTest {
         Long agentNode = nodeId(flowId, NODE_AGENT);
         service.onAgentFinished(flowId, 100L, agentNode, true, "{}");
         return flowId;
+    }
+
+    /**
+     * 把某个节点手工置回 PENDING，并把链上它之后的节点全部置回 WAITING。
+     * 用于模拟"agent 运行中 / 回到上传人"等场景，同时维持 PENDING 唯一不变量。
+     */
+    private void rewindTo(Long flowId, String nodeKey) {
+        int seq = NODE_CHAIN.indexOf(nodeKey);
+        db.jdbc().update("""
+                UPDATE contract_flow_node SET state=?, assignee_id=NULL, done_at=NULL
+                WHERE flow_id=? AND seq>?
+                """, NODE_WAITING, flowId, seq);
+        db.jdbc().update("""
+                UPDATE contract_flow_node SET state=?, assignee_id=NULL, done_at=NULL
+                WHERE flow_id=? AND node_key=?
+                """, NODE_PENDING, flowId, nodeKey);
     }
 
     private void claimAndApprove(Long flowId, String nodeKey, Long userId) {
@@ -674,6 +749,13 @@ class ContractFlowServiceTest {
                 "SELECT state FROM contract_flow_withdraw WHERE id=?", String.class, withdrawId);
     }
 
+    /** 不变量检查：同一流程内 PENDING 节点数。 */
+    private int countPending(Long flowId) {
+        return db.jdbc().queryForObject(
+                "SELECT COUNT(*) FROM contract_flow_node WHERE flow_id=? AND state=?",
+                Integer.class, flowId, NODE_PENDING);
+    }
+
     private int countEvents(Long flowId, String type) {
         return db.jdbc().queryForObject(
                 "SELECT COUNT(*) FROM contract_flow_event WHERE flow_id=? AND event_type=?",
@@ -687,11 +769,12 @@ class ContractFlowServiceTest {
                 """, Integer.class, flowId, type, refId);
     }
 
+    /** 要素/日程确认事件挂在上传人节点上（node_id 必须非空，design v0.4 §1.3）。 */
     private void confirm(Long flowId, String type, Long userId) {
         db.jdbc().update("""
-                INSERT INTO contract_flow_event(flow_id,event_type,actor_id,actor_type)
-                VALUES(?,?,?,'USER')
-                """, flowId, type, userId);
+                INSERT INTO contract_flow_event(flow_id,node_id,event_type,actor_id,actor_type)
+                VALUES(?,?,?,?,'USER')
+                """, flowId, nodeId(flowId, NODE_UPLOADER), type, userId);
     }
 
     private void assertReason(Runnable action, String expectedReason) {

@@ -24,11 +24,15 @@ public final class ContractFlowConstants {
             NODE_DEPT_APPROVAL, NODE_LEGAL_APPROVAL);
 
     // ── 节点状态 ──────────────────────────────────────────────────
+    /** 还没轮到：建链时除 start_node 外全部是这个（design v0.4 §1.2）。 */
+    public static final String NODE_WAITING = "WAITING";
+    /** 当前待认领。不变量：同一流程内任何时刻最多一个。 */
     public static final String NODE_PENDING = "PENDING";
     public static final String NODE_CLAIMED = "CLAIMED";
     public static final String NODE_DONE = "DONE";
     public static final String NODE_BLOCKED = "BLOCKED";
     public static final String NODE_VOID = "VOID";
+    /** 活跃节点：当前正在处理的那一个。 */
     public static final List<String> ACTIVE_NODE_STATES = List.of(NODE_PENDING, NODE_CLAIMED, NODE_BLOCKED);
 
     // ── 流程状态 ──────────────────────────────────────────────────
@@ -70,6 +74,8 @@ public final class ContractFlowConstants {
     public static final String EV_SIGN_UPLOAD = "SIGN_UPLOAD";
     public static final String EV_SIGN_CHECK = "SIGN_CHECK";
     public static final String EV_SIGN_DECISION = "SIGN_DECISION";
+    /** ADMIN 绕过候选组强制认领，必须留痕（design v0.4 §5）。 */
+    public static final String EV_ADMIN_OVERRIDE = "ADMIN_OVERRIDE";
 
     // ── 角色 ──────────────────────────────────────────────────────
     public static final String ROLE_LEGAL = "LEGAL";

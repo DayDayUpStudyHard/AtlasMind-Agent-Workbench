@@ -3,8 +3,9 @@
 -- and §5 (approver tables). Business logic lands in later steps; this migration
 -- only creates storage plus the two approver whitelist tables needed for seed data.
 --
--- Node chain is linear: at most one node is active (PENDING/CLAIMED/BLOCKED) per
--- flow. Events are append-only and are the single source of derived progress.
+-- Node chain is linear. Invariant (design v0.4 §1.2): at most one node is PENDING
+-- per flow, everything not yet reached is WAITING. Events are append-only and are
+-- the single source of derived progress.
 
 CREATE TABLE IF NOT EXISTS contract_flow (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -30,7 +31,7 @@ CREATE TABLE IF NOT EXISTS contract_flow_node (
     flow_id           BIGINT      NOT NULL COMMENT 'FK contract_flow.id',
     node_key          VARCHAR(32) NOT NULL COMMENT 'UPLOADER|AGENT|DEPT_APPROVAL|LEGAL_APPROVAL|SIGNING',
     seq               INT         NOT NULL COMMENT 'Order within the linear chain',
-    state             VARCHAR(16) NOT NULL COMMENT 'PENDING|CLAIMED|DONE|BLOCKED|VOID',
+    state             VARCHAR(16) NOT NULL COMMENT 'WAITING|PENDING|CLAIMED|DONE|BLOCKED|VOID',
     assignee_id       BIGINT      NULL COMMENT 'Current holder user_id',
     claimed_at        DATETIME    NULL,
     claim_expires_at  DATETIME    NULL,
@@ -45,7 +46,7 @@ CREATE TABLE IF NOT EXISTS contract_flow_node (
 CREATE TABLE IF NOT EXISTS contract_flow_event (
     id           BIGINT AUTO_INCREMENT PRIMARY KEY,
     flow_id      BIGINT      NOT NULL COMMENT 'FK contract_flow.id',
-    node_id      BIGINT      NULL COMMENT 'FK contract_flow_node.id when the event belongs to a node',
+    node_id      BIGINT      NOT NULL COMMENT 'FK contract_flow_node.id - every event must hang off a node, otherwise uk_event cannot dedupe',
     event_type   VARCHAR(32) NOT NULL COMMENT 'Enum defined in phase-2-design §1.3',
     actor_id     BIGINT      NULL,
     actor_type   VARCHAR(8)  NOT NULL COMMENT 'USER|AGENT|SYSTEM',
@@ -56,9 +57,9 @@ CREATE TABLE IF NOT EXISTS contract_flow_event (
     created_at   DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY idx_flow_time (flow_id, created_at),
     KEY idx_flow_type (flow_id, event_type, id),
-    -- MySQL unique indexes treat NULL as distinct, so this only dedupes events
-    -- that carry both a node_id and a ref_id. Events without a ref_id (EDIT,
-    -- CONFIRM_* and other repeatable actions) intentionally stay repeatable.
+    -- node_id is NOT NULL so this index really dedupes. Events without a ref_id
+    -- (EDIT, CONFIRM_* and other repeatable actions) stay repeatable because
+    -- MySQL treats NULL as distinct inside a unique index.
     UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='Append-only flow event stream';
 

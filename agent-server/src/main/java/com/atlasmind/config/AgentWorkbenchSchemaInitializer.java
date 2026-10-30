@@ -898,7 +898,7 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                 CREATE TABLE IF NOT EXISTS contract_flow_event (
                     id BIGINT AUTO_INCREMENT PRIMARY KEY,
                     flow_id BIGINT NOT NULL,
-                    node_id BIGINT NULL,
+                    node_id BIGINT NOT NULL,
                     event_type VARCHAR(32) NOT NULL,
                     actor_id BIGINT NULL,
                     actor_type VARCHAR(8) NOT NULL,
@@ -975,6 +975,10 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     KEY idx_user (user_id)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // design v0.4 #15: node_id must be NOT NULL for uk_event to dedupe. Older
+        // databases created the column as nullable, so tighten it once no NULL
+        // rows remain (there are none in practice - it was never populated).
+        tightenEventNodeIdToNotNull();
         jdbcTemplate.update("""
                 INSERT IGNORE INTO system_config (config_key, config_value)
                 VALUES ('contract.flow_v2_enabled', 'false')
@@ -988,6 +992,30 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
         addColumnIfMissing("t_operation_log", "target_label", "VARCHAR(256) DEFAULT NULL");
         addColumnIfMissing("t_operation_log", "old_value_json", "LONGTEXT");
         addColumnIfMissing("t_operation_log", "new_value_json", "LONGTEXT");
+    }
+
+    /** {@code contract_flow_event.node_id} 收紧为 NOT NULL（design v0.4 决策 15）。 */
+    private void tightenEventNodeIdToNotNull() {
+        Integer tableCount = jdbcTemplate.queryForObject("""
+                SELECT COUNT(*) FROM information_schema.TABLES
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='contract_flow_event'
+                """, Integer.class);
+        if (tableCount == null || tableCount == 0) return;
+        String nullability = jdbcTemplate.queryForObject("""
+                SELECT IS_NULLABLE FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='contract_flow_event'
+                  AND COLUMN_NAME='node_id'
+                """, String.class);
+        if (!"YES".equalsIgnoreCase(nullability)) return;
+        Integer nullRows = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM contract_flow_event WHERE node_id IS NULL", Integer.class);
+        if (nullRows != null && nullRows > 0) {
+            // Do not delete audit rows silently: leave the column nullable and
+            // surface the problem instead of hiding it.
+            throw new IllegalStateException("contract_flow_event 存在 " + nullRows
+                    + " 行 node_id IS NULL，无法收紧为 NOT NULL，请先补挂节点");
+        }
+        jdbcTemplate.execute("ALTER TABLE contract_flow_event MODIFY COLUMN node_id BIGINT NOT NULL");
     }
 
     private void addColumnIfMissing(String tableName, String columnName, String definition) {
