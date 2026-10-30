@@ -113,7 +113,7 @@
 - ③ 只采用当前主合同的 `READY_FOR_CONFIRMATION` / `CONFIRMED` 快照，已确认优先、同状态取最新。非空待确认快照的字段全部为 `CONFIRMED` / `NOT_APPLICABLE` 时，只读推导③为 `DONE`；不修改快照状态。空待确认快照不算完成。
 - `APPROVED` / `READY_TO_SIGN` / `SIGNED` / `IN_FULFILLMENT` / `EXPIRED` / `TERMINATED` 是明确的后期业务信号；即使历史案件缺新版快照，①~⑤仍只读推断已完成，避免倒退，不补写数据。
 - ⑤ OPEN 发现仅统计最近一次 `COMPLETED` / `LIMITED` 的 `CONTRACT_REVIEW` 运行，与案件详情的风险集合一致，不累计历史报告。
-- **已知缺陷（不在本期修）**：`PENDING_APPROVAL` 在现状下不可达——唯一写入点要求先处于 `NEEDS_REVISION`，而后者只能从 `PENDING_APPROVAL` 经 `/request-revision` 退回，形成循环。因此一期只展示"审批功能建设中"文案，不提供任何审批操作；修复属二期 §5.5。
+- **已知缺陷（不在本期修）**：`PENDING_APPROVAL` 在现状下不可达——唯一写入点要求先处于 `NEEDS_REVISION`，而后者只能从 `PENDING_APPROVAL` 经 `/request-revision` 退回，形成循环。因此一期只展示"审批功能建设中"文案，不提供任何审批操作；修复属二期（见 [phase-2 §3 流程模型](./phase-2-approval.md)）。
 
 ### 5.1 ⑥⑦⑧ 不读义务表（一期决定）
 

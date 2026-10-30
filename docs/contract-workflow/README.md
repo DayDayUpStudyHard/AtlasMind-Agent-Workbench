@@ -75,7 +75,7 @@
 | 期次 | 文件 | 状态 | 预估 | 依赖 |
 | --- | --- | --- | --- | --- |
 | 一期 | [phase-1-workflow-view.md](./phase-1-workflow-view.md) | **已实现、本地分层验收完成；外部 AI 完整链路未全覆盖** | 1 周 | 第 0 层 |
-| 二期 | [phase-2-approval.md](./phase-2-approval.md) | 草案（待 3 个业务答复） | 1~2 周 | 一期 + 第 2 层 |
+| 二期 | [phase-2-approval.md](./phase-2-approval.md) · [design](./phase-2-design.md) · [frontend](./phase-2-frontend.md) | 可开工（approval v0.3 · design v0.3 · frontend v0.2） | 4~6 周 | 一期 + 第 2 层 |
 | 三期 | [phase-3-fulfillment.md](./phase-3-fulfillment.md) | 草案（依赖第 1 层） | 约 2 周 | 第 1 层（与二期无先后） |
 
 **要交接给别人或别的 Agent？先给 [HANDOVER.md](./HANDOVER.md)** —— 里面有跑法、验法、红线、以及"必须停下来问人"的清单。只给 phase-1 会漏掉这些。
@@ -92,7 +92,7 @@
 | 2 | `PARSE` | 解析就绪 | 系统 | 条款可切分、页码可定位、质量可评 |
 | 3 | `ELEMENT_CONFIRM` | 要素确认 | 业务负责人 | 合同事实被业务认账 |
 | 4 | `TIMELINE_CONFIRM` | 日程确认 | 业务负责人 | 履约时间轴成立 |
-| 5 | `RISK_DISPOSAL` | 风险处置 | 法务（大额加法务负责人） | 风险有结论、有出口 |
+| 5 | `RISK_DISPOSAL` | 风险处置 | 法务 | 风险有结论、有出口 |
 | 6 | `SIGNING` | 签署 | 发起人（业务负责人协助） | 签署件归档、合同正式生效 |
 | 7 | `FULFILLMENT` | 履约跟踪 | 业务负责人 | 每条义务有证据、有结论 |
 | 8 | `ARCHIVE` | 归档续签 | 业务负责人 | 有始有终 |
@@ -110,6 +110,33 @@
 ### 4.3 两类"人"的区别
 
 `WAITING_HUMAN` 是流程正常等签字，`BLOCKED` 是出了故障等人救。两者都要显示"该谁动"，但文案与视觉必须区分，避免把故障当成正常等待。
+
+### 4.4 流程事件与阻塞码（二期起）
+
+**唯一真源**：[phase-2-design.md §1.3](./phase-2-design.md) 的事件表。本节只登记"对外可见的枚举"，新增必须先改这里再改实现。
+
+事件类型分组：
+
+| 组 | 值 |
+| --- | --- |
+| 流程 | `FLOW_START`、`COMPLETE`、`CANCEL`、`ABANDON` |
+| 节点 | `ENTER`、`CLAIM`、`RELEASE` |
+| 内容 | `UPLOAD`、`VERSION_SWITCH`、`EDIT`、`CONFIRM_ELEMENTS`、`CONFIRM_TIMELINE` |
+| Agent | `AGENT_RUN`、`AGENT_RERUN`、`AGENT_FAIL` |
+| 审批 | `APPROVE`、`RETURN` |
+| 撤回 | `WITHDRAW_REQUEST`、`WITHDRAW_APPROVE`、`WITHDRAW_REJECT`、`WITHDRAW_EXPIRE` |
+| 签署 | `SIGN_UPLOAD`、`SIGN_CHECK`、`SIGN_DECISION` |
+
+阻塞码（接口返回 `code`，前端据此显示禁用原因）：
+
+| 码 | 含义 | 前端表现 |
+| --- | --- | --- |
+| `NO_APPROVER` | 候选组为空 | 提交置灰 + "请管理员配置审批人" |
+| `CANCEL_NOT_ALLOWED` | 不满足取消条件 | 取消置灰 + 剩余时间 |
+| `ALREADY_CLAIMED` | 已被他人认领 | 409 + 刷新 |
+| `WITHDRAW_PENDING_EXISTS` | 已有未决撤回 | 409 + 提示等待 |
+| `VERSION_LOCKED` | 通过后内容锁定 | 编辑入口隐藏 |
+| `NOT_HOLDER` | 非当前持有者操作 | 按钮不渲染 |
 
 ## 5. 后续（第 3~6 层）
 
@@ -134,6 +161,7 @@
 
 - 业务方：本文件 §2 → [业务主线 PRD](../prd-contract-case-lifecycle.md)
 - **接手开发 / 另一个 Agent：[HANDOVER.md](./HANDOVER.md) → 本文件 §4 → phase-1**
+- 二期开发：先 [phase-2-approval.md](./phase-2-approval.md)（业务模型与 12 项决策）→ 再 [phase-2-design.md](./phase-2-design.md)（表结构/派生/接口/比对）→ 前端看 [phase-2-frontend.md](./phase-2-frontend.md)（页面/组件/状态矩阵/文案）
 - 评审：各期文件的「验收」章节
 
 ## 8. 变更记录
@@ -145,6 +173,10 @@
 | 2026-10-29 | v1.2 | 一期收敛：⑤ 审批只留文案（`PENDING_APPROVAL` 现状不可达）、删除 `NO_APPROVER`/`APPROVE`、`enteredAt` 可空且仅填 ①②；二期新增「阶段事件记录」交付项 |
 | 2026-10-29 | v1.3 | 阶段枚举 7 → 8：新增 `SIGNING`（签署）插入第 6 位；一期明确 ⑥⑦⑧ 不读义务表；状态→阶段映射定案 |
 | 2026-10-29 | v1.4 | 一期续实施：仅采用当前主合同的有效快照；非空待确认快照逐字段全部复核后只读推导③完成；后期业务状态兼容历史缺快照案件；OPEN 风险只计最近有效审查；低质量通过重新上传恢复（一期无人工放行 API）；任务入口明确为高级菜单 6 项 + 上下文 2 项；枚举不变，验收覆盖与环境限制见实施记录最新追加节 |
+| 2026-10-30 | v1.5 | 二期重写为 v0.3：案件集合 + 多轮事件流 + 认领式节点；取消阈值定为 6 小时；一期 8 段条去留列为待决策 |
+| 2026-10-30 | v1.6 | 二期 12 项决策全部确认（阈值废弃、全量经法务、任意打回、6 小时取消、老案件不迁移）；新增 [phase-2-design.md](./phase-2-design.md)（表结构/派生/接口/比对规则） |
+| 2026-10-30 | v1.7 | 新增 [phase-2-frontend.md](./phase-2-frontend.md)（节点条/节点卡片/时间轴/签署核对/两个配置页/状态矩阵/文案）；二期预估 2~3 周修正为 4~6 周 |
+| 2026-10-30 | v1.8 | 新增 §4.4 流程事件与阻塞码注册表、§9 两张流程表防混淆；二期补 5 项决策：撤回开新轮、agent 轮询推进、⑦⑧ 不进 flow、通知建新表、测试用 Testcontainers |
 
 ## 9. 与其它文档的关系（防混淆）
 
@@ -159,3 +191,12 @@ docs 下有两套"六层"，含义完全不同，不要混用：
 
 - [prd-contract-agent-harness-v1-migration-2026-08-14.md](../prd-contract-agent-harness-v1-migration-2026-08-14.md)：任务图编排的迁移 PRD（技术侧）
 - [../../Debug修复记录.md](../../Debug修复记录.md)：实现过程中的问题与修复记录
+
+**两张"流程表"不要混**（二期起）：
+
+| 表 | 管什么 | 谁写 |
+| --- | --- | --- |
+| `contract_analysis_workflow`（原有） | 文档解析流水线：段切分、页码、解析质量 | Python |
+| `contract_flow`（二期新增） | 人的审批链：认领、通过、打回、撤回、取消、签署 | Java |
+
+分工写死在 [phase-2-design §7.1](./phase-2-design.md)；二期不合并、不退役旧表，归一留给三期。
