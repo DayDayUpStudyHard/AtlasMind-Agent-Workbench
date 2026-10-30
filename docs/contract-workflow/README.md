@@ -75,7 +75,7 @@
 | 期次 | 文件 | 状态 | 预估 | 依赖 |
 | --- | --- | --- | --- | --- |
 | 一期 | [phase-1-workflow-view.md](./phase-1-workflow-view.md) | **已实现、本地分层验收完成；外部 AI 完整链路未全覆盖** | 1 周 | 第 0 层 |
-| 二期 | [phase-2-approval.md](./phase-2-approval.md) · [design](./phase-2-design.md) · [frontend](./phase-2-frontend.md) | 进行中（第 1~2 步已实现；approval v0.3 · design v0.5 · frontend v0.2） | 4~6 周 | 一期 + 第 2 层 |
+| 二期 | [phase-2-approval.md](./phase-2-approval.md) · [design](./phase-2-design.md) · [frontend](./phase-2-frontend.md) | 进行中（第 1~2 步已实现；approval v0.3 · design v0.6 · frontend v0.2） | 4~6 周 | 一期 + 第 2 层 |
 | 三期 | [phase-3-fulfillment.md](./phase-3-fulfillment.md) | 草案（依赖第 1 层） | 约 2 周 | 第 1 层（与二期无先后） |
 
 **要交接给别人或别的 Agent？先给 [HANDOVER.md](./HANDOVER.md)** —— 里面有跑法、验法、红线、以及"必须停下来问人"的清单。只给 phase-1 会漏掉这些。
@@ -179,6 +179,7 @@
 | 2026-10-30 | v1.8 | 新增 §4.4 流程事件与阻塞码注册表、§9 两张流程表防混淆；二期补 5 项决策：撤回开新轮、agent 轮询推进、⑦⑧ 不进 flow、通知建新表、测试用 Testcontainers |
 | 2026-10-30 | v1.9 | design v0.4 回应第 1~2 步实现自查：新增节点状态 `WAITING`（`PENDING` 唯一）、候选组空不再回落 ADMIN、`event.node_id` 改 `NOT NULL`、撤回新轮起点以 `target_node` 为准、第 3 步范围追加 4 个接口并给出「接口→步骤」映射 |
 | 2026-10-30 | v2.0 | design v0.5：UPLOADER 候选组允许回落 ADMIN（须写 `ADMIN_OVERRIDE`），审批节点仍阻断；撤回新轮只从 `start_node` 建链；事件分页改 `(created_at, id)` 联合游标 |
+| 2026-10-30 | v2.1 | design v0.6：①② 里程碑改回一期口径（不再从 flow 事件推）、`version` 只登记切换、`edit` 由后端比对 `baseline_json`、`confirm-*` 代码级幂等、`timeline` 默认跨轮分组（决策 20~24） |
 
 ## 9. 与其它文档的关系（防混淆）
 
