@@ -1,7 +1,7 @@
-# 二期技术设计（v0.4）
+# 二期技术设计（v0.5）
 
 > 日期：2026-10-30
-> 状态：**可开工**（19 项决策已定；第 1~2 步已实现，v0.4 回应实现自查的 8 项差异）
+> 状态：**可开工**（19 项决策；第 1~2 步已实现并自检通过，v0.5 补 UPLOADER 回落规则与新轮建链方式）
 > 上游：业务模型见 [phase-2-approval.md](./phase-2-approval.md) §3；本文只解决"怎么落地"
 > 前提：金额阈值已废弃——**所有合同都必须经法务**；老案件不迁移；节点链线性无分支
 
@@ -257,6 +257,12 @@ WITHDRAW_REQUEST(by=user, target_node):
   4. 从 start_node 起建节点链，start_node 之前的节点直接置 DONE（不重复劳动）
   5. 写事件 WITHDRAW_APPROVE（记在旧 flow）与 FLOW_START（记在新 flow）
 
+**新轮的节点链只从 `start_node` 建起，不建前置节点**（2026-10-30 定）：
+
+- 前置节点的"完成"发生在上一轮，若在新轮里再建一遍并标 `DONE`，`done_at` 要么是假的（填当前时间），要么是空的（违反约束）
+- 不建即无假数据；前端把缺的前几段显示为「上一轮已完成」，而不是"本轮已完成"
+- `seq` 沿用 `NODE_CHAIN` 的原始序号，保证顺序不变
+
 当前持有者 REJECT(withdraw_id):
   withdraw.state='REJECTED'；写事件 WITHDRAW_REJECT；流程状态不变
 
@@ -367,7 +373,7 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | --- | --- | --- |
 | POST | `/api/flows/cases/{caseId}/start` | 开启一轮流程（校验同版本未取消） |
 | GET | `/api/flows/cases/{caseId}/current` | 当前轮 + 当前节点 + 持有者 |
-| GET | `/api/flows/cases/{caseId}/timeline` | 时间轴，`?cursor=&limit=50` 游标分页；返回里程碑 + 事件 |
+| GET | `/api/flows/cases/{caseId}/timeline` | 时间轴，`?cursor=&limit=50`；游标为 `(created_at, id)`，见决策 19 |
 | POST | `/api/flows/nodes/{nodeId}/claim` | 认领（`?force=true` 仅 ADMIN，写 `ADMIN_OVERRIDE`） |
 | POST | `/api/flows/nodes/{nodeId}/release` | 放回（含超时放回） |
 | POST | `/api/flows/nodes/{nodeId}/approve` | 通过 |
@@ -422,17 +428,25 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 
 ## 5. 权限与角色映射
 
-| 节点 | 谁可以进候选组 | 来源 |
-| --- | --- | --- |
-| UPLOADER / SIGNING | 案件 creator_id、maintainer_id | `contract_case` |
-| DEPT_APPROVAL | 该部门审批人（新增 `dept_approver` 白名单：`dept_id + user_id`） | 新表 |
-| LEGAL_APPROVAL | 法务组成员（新增 `flow_role_member`：`role_code='LEGAL'`） | 新表 |
+| 节点 | 谁可以进候选组 | 来源 | 候选组为空时 |
+| --- | --- | --- | --- |
+| UPLOADER / SIGNING | 案件 `creator_id`、`maintainer_id` | `contract_case` | **回落 ADMIN**，见下 |
+| DEPT_APPROVAL | 该部门审批人（`dept_approver` 白名单：`dept_id + user_id`） | 新表 | **阻断** `NO_APPROVER` |
+| LEGAL_APPROVAL | 法务组成员（`flow_role_member`：`role_code='LEGAL'`） | 新表 | **阻断** `NO_APPROVER` |
 
 - 成员角色 `OWNER/EDITOR/REVIEWER/VIEWER` 与流程角色是**两套**，不互相推导
-- **候选组为空 → 提交被阻断**，接口返回 `NO_APPROVER`，页面提示"请管理员配置该部门审批人"
-- **`ADMIN` 不是默认候选人**，不参与候选组回落。它只有"**强制认领**"能力：`POST /nodes/{id}/claim?force=true`，仅 ADMIN 可调，必须写 `ADMIN_OVERRIDE` 事件，时间轴上可见
+- **`DEPT_APPROVAL` / `LEGAL_APPROVAL` 候选组为空 → 提交被阻断**，返回 `NO_APPROVER`，页面提示"请管理员配置该部门审批人"
+- **`ADMIN` 不是审批节点的候选人**，不参与这两个节点的回落。它只有"**强制认领**"能力：`POST /nodes/{id}/claim?force=true`，仅 ADMIN 可调，必须写 `ADMIN_OVERRIDE` 事件，时间轴上可见
 
 > 早期版本写的是"ADMIN 永远是兜底候选人"，与"候选组为空即阻断"互相矛盾，已废弃。原因是：一旦回落，管理员会变成所有部门的默认审批人，等于取消部门审批。宁可卡住，也不要静默降级。
+
+**UPLOADER 为什么例外**：
+
+- 它**不是审批**，是录入。管理员代提交不等于替人做决策
+- 历史案件可能有 `creator_id` / `maintainer_id` 都为空的孤儿数据，不回落就**完全没有入口**，只能靠 SQL 修数据
+- 但**必须留痕**：管理员以非 owner 身份在 `UPLOADER` / `SIGNING` 节点操作（含通过回落路径获得候选资格）时，一律写 `ADMIN_OVERRIDE` 事件，`payload.reason = CANDIDATE_FALLBACK`
+
+两类回落的差别：**审批节点回落 = 业务规则失效；录入节点回落 = 修数据缺陷。** 前者禁止，后者允许但必须可追溯。
 
 ## 6. 迁移
 
@@ -482,10 +496,12 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | 11 | 相似度阈值 | **98%，只标记不阻断** | 跑 20 单后按真实分布回调 |
 | 12 | 测试 | **flow 相关用 Testcontainers 真 MySQL** | `pending_flag` 生成列 + JSON 在 H2 下不保证兼容，而它正是并发保障的核心 |
 | 13 | 节点状态 | **新增 `WAITING`**，`PENDING` 任何时刻最多一个 | 否则建链时多个 `PENDING` 并存，靠"取最小 seq"兜底，时间轴推导会错 |
-| 14 | 候选组为空 | **阻断（`NO_APPROVER`），不回落 ADMIN** | 回落等于让管理员成为所有部门默认审批人；ADMIN 只有"强制认领"并有 `ADMIN_OVERRIDE` 留痕 |
+| 14 | 候选组为空 | **审批节点（DEPT/LEGAL）阻断、不回落 ADMIN；UPLOADER 允许回落但必须写 `ADMIN_OVERRIDE`** | 审批回落等于让管理员成为所有部门默认审批人；录入回落只是给孤儿数据一个入口，留痕即可 |
 | 15 | `event.node_id` | **`NOT NULL`** + `uk_event` 真生效 | MySQL 唯一索引忽略 NULL，否则 `SIGN_CHECK` 等重试会重复写入 |
 | 16 | 撤回新轮起点 | **以撤回申请的 `target_node` 为准** | 与代码一致，比"申请人所在节点"更直接 |
 | 17 | 第 3 步范围 | **追加 `confirm-*` / `edit` / `version` 四个接口** | 否则时间轴里三类事件永远无数据 |
+| 18 | 撤回新轮的节点链 | **只从 `start_node` 建起，不建前置节点** | 前置节点在新轮标 `DONE` 会导致 `done_at` 造假或为空 |
+| 19 | 事件分页游标 | **`(created_at, id)` 联合游标**，不用单列 `id` | 同一秒多事件（批量写入）按 `id` 翻页会漏页或重页 |
 
 ### 遗留待定
 
