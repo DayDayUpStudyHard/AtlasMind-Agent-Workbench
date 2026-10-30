@@ -162,6 +162,33 @@ class ContractFlowServiceTest {
     }
 
     @Test
+    @DisplayName("非 owner 的 ADMIN 代提交上传人节点，写 ADMIN_OVERRIDE(CANDIDATE_FALLBACK)")
+    void adminFallbackOnUploaderLeavesTrace() {
+        // 案件 creator/maintainer 是 uploader，admin 不在其中
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        confirm(flowId, EV_CONFIRM_ELEMENTS, uploaderId);
+        confirm(flowId, EV_CONFIRM_TIMELINE, uploaderId);
+        service.submit(nodeId(flowId, NODE_UPLOADER), adminId);
+
+        Map<String, Object> event = db.jdbc().queryForMap("""
+                SELECT node_id,payload_json FROM contract_flow_event
+                WHERE flow_id=? AND event_type='ADMIN_OVERRIDE' ORDER BY id DESC LIMIT 1
+                """, flowId);
+        assertThat(String.valueOf(event.get("payload_json"))).contains("CANDIDATE_FALLBACK");
+        assertThat(((Number) event.get("node_id")).longValue())
+                .isEqualTo(nodeId(flowId, NODE_UPLOADER));
+        // owner 自己提交不会产生该事件
+        assertThat(countEvents(flowId, EV_ADMIN_OVERRIDE)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("owner 正常提交上传人节点不写 ADMIN_OVERRIDE")
+    void ownerSubmitDoesNotLeaveOverride() {
+        Long flowId = reachDeptApproval();
+        assertThat(countEvents(flowId, EV_ADMIN_OVERRIDE)).isZero();
+    }
+
+    @Test
     @DisplayName("ADMIN 可强制认领并留下 ADMIN_OVERRIDE；非管理员不行")
     void forceClaimRequiresAdminAndLeavesTrace() {
         // 先走到部门审批，再把白名单清空：模拟"部门没配审批人"的真实场景
@@ -342,8 +369,8 @@ class ContractFlowServiceTest {
     }
 
     @Test
-    @DisplayName("撤回目标为法务时：上传人/agent/部门节点直接 DONE，不重复劳动")
-    void withdrawRestartFromLaterNodeMarksEarlierDone() {
+    @DisplayName("撤回目标为法务时：新轮只从法务建链，前置节点不建（决策 18）")
+    void withdrawRestartFromLaterNodeSkipsEarlierNodes() {
         Long flowId = reachDeptApproval();
         claimAndApprove(flowId, NODE_DEPT_APPROVAL, approverA);
         Long legalNode = nodeId(flowId, NODE_LEGAL_APPROVAL);
@@ -354,12 +381,15 @@ class ContractFlowServiceTest {
 
         Long newFlowId = db.jdbc().queryForObject(
                 "SELECT id FROM contract_flow WHERE case_id=? AND round_no=2", Long.class, caseId);
-        assertThat(nodeState(newFlowId, NODE_UPLOADER)).isEqualTo(NODE_DONE);
-        assertThat(nodeState(newFlowId, NODE_AGENT)).isEqualTo(NODE_DONE);
-        assertThat(nodeState(newFlowId, NODE_DEPT_APPROVAL)).isEqualTo(NODE_DONE);
+        // 前置节点在本轮不存在，不能伪造 DONE + done_at
+        assertThat(countNodes(newFlowId)).isEqualTo(2);
+        assertThat(nodeKeys(newFlowId)).containsExactly(NODE_LEGAL_APPROVAL, NODE_SIGNING);
         assertThat(nodeState(newFlowId, NODE_LEGAL_APPROVAL)).isEqualTo(NODE_PENDING);
         assertThat(nodeState(newFlowId, NODE_SIGNING)).isEqualTo(NODE_WAITING);
         assertThat(countPending(newFlowId)).isEqualTo(1);
+        // seq 沿用原始序号，顺序语义不变
+        assertThat(nodeSeq(newFlowId, NODE_LEGAL_APPROVAL)).isEqualTo(3);
+        assertThat(nodeSeq(newFlowId, NODE_SIGNING)).isEqualTo(4);
     }
 
     @Test
@@ -747,6 +777,24 @@ class ContractFlowServiceTest {
     private String withdrawState(Long withdrawId) {
         return db.jdbc().queryForObject(
                 "SELECT state FROM contract_flow_withdraw WHERE id=?", String.class, withdrawId);
+    }
+
+    private int countNodes(Long flowId) {
+        return db.jdbc().queryForObject(
+                "SELECT COUNT(*) FROM contract_flow_node WHERE flow_id=?",
+                Integer.class, flowId);
+    }
+
+    private List<String> nodeKeys(Long flowId) {
+        return db.jdbc().queryForList(
+                "SELECT node_key FROM contract_flow_node WHERE flow_id=? ORDER BY seq",
+                String.class, flowId);
+    }
+
+    private int nodeSeq(Long flowId, String nodeKey) {
+        return db.jdbc().queryForObject(
+                "SELECT seq FROM contract_flow_node WHERE flow_id=? AND node_key=?",
+                Integer.class, flowId, nodeKey);
     }
 
     /** 不变量检查：同一流程内 PENDING 节点数。 */

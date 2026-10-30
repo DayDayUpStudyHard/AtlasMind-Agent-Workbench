@@ -74,7 +74,7 @@ public class ContractFlowService {
                     "SELECT COALESCE(MAX(round_no),0)+1 FROM contract_flow WHERE case_id=?",
                     Integer.class, caseId);
             Long flowId = createFlow(caseId, nextRound, versionId, NODE_UPLOADER, null,
-                    baselineJson, userId, null);
+                    baselineJson, userId);
             // §1.3 挂载规则：FLOW_START 挂 start_node
             addEvent(flowId, firstNodeId(flowId, NODE_UPLOADER), EV_FLOW_START, userId, "USER",
                     null, NODE_UPLOADER,
@@ -97,8 +97,8 @@ public class ContractFlowService {
             if (!NODE_UPLOADER.equals(node.get("node_key"))) {
                 throw conflict("INVALID_STATE", "当前不是上传人节点");
             }
-            // 上传人节点由案件创建人/维护人持有，管理员兜底
-            requireUploader(caseIdOf(flowId), userId);
+            // 上传人节点由案件创建人/维护人持有，ADMIN 可兜底但必须留痕（决策 14）
+            boolean fallback = requireUploader(caseIdOf(flowId), userId);
             requireConfirmations(flowId);
             Long deptId = jdbc.queryForObject(
                     "SELECT department_id FROM contract_case WHERE id=?", Long.class, caseIdOf(flowId));
@@ -107,6 +107,10 @@ public class ContractFlowService {
             }
             if (legalCandidates().isEmpty()) {
                 throw conflict("NO_APPROVER", "法务组尚未配置成员，请联系管理员");
+            }
+            if (fallback) {
+                addEvent(flowId, nodeId, EV_ADMIN_OVERRIDE, userId, "USER", null, null,
+                        Map.of("nodeKey", NODE_UPLOADER, "reason", "CANDIDATE_FALLBACK"), null);
             }
             markDone(node);
             Long agentNodeId = nodeId(flowId, NODE_AGENT);
@@ -366,7 +370,7 @@ public class ContractFlowService {
                     "SELECT COALESCE(MAX(round_no),0)+1 FROM contract_flow WHERE case_id=?",
                     Integer.class, caseId);
             Long newFlowId = createFlow(caseId, nextRound, versionId, targetNode, flowId,
-                    String.valueOf(flow.get("baseline_json")), asLong(w.get("requester_id")), targetNode);
+                    String.valueOf(flow.get("baseline_json")), asLong(w.get("requester_id")));
             // §1.3 挂载规则：FLOW_START 挂 start_node（撤回重走时就是 target_node）
             addEvent(newFlowId, nodeId(newFlowId, targetNode), EV_FLOW_START,
                     asLong(w.get("requester_id")), "USER", null, targetNode,
@@ -555,8 +559,16 @@ public class ContractFlowService {
     // 内部：创建与推进
     // ══════════════════════════════════════════════════════════════
 
+    /**
+     * 建一轮的节点链。
+     *
+     * <p>决策 18：只从 {@code startNode} 起建，<b>不建前置节点</b>。
+     * 前置节点的"完成"属于上一轮，在新轮里补一行 DONE 只能填假时间或空时间，
+     * 因此宁可不建；前端把缺的前几段显示为「上一轮已完成」。
+     * {@code seq} 仍沿用 {@code NODE_CHAIN} 的原始下标，保证顺序语义不变。
+     */
     private Long createFlow(Long caseId, Integer roundNo, Long versionId, String startNode,
-                            Long parentFlowId, String baselineJson, Long startedBy, String restartFrom) {
+                            Long parentFlowId, String baselineJson, Long startedBy) {
         String baseline = baselineJson == null ? "{}" : baselineJson;
         String hash = sha256(baseline);
         LocalDateTime now = LocalDateTime.now();
@@ -570,30 +582,15 @@ public class ContractFlowService {
         Long flowId = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
 
         int startSeq = seqOf(startNode);
-        for (int i = 0; i < NODE_CHAIN.size(); i++) {
+        for (int i = startSeq; i < NODE_CHAIN.size(); i++) {
             String key = NODE_CHAIN.get(i);
-            String state;
-            Long assignee = null;
-            LocalDateTime entered;
-            LocalDateTime done = null;
-            if (restartFrom != null && i < startSeq) {
-                // 撤回重走：目标节点之前的节点不重复劳动，直接 DONE
-                state = NODE_DONE;
-                done = now;
-                entered = now;
-            } else if (i == startSeq) {
-                // 只有起点待认领；其余 WAITING，等前一节点 DONE 再翻（§1.2）
-                state = NODE_PENDING;
-                entered = now;
-            } else {
-                state = NODE_WAITING;
-                entered = now;
-            }
+            // 起点待认领，后续节点等前一节点 DONE 再翻（§1.2）
+            String state = i == startSeq ? NODE_PENDING : NODE_WAITING;
             jdbc.update("""
                     INSERT INTO contract_flow_node
                     (flow_id,node_key,seq,state,assignee_id,candidate_group,entered_at,done_at,pending_rerun)
                     VALUES(?,?,?,?,?,?,?,?,0)
-                    """, flowId, key, i, state, assignee, candidateGroupOf(caseId, key), entered, done);
+                    """, flowId, key, i, state, (Long) null, candidateGroupOf(caseId, key), now, null);
         }
         return flowId;
     }
@@ -737,17 +734,24 @@ public class ContractFlowService {
         }
     }
 
-    private void requireUploader(Long caseId, Long userId) {
-        if (isAdmin(userId)) {
-            return;
-        }
+    /**
+     * 上传人/签署节点的操作权校验。
+     *
+     * @return {@code true} 表示走了 ADMIN 回落（调用方必须写 ADMIN_OVERRIDE）
+     */
+    private boolean requireUploader(Long caseId, Long userId) {
         Integer count = jdbc.queryForObject("""
                 SELECT COUNT(*) FROM contract_case
                 WHERE id=? AND (creator_id=? OR maintainer_id=?)
                 """, Integer.class, caseId, userId, userId);
-        if (count == null || count == 0) {
-            throw forbidden("NOT_CANDIDATE", "只有上传人可以操作该节点");
+        if (count != null && count > 0) {
+            return false;
         }
+        // 非 owner：只有 ADMIN 能走回落，且不算作正常候选资格（决策 14）
+        if (isAdmin(userId)) {
+            return true;
+        }
+        throw forbidden("NOT_CANDIDATE", "只有上传人可以操作该节点");
     }
 
     private boolean isCandidate(Long flowId, String nodeKey, Long userId) {

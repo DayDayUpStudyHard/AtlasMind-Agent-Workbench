@@ -38,6 +38,16 @@
 > 沿用决策：`uploaderCandidates` 仍保留 ADMIN 兜底（历史案件 creator/maintainer 可能为空），
 > 决策 14 只针对"部门审批 / 法务"两类节点。
 
+### 2.5.1 design v0.5 追加（已完成）
+
+| 决策 | 改动 |
+| --- | --- |
+| 14（收窄） | UPLOADER / SIGNING 允许 ADMIN 回落，但 `submit` 走回落时写 `ADMIN_OVERRIDE`，`payload.reason=CANDIDATE_FALLBACK`；审批节点仍禁止回落 |
+| 18 新轮建链 | `createFlow` 只从 `start_node` 起建节点，前置节点不再在新轮伪造 `DONE`（否则 `done_at` 造假或为空）；`seq` 沿用 `NODE_CHAIN` 原始下标 |
+| 19 游标 | `(created_at, id)` 联合游标，第 3 步实现 timeline 时落地 |
+
+测试：`ContractFlowServiceTest` 38 个用例通过；后端全量 109 个测试、0 失败。
+
 ---
 
 ## 第 2 步：实体 / Mapper / 流程核心服务（已完成）
