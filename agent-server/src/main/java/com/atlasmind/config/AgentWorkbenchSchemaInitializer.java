@@ -853,6 +853,132 @@ public class AgentWorkbenchSchemaInitializer implements CommandLineRunner {
                     INDEX idx_case_role (case_id, role)
                 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
                 """);
+        // ── Phase 2 approval flow schema (docs/contract-workflow/phase-2-design.md) ──
+        // The versioned migration V041 owns the canonical DDL; these statements
+        // keep Java-only boots working regardless of service start order.
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_flow (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    case_id BIGINT NOT NULL,
+                    round_no INT NOT NULL,
+                    state VARCHAR(16) NOT NULL DEFAULT 'RUNNING',
+                    version_id BIGINT NOT NULL,
+                    start_node VARCHAR(32) NOT NULL DEFAULT 'UPLOADER',
+                    parent_flow_id BIGINT NULL,
+                    baseline_json JSON NOT NULL,
+                    baseline_hash CHAR(64) NOT NULL,
+                    agent_run_id BIGINT NULL,
+                    started_by BIGINT NULL,
+                    started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    ended_at DATETIME NULL,
+                    end_reason VARCHAR(64) NULL,
+                    UNIQUE KEY uk_case_round (case_id, round_no),
+                    KEY idx_case (case_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_flow_node (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    flow_id BIGINT NOT NULL,
+                    node_key VARCHAR(32) NOT NULL,
+                    seq INT NOT NULL,
+                    state VARCHAR(16) NOT NULL,
+                    assignee_id BIGINT NULL,
+                    claimed_at DATETIME NULL,
+                    claim_expires_at DATETIME NULL,
+                    candidate_group VARCHAR(64) NULL,
+                    entered_at DATETIME NOT NULL,
+                    done_at DATETIME NULL,
+                    pending_rerun TINYINT NOT NULL DEFAULT 0,
+                    UNIQUE KEY uk_flow_node (flow_id, node_key, seq),
+                    KEY idx_flow_state (flow_id, state)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_flow_event (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    flow_id BIGINT NOT NULL,
+                    node_id BIGINT NULL,
+                    event_type VARCHAR(32) NOT NULL,
+                    actor_id BIGINT NULL,
+                    actor_type VARCHAR(8) NOT NULL,
+                    from_node VARCHAR(32) NULL,
+                    to_node VARCHAR(32) NULL,
+                    payload_json JSON NULL,
+                    ref_id BIGINT NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    KEY idx_flow_time (flow_id, created_at),
+                    KEY idx_flow_type (flow_id, event_type, id),
+                    UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_flow_claim (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    node_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    claimed_at DATETIME NOT NULL,
+                    released_at DATETIME NULL,
+                    release_reason VARCHAR(32) NULL,
+                    KEY idx_node (node_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_flow_withdraw (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    flow_id BIGINT NOT NULL,
+                    requester_id BIGINT NOT NULL,
+                    target_node VARCHAR(32) NOT NULL,
+                    reason VARCHAR(512) NOT NULL,
+                    state VARCHAR(16) NOT NULL DEFAULT 'PENDING',
+                    pending_flag TINYINT GENERATED ALWAYS AS (IF(state='PENDING', 1, NULL)) STORED,
+                    decided_by BIGINT NULL,
+                    decided_at DATETIME NULL,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_flow_pending (flow_id, pending_flag),
+                    KEY idx_flow (flow_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS contract_sign_check (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    flow_id BIGINT NOT NULL,
+                    version_id BIGINT NOT NULL,
+                    signed_doc_id BIGINT NOT NULL,
+                    rule_result_json JSON NULL,
+                    agent_result_json JSON NULL,
+                    verdict VARCHAR(16) NOT NULL,
+                    decided_by BIGINT NULL,
+                    decision VARCHAR(16) NULL,
+                    decided_at DATETIME NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS dept_approver (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    dept_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    created_by BIGINT NULL,
+                    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_dept_user (dept_id, user_id),
+                    KEY idx_user (user_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.execute("""
+                CREATE TABLE IF NOT EXISTS flow_role_member (
+                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+                    role_code VARCHAR(32) NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    created_by BIGINT NULL,
+                    create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE KEY uk_role_user (role_code, user_id),
+                    KEY idx_user (user_id)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+                """);
+        jdbcTemplate.update("""
+                INSERT IGNORE INTO system_config (config_key, config_value)
+                VALUES ('contract.flow_v2_enabled', 'false')
+                """);
         addColumnIfMissing("kb_qa_session", "case_id",
                 "BIGINT DEFAULT NULL COMMENT '鍏宠仈鐨勫悎鍚屾浠?case_id'");
         // t_operation_log extension
