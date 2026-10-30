@@ -707,6 +707,141 @@ class ContractFlowServiceTest {
     }
 
     // ══════════════════════════════════════════════════════════════
+    // 内容类动作：confirm-* / edit / version（§3.1 第 3 步）
+    // ══════════════════════════════════════════════════════════════
+
+    @Test
+    @DisplayName("确认要素/日程：失效前重复点击幂等，只写一条事件")
+    void confirmIsIdempotentBeforeInvalidation() {
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        service.confirmElements(caseId, uploaderId);
+        service.confirmElements(caseId, uploaderId);
+        service.confirmTimeline(caseId, uploaderId);
+        service.confirmTimeline(caseId, uploaderId);
+
+        assertThat(countEvents(flowId, EV_CONFIRM_ELEMENTS)).isEqualTo(1);
+        assertThat(countEvents(flowId, EV_CONFIRM_TIMELINE)).isEqualTo(1);
+        // 两条确认都挂在上传人节点上（node_id 非空）
+        assertThat(db.jdbc().queryForObject("""
+                SELECT COUNT(*) FROM contract_flow_event
+                WHERE flow_id=? AND node_id=? AND event_type IN (?,?)
+                """, Integer.class, flowId, nodeId(flowId, NODE_UPLOADER),
+                EV_CONFIRM_ELEMENTS, EV_CONFIRM_TIMELINE)).isEqualTo(2);
+    }
+
+    @Test
+    @DisplayName("非上传人不能确认；确认齐全后可直接提交")
+    void confirmRequiresUploader() {
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        assertReason(() -> service.confirmElements(caseId, approverA), "NOT_CANDIDATE");
+
+        service.confirmElements(caseId, uploaderId);
+        service.confirmTimeline(caseId, uploaderId);
+        service.submit(nodeId(flowId, NODE_UPLOADER), uploaderId);
+        assertThat(nodeState(flowId, NODE_AGENT)).isEqualTo(NODE_PENDING);
+    }
+
+    @Test
+    @DisplayName("审批开始后不能再确认：已离开上传人节点")
+    void confirmRejectedOutsideUploaderNode() {
+        reachDeptApproval();
+        assertReason(() -> service.confirmElements(caseId, uploaderId), "INVALID_STATE");
+        assertReason(() -> service.confirmTimeline(caseId, uploaderId), "INVALID_STATE");
+    }
+
+    @Test
+    @DisplayName("修改非实质字段：写 EDIT 更新基线，但不触发重跑")
+    void editNonSubstantiveDoesNotRerun() {
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        boolean substantive = service.editContent(caseId, uploaderId,
+                Map.of("remark", "补充说明"), "校对错别字");
+
+        assertThat(substantive).isFalse();
+        assertThat(countEvents(flowId, EV_EDIT)).isEqualTo(1);
+        assertThat(countEvents(flowId, EV_AGENT_RERUN)).isZero();
+        assertThat(db.jdbc().queryForObject(
+                "SELECT baseline_json FROM contract_flow WHERE id=?", String.class, flowId))
+                .contains("remark");
+    }
+
+    @Test
+    @DisplayName("修改实质字段：更新基线、触发重跑，并让旧确认失效")
+    void editSubstantiveTriggersRerunAndInvalidatesConfirmation() {
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        service.confirmElements(caseId, uploaderId);
+        service.confirmTimeline(caseId, uploaderId);
+
+        boolean substantive = service.editContent(caseId, uploaderId,
+                Map.of("amount", 5000), "金额变更");
+
+        assertThat(substantive).isTrue();
+        assertThat(countEvents(flowId, EV_EDIT)).isEqualTo(1);
+        assertThat(countEvents(flowId, EV_AGENT_RERUN)).isEqualTo(1);
+        assertThat(db.jdbc().queryForObject("""
+                SELECT pending_rerun FROM contract_flow_node WHERE flow_id=? AND node_key=?
+                """, Integer.class, flowId, NODE_AGENT)).isEqualTo(1);
+        // EDIT 事件水位之后，之前的确认不再算数
+        assertReason(() -> service.submit(nodeId(flowId, NODE_UPLOADER), uploaderId),
+                "CONFIRMATION_REQUIRED");
+    }
+
+    @Test
+    @DisplayName("提交相同值不算修改，不写任何事件")
+    void editNoopWritesNothing() {
+        Long flowId = service.startFlow(caseId, 1L, "{\"amount\":100}", uploaderId);
+        boolean substantive = service.editContent(caseId, uploaderId, Map.of("amount", 100), null);
+
+        assertThat(substantive).isFalse();
+        assertThat(countEvents(flowId, EV_EDIT)).isZero();
+    }
+
+    @Test
+    @DisplayName("审批阶段修改被拒：必须走撤回")
+    void editRejectedAfterApprovalStarted() {
+        reachDeptApproval();
+        assertReason(() -> service.editContent(caseId, uploaderId, Map.of("amount", 1), null),
+                "NEED_WITHDRAW");
+    }
+
+    @Test
+    @DisplayName("空修改直接拒绝")
+    void editEmptyFieldsRejected() {
+        service.startFlow(caseId, 1L, "{}", uploaderId);
+        assertReason(() -> service.editContent(caseId, uploaderId, Map.of(), null),
+                "INVALID_TARGET");
+    }
+
+    @Test
+    @DisplayName("切换版本：更新 flow.version_id 并触发重跑")
+    void switchVersionUpdatesFlowAndTriggersRerun() {
+        Long flowId = service.startFlow(caseId, 1L, "{}", uploaderId);
+        db.jdbc().update(
+                "INSERT INTO contract_document(case_id,version,content_hash) VALUES(?,2,'h2')", caseId);
+
+        service.switchVersion(caseId, uploaderId, 2L, EV_VERSION_SWITCH);
+
+        assertThat(db.jdbc().queryForObject(
+                "SELECT version_id FROM contract_flow WHERE id=?", Long.class, flowId)).isEqualTo(2L);
+        assertThat(countEvents(flowId, EV_VERSION_SWITCH)).isEqualTo(1);
+        assertThat(countEvents(flowId, EV_AGENT_RERUN)).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("切换版本参数校验：非法 mode / 不存在版本")
+    void switchVersionRejectsBadInput() {
+        service.startFlow(caseId, 1L, "{}", uploaderId);
+        assertReason(() -> service.switchVersion(caseId, uploaderId, 1L, "RENAME"), "INVALID_TARGET");
+        assertReason(() -> service.switchVersion(caseId, uploaderId, 99L, EV_UPLOAD), "INVALID_TARGET");
+    }
+
+    @Test
+    @DisplayName("审批中切换版本被拒：必须走撤回")
+    void switchVersionRejectedAfterApprovalStarted() {
+        reachDeptApproval();
+        assertReason(() -> service.switchVersion(caseId, uploaderId, 1L, EV_UPLOAD), "NEED_WITHDRAW");
+    }
+
+    // ══════════════════════════════════════════════════════════════
     // helpers
     // ══════════════════════════════════════════════════════════════
 

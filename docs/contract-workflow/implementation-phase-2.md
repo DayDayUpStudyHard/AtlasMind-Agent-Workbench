@@ -113,3 +113,44 @@ FLOW_TEST_JDBC_USER=root FLOW_TEST_JDBC_PASSWORD=123456 \
 1. 签署节点完成 / `COMPLETE` 由第 4 步的签署件核对收口，本步不伪造完成。
 2. 通知（`flow_notification`）与两个配置页 API 属第 5 步。
 3. Java 轮询器本身（定时扫 `AGENT` 节点）在第 3 步接查询接口时一并接入；本步只提供 `onAgentFinished` 契约。
+
+---
+
+## 第 3 步：时间轴 / 内容类动作 / 查询接口（已完成）
+
+### 3.1 交付文件
+
+| 文件 | 内容 |
+| --- | --- |
+| `service/FlowTimelineService.java` | 里程碑派生 + 跨轮次事件游标查询 |
+| `service/ContractFlowService.java` | 新增 `confirmElements` / `confirmTimeline` / `editContent` / `switchVersion` / `current` |
+| `controller/ContractFlowController.java` | `/api/flows/cases/{caseId}/current\|timeline\|confirm-elements\|confirm-timeline\|edit\|version` |
+| `common/GlobalExceptionHandler.java` | `ContractFlowException` → `Result.fail(status, reason)` |
+| `test/.../FlowTimelineServiceTest.java` | 9 个用例 |
+| `test/.../ContractFlowServiceTest.java` | 新增 11 个内容类动作用例 |
+
+### 3.2 设计决策落地
+
+| 点 | 实现 |
+| --- | --- |
+| 里程碑 ①~⑥ | 由事件流派生；无事件时全部 INACTIVE |
+| ② 解析完成 | 流程开启即 DONE（上传动作隐含解析完成） |
+| ⑤ 边界 | `AGENT_RUN`→ACTIVE；`ENTER(DEPT/LEGAL)`→WAITING_HUMAN；`APPROVE(LEGAL)`→DONE |
+| ⑥ 签署 | `SIGN_UPLOAD`→ACTIVE；`COMPLETE`→DONE；⑦⑧ 恒 INACTIVE（第 4 步 / 第三期） |
+| 分页 | `(created_at, id)` 联合游标，`limit` 上限 100，越界游标返回 400 |
+| 跨轮次 | 查询案件全部轮次，事件带 `roundNo`，默认新轮在前 |
+| 确认幂等 | 失效水位（`AGENT_RERUN` / `EDIT` 最大 id）之后只写一条 |
+| 实质字段 | `SUBSTANTIVE_FIELDS` 变更才 `pending_rerun=1` + `AGENT_RERUN` |
+| 审批期修改 | 返回 `NEED_WITHDRAW`，不直接改基线 |
+
+### 3.3 测试结果
+
+- `FlowTimelineServiceTest`：9 / 9 通过
+- `ContractFlowServiceTest`：49 / 49 通过（新增 11 个）
+- 全量后端：129 个测试，0 失败、0 错误、0 跳过
+
+### 3.4 已知边界
+
+1. 签署件核对（`contract_sign_check`、`SIGN_*` 事件）属第 4 步。
+2. 剩余写接口（claim/release/approve/return/withdraw/cancel/agent-rerun）随第 5 步一起暴露。
+3. `version` 只更新 `flow.version_id` 并记事件，文件落盘仍由既有 document 上传接口负责。

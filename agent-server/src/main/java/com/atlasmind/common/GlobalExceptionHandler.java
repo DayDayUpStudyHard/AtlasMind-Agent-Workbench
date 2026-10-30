@@ -5,6 +5,7 @@ import cn.dev33.satoken.exception.NotRoleException;
 import cn.dev33.satoken.exception.NotLoginException;
 import jakarta.validation.ConstraintViolation;
 import jakarta.validation.ConstraintViolationException;
+import com.atlasmind.service.ContractFlowException;
 import com.atlasmind.service.QuotaService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -112,6 +113,15 @@ public class GlobalExceptionHandler {
     @ResponseStatus(HttpStatus.BAD_REQUEST)
     public Result<?> handleIllegalState(IllegalStateException e) {
         return Result.fail(e.getMessage());
+    }
+
+    /**
+     * 流程动作被拒绝：原因码与 HTTP 状态由异常自带（design §2.4 / §2.10 / §2.11 / §5）。
+     */
+    @ExceptionHandler(ContractFlowException.class)
+    public org.springframework.http.ResponseEntity<Result<?>> handleFlowException(ContractFlowException e) {
+        return org.springframework.http.ResponseEntity.status(e.getStatus())
+                .body(Result.fail(e.getStatus(), e.getReason() + ": " + e.getMessage()));
     }
 
     @ExceptionHandler(QuotaService.QuotaExceededException.class)

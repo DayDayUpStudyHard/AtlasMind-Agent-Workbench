@@ -541,6 +541,209 @@ public class ContractFlowService {
         return out;
     }
 
+    // ══════════════════════════════════════════════════════════════
+    // 内容类动作（§3.1 第 3 步：confirm-* / edit / version）
+    // ══════════════════════════════════════════════════════════════
+
+    /** 实质字段清单（§2.8）：变了才触发 agent 重跑。 */
+    public static final List<String> SUBSTANTIVE_FIELDS = List.of(
+            "amount", "currency", "partyA", "partyB", "startDate", "endDate",
+            "paymentTerms", "breachClause", "liabilityCap");
+
+    /** 上传人确认合同要素；重复确认在失效前幂等。 */
+    public void confirmElements(Long caseId, Long userId) {
+        confirmUploaderNode(caseId, userId, EV_CONFIRM_ELEMENTS);
+    }
+
+    /** 上传人确认履约日程；重复确认在失效前幂等。 */
+    public void confirmTimeline(Long caseId, Long userId) {
+        confirmUploaderNode(caseId, userId, EV_CONFIRM_TIMELINE);
+    }
+
+    private void confirmUploaderNode(Long caseId, Long userId, String eventType) {
+        tx.executeWithoutResult(status -> {
+            Map<String, Object> flow = requireRunningFlowOfCase(caseId);
+            Long flowId = asLong(flow.get("id"));
+            Map<String, Object> node = requireUploaderNode(flowId, "只有在上传人节点才能确认");
+            boolean fallback = requireUploader(caseId, userId);
+            // 幂等：失效水位之后已经确认过就不再追加事件，避免重复点击堆记录
+            Integer existing = jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM contract_flow_event
+                    WHERE flow_id=? AND event_type=? AND id>?
+                    """, Integer.class, flowId, eventType, lastConfirmationInvalidationId(flowId));
+            if (existing != null && existing > 0) {
+                return;
+            }
+            Long anchor = asLong(node.get("id"));
+            addEvent(flowId, anchor, eventType, userId, "USER", null, null, null, null);
+            if (fallback) {
+                addEvent(flowId, anchor, EV_ADMIN_OVERRIDE, userId, "USER", null, null,
+                        Map.of("nodeKey", NODE_UPLOADER, "reason", "CANDIDATE_FALLBACK"), null);
+            }
+        });
+    }
+
+    /**
+     * 修改实质字段（§2.7）。只允许在 UPLOADER / AGENT 节点发生；
+     * 审批开始后必须走撤回流程。变更摘要与前后值写入 EDIT 事件。
+     *
+     * @return 是否有实质字段发生变化（决定是否触发 agent 重跑）
+     */
+    public boolean editContent(Long caseId, Long userId, Map<String, Object> fields, String reason) {
+        if (fields == null || fields.isEmpty()) {
+            throw conflict("INVALID_TARGET", "没有要修改的字段");
+        }
+        return tx.execute(status -> {
+            Map<String, Object> flow = requireRunningFlowOfCase(caseId);
+            Long flowId = asLong(flow.get("id"));
+            Map<String, Object> node = requireEditableNode(flowId);
+            boolean fallback = requireUploader(caseId, userId);
+
+            Map<String, Object> before = parseJsonMap(String.valueOf(flow.get("baseline_json")));
+            Map<String, Object> after = new LinkedHashMap<>(before);
+            Map<String, Object> changed = new LinkedHashMap<>();
+            boolean substantive = false;
+            for (Map.Entry<String, Object> e : fields.entrySet()) {
+                String key = e.getKey();
+                Object oldValue = before.get(key);
+                Object newValue = e.getValue();
+                if (java.util.Objects.equals(String.valueOf(oldValue), String.valueOf(newValue))) {
+                    continue;
+                }
+                after.put(key, newValue);
+                Map<String, Object> diff = new LinkedHashMap<>();
+                diff.put("from", oldValue);
+                diff.put("to", newValue);
+                changed.put(key, diff);
+                if (SUBSTANTIVE_FIELDS.contains(key)) {
+                    substantive = true;
+                }
+            }
+            if (changed.isEmpty()) {
+                return false;
+            }
+            String baseline = toJson(after);
+            jdbc.update("""
+                    UPDATE contract_flow SET baseline_json=?, baseline_hash=? WHERE id=?
+                    """, baseline, sha256(baseline), flowId);
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("changed", changed);
+            payload.put("substantive", substantive);
+            payload.put("reason", reason == null ? "" : reason);
+            addEvent(flowId, asLong(node.get("id")), EV_EDIT, userId, "USER", null, null,
+                    payload, null);
+            if (fallback) {
+                Long anchor = asLong(node.get("id"));
+                addEvent(flowId, anchor, EV_ADMIN_OVERRIDE, userId, "USER", null, null,
+                        Map.of("nodeKey", String.valueOf(node.get("node_key")),
+                                "reason", "CANDIDATE_FALLBACK"), null);
+            }
+            if (substantive) {
+                triggerRerun(flowId, asLong(node.get("id")), "CONTENT_CHANGED");
+            }
+            return substantive;
+        });
+    }
+
+    /**
+     * 上传新版本 / 切换版本。只记录事件并更新 {@code flow.version_id}，
+     * 文件本身由既有 document 上传接口负责。审批已开始后必须走撤回。
+     */
+    public void switchVersion(Long caseId, Long userId, Long versionId, String mode) {
+        if (versionId == null) {
+            throw conflict("INVALID_TARGET", "缺少版本号");
+        }
+        if (!EV_UPLOAD.equals(mode) && !EV_VERSION_SWITCH.equals(mode)) {
+            throw conflict("INVALID_TARGET", "mode 只能是 UPLOAD 或 VERSION_SWITCH");
+        }
+        tx.executeWithoutResult(status -> {
+            Map<String, Object> flow = requireRunningFlowOfCase(caseId);
+            Long flowId = asLong(flow.get("id"));
+            Map<String, Object> node = requireEditableNode(flowId);
+            boolean fallback = requireUploader(caseId, userId);
+            Integer exists = jdbc.queryForObject("""
+                    SELECT COUNT(*) FROM contract_document
+                    WHERE case_id=? AND version=? AND deleted=0
+                    """, Integer.class, caseId, versionId);
+            if (exists == null || exists == 0) {
+                throw conflict("INVALID_TARGET", "该版本不存在");
+            }
+            Long previous = asLong(flow.get("version_id"));
+            jdbc.update("UPDATE contract_flow SET version_id=? WHERE id=?", versionId, flowId);
+            Long anchor = asLong(node.get("id"));
+            addEvent(flowId, anchor, mode, userId, "USER", null, null,
+                    Map.of("fromVersion", previous, "toVersion", versionId), null);
+            if (fallback) {
+                addEvent(flowId, anchor, EV_ADMIN_OVERRIDE, userId, "USER", null, null,
+                        Map.of("nodeKey", String.valueOf(node.get("node_key")),
+                                "reason", "CANDIDATE_FALLBACK"), null);
+            }
+            if (previous == null || !previous.equals(versionId)) {
+                triggerRerun(flowId, anchor, "NEW_VERSION");
+            }
+        });
+    }
+
+    /** AGENT 节点合并重跑：运行中置标志，待跑则直接追加 AGENT_RERUN。 */
+    private void triggerRerun(Long flowId, Long anchorNodeId, String trigger) {
+        Long agentNodeId = nodeId(flowId, NODE_AGENT);
+        if (agentNodeId == null) {
+            return;
+        }
+        jdbc.update("UPDATE contract_flow_node SET pending_rerun=1 WHERE id=? AND state<>?",
+                agentNodeId, NODE_DONE);
+        addEvent(flowId, anchorNodeId, EV_AGENT_RERUN, null, "SYSTEM", null, null,
+                Map.of("trigger", trigger), null);
+    }
+
+    /** 当前流程必须处于可编辑的节点（UPLOADER / AGENT），否则提示走撤回。 */
+    private Map<String, Object> requireEditableNode(Long flowId) {
+        Map<String, Object> node = currentActiveNode(flowId);
+        if (node == null) {
+            throw conflict("INVALID_STATE", "流程没有活跃节点");
+        }
+        String key = String.valueOf(node.get("node_key"));
+        if (!NODE_UPLOADER.equals(key) && !NODE_AGENT.equals(key)) {
+            throw conflict("NEED_WITHDRAW", "审批已开始，请先申请撤回再修改内容");
+        }
+        return node;
+    }
+
+    private Map<String, Object> requireUploaderNode(Long flowId, String message) {
+        Map<String, Object> node = currentActiveNode(flowId);
+        if (node == null || !NODE_UPLOADER.equals(node.get("node_key"))) {
+            throw conflict("INVALID_STATE", message);
+        }
+        return node;
+    }
+
+    /** 案件当前 RUNNING 轮次，行锁。 */
+    private Map<String, Object> requireRunningFlowOfCase(Long caseId) {
+        List<Map<String, Object>> rows = jdbc.queryForList("""
+                SELECT * FROM contract_flow WHERE case_id=? AND state=? FOR UPDATE
+                """, caseId, FLOW_RUNNING);
+        if (rows.isEmpty()) {
+            throw conflict("NO_RUNNING_FLOW", "该案件没有进行中的流程");
+        }
+        if (rows.size() > 1) {
+            throw new IllegalStateException("案件 " + caseId + " 存在 " + rows.size()
+                    + " 个 RUNNING 轮次，违反唯一不变量");
+        }
+        return rows.get(0);
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> parseJsonMap(String json) {
+        if (json == null || json.isBlank() || "{}".equals(json)) {
+            return new LinkedHashMap<>();
+        }
+        try {
+            return JSON.readValue(json, LinkedHashMap.class);
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("baseline_json 解析失败", e);
+        }
+    }
+
     /** 候选组成员 user_id 列表（含 ADMIN 兜底）。 */
     public List<Long> candidates(Long flowId, String nodeKey) {
         Long caseId = caseIdOf(flowId);
@@ -719,19 +922,30 @@ public class ContractFlowService {
     }
 
     private void requireConfirmations(Long flowId) {
-        Long lastRerun = jdbc.queryForObject("""
-                SELECT COALESCE(MAX(id),0) FROM contract_flow_event
-                WHERE flow_id=? AND event_type=?
-                """, Long.class, flowId, EV_AGENT_RERUN);
+        long invalidatedAfter = lastConfirmationInvalidationId(flowId);
         for (String type : List.of(EV_CONFIRM_ELEMENTS, EV_CONFIRM_TIMELINE)) {
             Integer count = jdbc.queryForObject("""
                     SELECT COUNT(*) FROM contract_flow_event
                     WHERE flow_id=? AND event_type=? AND id>?
-                    """, Integer.class, flowId, type, lastRerun == null ? 0L : lastRerun);
+                    """, Integer.class, flowId, type, invalidatedAfter);
             if (count == null || count == 0) {
                 throw conflict("CONFIRMATION_REQUIRED", "请先确认合同要素和履约日程");
             }
         }
+    }
+
+    /**
+     * 确认事件的失效水位（§2.7 第 4 步：内容变更后旧的 CONFIRM_* 作废）。
+     *
+     * <p>取 {@code AGENT_RERUN} 与 {@code EDIT} 两类事件的最大 id：
+     * 早于该水位写入的确认不再有效，必须重新确认。
+     */
+    private long lastConfirmationInvalidationId(Long flowId) {
+        Long max = jdbc.queryForObject("""
+                SELECT COALESCE(MAX(id),0) FROM contract_flow_event
+                WHERE flow_id=? AND event_type IN (?,?)
+                """, Long.class, flowId, EV_AGENT_RERUN, EV_EDIT);
+        return max == null ? 0L : max;
     }
 
     /**
