@@ -1,7 +1,7 @@
-# 二期技术设计（v0.5）
+# 二期技术设计（v0.6）
 
 > 日期：2026-10-30
-> 状态：**可开工**（19 项决策；第 1~2 步已实现并自检通过，v0.5 补 UPLOADER 回落规则与新轮建链方式）
+> 状态：**可开工**（24 项决策；第 1~2 步已实现并自检通过，v0.6 补第 3 步的 5 个待定点）
 > 上游：业务模型见 [phase-2-approval.md](./phase-2-approval.md) §3；本文只解决"怎么落地"
 > 前提：金额阈值已废弃——**所有合同都必须经法务**；老案件不迁移；节点链线性无分支
 
@@ -200,11 +200,25 @@ holder 为空 → 待认领，展示候选组
 
 **查询实现**（不缓存）：
 
-- 里程碑：`WHERE flow_id=? AND event_type IN ('CONFIRM_ELEMENTS','CONFIRM_TIMELINE','ENTER','SIGN_UPLOAD','COMPLETE')`，配合 `(flow_id, event_type)` 索引，结果 ≤ 8 行
-- 事件列表：游标分页 `WHERE flow_id=? AND id < ? ORDER BY id DESC LIMIT 50`
+- 里程碑：`WHERE flow_id=? AND event_type IN ('CONFIRM_ELEMENTS','CONFIRM_TIMELINE','ENTER','AGENT_RUN','APPROVE','SIGN_UPLOAD','COMPLETE')`，配合 `(flow_id, event_type)` 索引，结果 ≤ 20 行
+- 事件列表：游标分页 `WHERE flow_id=? AND (created_at, id) < (?, ?) ORDER BY created_at DESC, id DESC LIMIT 50`
 - 索引：`KEY idx_flow_type (flow_id, event_type, id)`
 
-里程碑推导：`CONFIRM_ELEMENTS` → ③ 完成；`CONFIRM_TIMELINE` → ④ 完成；`ENTER(DEPT_APPROVAL)` → ⑤ 开始；`ENTER(LEGAL_APPROVAL)` → ⑤ 审批中；`SIGN_UPLOAD` → ⑥ 开始；`COMPLETE` → ⑥ 完成。
+里程碑推导（**①② 不走事件**，沿用 [phase-1-workflow-view.md](./phase-1-workflow-view.md) §② 的口径）：
+
+| 阶段 | 数据源 | 规则 |
+| --- | --- | --- |
+| ① 受理建档 | `contract_case` + 是否有主文档 | 一期口径：无主文档 → `WAITING_HUMAN`；有 → `DONE` |
+| ② 解析就绪 | `contract_document.parse_status` | PENDING/PARSING → `ACTIVE`；FAILED → `BLOCKED(PARSE_FAILED)`；READY 且低质量 → `BLOCKED(QUALITY_LOW)`；READY → `DONE` |
+| ③ 要素确认 | 事件 `CONFIRM_ELEMENTS` | 出现即 `DONE` |
+| ④ 日程确认 | 事件 `CONFIRM_TIMELINE` | 出现即 `DONE` |
+| ⑤ 风险处置 | 事件 `AGENT_RUN` / `ENTER(DEPT_APPROVAL)` / `ENTER(LEGAL_APPROVAL)` / `APPROVE(LEGAL_APPROVAL)` | 见下表 |
+| ⑥ 签署 | 事件 `SIGN_UPLOAD` / `COMPLETE` | SIGN_UPLOAD → `ACTIVE`；COMPLETE → `DONE` |
+| ⑦ 履约 / ⑧ 归档 | `contract_case.status` + `expiry_date` | 一期口径，标记 `inactive` |
+
+**为什么不把 ①② 也从事件推**：`parse_status=FAILED` 和解析低质量都是**需要人介入的异常**，如果按"能走到 agent 就等于解析完了"处理，前端就看不到 `PARSE_FAILED`，重试入口会消失。
+
+代价：timeline 接口多一次 `contract_document` 查询（按 case_id 取主文档）。可接受。
 
 **⑤ 的边界（2026-10-30 定）**：
 
@@ -217,7 +231,7 @@ holder 为空 → 待认领，展示候选组
 
 不采用"agent 一开始跑就亮 ⑤"——agent 跑在 ③④ 确认之前，会让进度条倒流。
 
-**⑦⑧ 的数据源（2026-10-30 定）**：flow 里程碑只覆盖 ①~⑥。⑦ 履约、⑧ 归档继续读 `contract_case.status` + `expiry_date`（一期口径），二期不补 `FULFILLMENT_START` / `ARCHIVE` 事件——那属于三期。前端把 ⑦⑧ 显示为灰色未激活刻度，悬浮提示"由案件状态跟踪，暂未纳入流程"。
+**⑦⑧ 的数据源（2026-10-30 定）**：flow 只产出 **③~⑥** 的里程碑；**①② 读案件/文档状态**（见上表），⑦ 履约、⑧ 归档继续读 `contract_case.status` + `expiry_date`（一期口径），二期不补 `FULFILLMENT_START` / `ARCHIVE` 事件——那属于三期。前端把 ⑦⑧ 显示为灰色未激活刻度，悬浮提示"由案件状态跟踪，暂未纳入流程"。
 
 ### 2.4 取消判定
 
@@ -279,7 +293,8 @@ WITHDRAW_REQUEST(by=user, target_node):
 ```
 EDIT(实质字段):
   1. 写事件 EDIT（diff 摘要）
-  2. 生成新版本（contract_document.version + 1），flow.version_id 不更新，改为开新轮
+  2. 生成新版本（`contract_document.version` + 1），`flow.version_id` 更新为新版本
+     （此时尚无审批结论，改版本不产生歧义；若已有审批通过，见步骤 5，走撤回而不是直接改）
   3. 当前 AGENT 节点 state=PENDING，写 AGENT_RERUN
   4. UPLOADER 节点的 CONFIRM_ELEMENTS / CONFIRM_TIMELINE 作废，需重新确认
   5. 若修改发生在审批之后 → 走撤回流程，不直接改
@@ -292,7 +307,7 @@ EDIT(实质字段):
 | 触发 | 判定方法 |
 | --- | --- |
 | 新版本 | `contract_document` 新增 `version`，且 `storage_status='AVAILABLE'` |
-| 内容变更 | 重新计算文档内容哈希，与 `flow.version_id` 对应哈希不同 |
+| 内容变更 | **`baseline_json` 与当前要素比对**：命中 §2.8 的 7 个实质字段才算变更 |
 
 **执行规则**：
 
@@ -359,6 +374,7 @@ onContractChanged(flowId):
 | **认领乐观锁** | `UPDATE contract_flow_node SET assignee_id=?, state='CLAIMED' WHERE id=? AND state='PENDING' AND assignee_id IS NULL`；影响行数 0 → `409 ALREADY_CLAIMED` |
 | **审批类动作加行锁** | `SELECT ... FROM contract_flow_node WHERE id=? FOR UPDATE`，再做状态校验 |
 | **事件唯一性** | `UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)`，`ref_id` 存 `agent_run_id` / `withdraw_id` 等，防重试重复写 |
+| **确认幂等** | `CONFIRM_*` 的 `ref_id` 为 NULL，唯一键对它不生效 → 幂等必须由代码保证，见 §3.2 |
 
 因此 `contract_flow_event` 增加一列：
 
@@ -386,8 +402,8 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | POST | `/api/flows/sign-checks/{id}/decide` | 签署核对结论，body: `{decision}` |
 | POST | `/api/flows/cases/{caseId}/confirm-elements` | 上传人确认要素，写 `CONFIRM_ELEMENTS` |
 | POST | `/api/flows/cases/{caseId}/confirm-timeline` | 上传人确认日程，写 `CONFIRM_TIMELINE` |
-| POST | `/api/flows/cases/{caseId}/edit` | 修改实质字段，写 `EDIT`，触发 `AGENT_RERUN` |
-| POST | `/api/flows/cases/{caseId}/version` | 上传新版本 / 切换版本，写 `UPLOAD` / `VERSION_SWITCH` |
+| POST | `/api/flows/cases/{caseId}/edit` | 修改实质字段，body `{changes, reason}`，见 §3.2 |
+| POST | `/api/flows/cases/{caseId}/version` | 登记版本切换，body `{documentId}`，见 §3.2 |
 
 **兼容**：一期 `GET /contracts/{caseId}/workflow` 保留，内部改为读 flow 派生，字段不变。
 
@@ -401,6 +417,43 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | **第 5 步** | `claim`（含 force）、`release`、`approve`、`return`、`withdraw`、`withdraws/{id}/decide`、`cancel`、`agent-rerun` |
 
 第 3 步之所以要带 `confirm-*` / `edit` / `version`：**没有它们，时间轴里 `CONFIRM_*`、`EDIT`、`UPLOAD` 三类事件在真实环境永远是空的**，页面做出来是个空壳。
+
+### 3.2 接口语义约定（2026-10-30 定）
+
+**`version` 只管登记切换，不建文档版本**
+
+- 文件上传继续走一期已有的文档接口，`contract_document.version` 只由 Python 解析流水线写
+- 本接口收 `{documentId}`：校验文档属于该案件 → 写 `UPLOAD`（首次）或 `VERSION_SWITCH`（换版）→ 更新 `flow.version_id`
+- **不在此接口里新建 `contract_document` 记录**，避免两处同时管版本号
+
+**`edit` 由后端比对，前端不提交 diff**
+
+```json
+{ "changes": { "amount": "450000", "endDate": "2027-01-01" }, "reason": "客户砍价" }
+```
+
+```
+1. 读 flow.baseline_json，逐字段比对 changes
+2. 命中 7 个实质字段（金额/币种/甲乙方/起止日期/付款条款/违约责任/责任上限）
+   → 写 EDIT（含 diff 摘要）+ 生成新版本 + AGENT_RERUN + 作废 CONFIRM_*
+3. 未命中 → 只写 EDIT，不重跑、不作废确认
+```
+
+判定放后端的原因：前端算 diff 等于把"什么算实质变更"这条业务规则下放到浏览器，且与 §2.8 的幂等冲突。
+
+**`confirm-*` 幂等**
+
+- 判据：该轮该节点已有 `CONFIRM_ELEMENTS`/`CONFIRM_TIMELINE`，且其后**没有** `AGENT_RERUN` / `EDIT` → 直接返回 200 + 当前状态，**不写新事件**
+- agent 重跑后需要重新确认，那是**新的**确认，照常写
+- 理由：同一人连点两次按钮不该产生两条同样的审计记录；重复项本身就是噪音
+- 注意：`CONFIRM_*` 的 `ref_id` 为 NULL，`uk_event` 对此不生效，所以这条幂等**必须由代码保证**，不能指望数据库
+
+**`timeline` 默认返回全部轮次**
+
+- 默认跨轮返回，按 `round_no` 分组；`?round=N` 只取某轮
+- 游标 `(created_at, id)`：跨轮天然有序，时间单调递增，不必为跨轮改游标
+- **里程碑只算当前轮**，历史轮只返回事件
+- 边界：`limit` 可能截在某一轮中间 → 前端渲染"已加载的轮完整、最后一轮不完整"，尾部显示「加载更多」
 
 ## 4. 签署件比对规则
 
@@ -502,6 +555,11 @@ UNIQUE KEY uk_event (flow_id, node_id, event_type, ref_id)
 | 17 | 第 3 步范围 | **追加 `confirm-*` / `edit` / `version` 四个接口** | 否则时间轴里三类事件永远无数据 |
 | 18 | 撤回新轮的节点链 | **只从 `start_node` 建起，不建前置节点** | 前置节点在新轮标 `DONE` 会导致 `done_at` 造假或为空 |
 | 19 | 事件分页游标 | **`(created_at, id)` 联合游标**，不用单列 `id` | 同一秒多事件（批量写入）按 `id` 翻页会漏页或重页 |
+| 20 | ①② 里程碑数据源 | **沿用一期口径**（案件主文档 + `parse_status`），不从 flow 事件推 | 从事件推会吞掉 `PARSE_FAILED` / 低质量，前端重试入口消失 |
+| 21 | `version` 接口职责 | **只登记切换，不建文档版本** | 两处同时管 `contract_document.version` 必然打架；版本号只由 Python 写 |
+| 22 | `edit` 的 diff 判定 | **后端比对 `baseline_json`**；§2.8 的"文档内容哈希"废弃 | 前端算 diff 等于把业务规则下放浏览器；PDF 重生成会改文件哈希，错别字也触发重跑 |
+| 23 | `confirm-*` 幂等 | **做幂等**：同轮同节点已确认且其后无 `AGENT_RERUN`/`EDIT` → 直接返回成功 | 连点两次不该产生两条一样的审计记录；`ref_id` 为 NULL 时唯一键管不住 |
+| 24 | `timeline` 跨轮 | **默认返回全部轮次并按轮分组**，`?round=N` 过滤；里程碑只算当前轮 | 前端按轮分组，分两次请求反而要自己拼；游标天然有序 |
 
 ### 遗留待定
 
