@@ -1,7 +1,70 @@
 # 二期实施记录
 
-> 分支：`feat/phase-2-flow`（第一步起所有步骤同分支）
+> 分支：`feat/phase-2-flow`（第一步起所有步骤同分支，**不许落到 master**）
 > 上游设计：[phase-2-approval.md](./phase-2-approval.md) / [phase-2-design.md](./phase-2-design.md) / [phase-2-frontend.md](./phase-2-frontend.md)
+> 交接须知总入口：[HANDOVER.md](./HANDOVER.md) §0
+
+---
+
+## 交接速览（2026-10-31，给接手的人或 Agent）
+
+### 当前进度
+
+| 步骤 | 内容 | 状态 |
+| --- | --- | --- |
+| 第 1 步 | 6 张流程表 + 2 张审批人表迁移（V041）+ 种子 | ✅ 已完成 |
+| 第 2 步 | 实体 / Mapper / `ContractFlowService` 核心动作 | ✅ 已完成 |
+| 第 2.5 步 | design v0.4（决策 13~17）/ v0.5（决策 14 收窄、18、19）落地 | ✅ 已完成 |
+| 第 3 步 | 里程碑派生 + timeline 游标 + confirm-*/edit/version + 查询接口 | ✅ 已完成（commit `f42e20b`，已推送） |
+| 第 4 步 | 签署件核对：`contract_sign_check` + `SIGN_*` 事件 | ⬜ 未开始 |
+| 第 5 步 | `flow_notification` + dept_approver / flow_role_member 两个配置页 API | ⬜ 未开始 |
+
+第 4 步验收口径（设计已定，不要重开讨论）：核对 5 项——文件哈希、页数、条款编号、关键字段、相似度阈值 98%；**agent 永远不裁决 MATCH**，MATCH 只能由人确认；结果写 `contract_sign_check` 并落 `SIGN_CHECK` 事件。
+
+第 5 步除两张配置表外，还要把第 2 步已实现但未暴露的写接口挂到 Controller：claim（含 `force`）/ release / approve / return / withdraw / `withdraws/{id}/decide` / cancel / agent-rerun。
+
+### 工作方式（沿用，勿改）
+
+1. 每完成一步：跑测试 → commit（message 写清第几步）→ **停下来汇报，等确认再下一步**。
+2. 有歧义先报差异、给方案，不要边改边猜。
+3. 全部二期工作只在 `feat/phase-2-flow` 分支；`contract_analysis_workflow` 分支不合并。
+
+### 怎么跑测试（本机已验证的方式）
+
+```bash
+cd agent-server
+# Maven wrapper 在本机拉不到依赖，用本地缓存的 Maven + 离线模式
+MVN=$(ls -d ~/.m2/wrapper/dists/apache-maven-3.9.9-bin/*/apache-maven-3.9.9/bin/mvn)
+FLOW_TEST_JDBC_URL="jdbc:mysql://localhost:3306/flow_test?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai" \
+FLOW_TEST_JDBC_USER=root FLOW_TEST_JDBC_PASSWORD=123456 \
+"$MVN" -o test
+```
+
+- 流程测试需要**真 MySQL**（执行线上迁移 V041，不用 H2 替身）；本机先建空库 `flow_test`。
+- 有 Docker 时 Testcontainers 是默认路径，无需上述环境变量。
+- 当前基线：全量后端 129 个测试，0 失败（第 3 步收口时）。
+
+### 二期红线（违反即返工）
+
+1. 不改一期已上线的 `WorkflowStrip.vue`；`flow_v2_enabled` 开关保留，二期页面走新组件。
+2. 审批动作**不得写 `contract_case.status`**（案件状态仍是既有状态机的职责）。
+3. 节点状态变更与事件写入必须在**同一个事务**；不允许 `catch (Exception ignored)`。
+4. 认领用乐观锁：条件 UPDATE 影响 0 行 → 409 `ALREADY_CLAIMED`。
+5. 不手改已应用的迁移（V041 已在库上）；要改就新建 V042+。
+6. `contract_flow_event.node_id` 为 NOT NULL，任何事件必须挂节点。
+7. 前端 `ContractCaseView.vue` 有 4240 行，**不要整读**，用 grep 定位片段。
+8. 远程已切 SSH（`git@github.com:DayDayUpStudyHard/AtlasMind-Agent-Workbench.git`），HTTPS 直连不通。
+
+### 代码入口
+
+| 想改什么 | 先看 |
+| --- | --- |
+| 流程动作 / 不变量 | `agent-server/.../service/ContractFlowService.java` |
+| 时间轴 / 里程碑 | `agent-server/.../service/FlowTimelineService.java` |
+| 流程接口 | `agent-server/.../controller/ContractFlowController.java` |
+| 异常原因码 → HTTP | `service/ContractFlowException.java` + `common/GlobalExceptionHandler.java` |
+| 枚举真源（节点/状态/事件/角色） | `service/ContractFlowConstants.java` |
+| 表结构 | `tools/chat-assistant/backend/migrations/V041__contract_flow.sql` |
 
 ---
 

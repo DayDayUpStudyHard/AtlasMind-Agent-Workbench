@@ -2,16 +2,36 @@
 
 > 目的：让一个**没有参与过讨论**的人或 Agent，能独立完成一期，而不需要猜。
 > 读完本文再读 [phase-1-workflow-view.md](./phase-1-workflow-view.md)。
-> **不要读 phase-2 / phase-3** —— 它们是草案，里面的"建议默认值"是留给人拍板的，不是给你的施工图。
-> 当前进度：一期已续实施并完成本地分层验收。接手时先读 [实施记录](./implementation-phase-1.md) 末尾带时间的最新追加节；原始“未编译、未验收”段落是保留的历史记录。
+> **二期正在实施中**：一期部分照旧；二期部分读 [implementation-phase-2.md](./implementation-phase-2.md) 开头的「交接速览」+ 三份 phase-2 设计文档（此时它们已是定稿施工图，不再是草案；phase-3 仍不要读）。
+> 一期进度：已续实施并完成本地分层验收，见 [实施记录](./implementation-phase-1.md) 末尾带时间的最新追加节。
+> 二期进度（2026-10-31）：第 1~3 步已完成并推送，第 4 步（签署件核对）、第 5 步（通知 + 配置页 API）未开始，详见 [implementation-phase-2.md](./implementation-phase-2.md)「交接速览」。
 
 ---
 
-## 1. 只读三份就够
+## 0. 二期交接速览（2026-10-31）
+
+详细版在 [implementation-phase-2.md](./implementation-phase-2.md) 开头，这里只放接手第一分钟必须知道的：
+
+| 项 | 值 |
+| --- | --- |
+| 分支 | `feat/phase-2-flow`（一期在 master，**二期全部工作只在这个分支**） |
+| 已完成 | 表迁移 V041 + 流程核心服务 + 时间轴/内容动作/查询接口（第 1~3 步，commit `f42e20b` 已推送） |
+| 未开始 | 第 4 步签署件核对（5 项核对、agent 不裁决 MATCH）；第 5 步通知表 + dept_approver / flow_role_member 配置页 API + 补齐剩余写接口 |
+| 测试方式 | 真 MySQL（本机建 `flow_test` 库），命令见 implementation-phase-2.md「怎么跑测试」；Maven wrapper 本机不可用，用 `~/.m2/wrapper/dists/` 里的 Maven `-o` |
+| 当前基线 | 全量后端 129 个测试，0 失败 |
+| 设计定稿 | [phase-2-design.md](./phase-2-design.md) v0.5（决策 13~19 全部落库落地） |
+
+二期红线（完整版见 implementation-phase-2.md）：不改一期 `WorkflowStrip.vue`；审批不写 `contract_case.status`；状态变更与事件同事务；不吞异常；认领乐观锁 0 行→409；不手改已应用的迁移；`ContractCaseView.vue` 4240 行不要整读。
+
+工作方式：每步「实现 → 跑测试 → commit（写明第几步）→ 汇报等确认」；有歧义先停下报差异，不要边改边猜。
+
+## 1. 只读三份就够（一期）
 
 1. 本文件（怎么跑、怎么验、红线在哪）
 2. [README.md](./README.md) §4 —— 阶段与状态的**唯一枚举真源**
 3. [phase-1-workflow-view.md](./phase-1-workflow-view.md) —— 一期施工图
+
+二期接手另读四份：本文件 §0 → [implementation-phase-2.md](./implementation-phase-2.md)（交接速览 + 逐步实施记录）→ [phase-2-design.md](./phase-2-design.md) / [phase-2-approval.md](./phase-2-approval.md) / [phase-2-frontend.md](./phase-2-frontend.md)。
 
 业务背景看 [../prd-contract-case-lifecycle.md](../prd-contract-case-lifecycle.md)，但**不要**据此扩大范围。
 
@@ -130,6 +150,8 @@ LLM、Embedding、Reranker 或 Elasticsearch 任一不可用时，系统会记�
 6. **`contract_obligation` 目前几乎没数据**（只有一处手写 INSERT），看到履约 KPI 是 0 不是 bug，是已知缺口。
 7. **⑤ 的"待审批"状态目前不可达**（`PENDING_APPROVAL` 的唯一写入点要求先处于 `NEEDS_REVISION`，而后者只能从 `PENDING_APPROVAL` 退回）。一期只显示"审批功能建设中"，**不要顺手去修**，修复是二期的活。
 8. **`enteredAt` 一期只填 ①②**（案件创建、合同上传），③~⑧ 返回 `null` 且前端不显示"已停留"。不要为了方便去猜 run 开始时间——那是二期阶段事件的事。
+9. **本机 `mvnw` 拉不到 wrapper 依赖**（curl 断连），用 `~/.m2/wrapper/dists/apache-maven-3.9.9-bin/*/apache-maven-3.9.9/bin/mvn -o`；二期流程测试还要 `FLOW_TEST_JDBC_*` 指向本地真 MySQL（见 implementation-phase-2.md）。
+10. **远程 origin 已切 SSH**（`git@github.com:...`）。HTTPS 直连 GitHub 在本机不通；SSH 密钥 `~/.ssh/id_ed25519` 已加入账号（2026-10-31）。
 
 ## 8. 交付前自检
 
